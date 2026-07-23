@@ -888,7 +888,7 @@ impl COCO {
                 crowd_count: cat_crowd_counts.get(&cat.id).copied().unwrap_or(0),
             })
             .collect();
-        per_category.sort_by(|a, b| b.ann_count.cmp(&a.ann_count));
+        per_category.sort_by_key(|b| std::cmp::Reverse(b.ann_count));
 
         DatasetStats {
             image_count: self.dataset.images.len(),

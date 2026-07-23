@@ -413,7 +413,7 @@ fn parse_voc_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedVocImage, Conve
                     obj_name = text.to_string();
                 } else if in_bndbox {
                     let val: i64 = text.parse().map_err(|_| {
-                        ConvertError::ParseError(format!("invalid bbox coordinate: {text}",))
+                        ConvertError::ParseError(format!("invalid bbox coordinate: {text}"))
                     })?;
                     match current_tag.as_slice() {
                         b"xmin" => xmin = val,

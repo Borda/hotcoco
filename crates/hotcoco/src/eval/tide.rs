@@ -329,10 +329,8 @@ impl COCOeval {
                                 covered_gt_ann_ids.insert(argmax_same_gt_ann_id);
                             }
                         }
-                        ErrType::Cls => {
-                            if argmax_cross_gt_ann_id != u64::MAX {
-                                covered_gt_ann_ids.insert(argmax_cross_gt_ann_id);
-                            }
+                        ErrType::Cls if argmax_cross_gt_ann_id != u64::MAX => {
+                            covered_gt_ann_ids.insert(argmax_cross_gt_ann_id);
                         }
                         _ => {}
                     }
