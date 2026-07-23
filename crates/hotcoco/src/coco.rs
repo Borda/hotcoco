@@ -2,6 +2,7 @@
 //!
 //! Faithful port of `pycocotools/coco.py`.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -28,12 +29,145 @@ pub struct COCO {
     img_cat_to_anns: HashMap<(u64, u64), Vec<u64>>,
 }
 
+/// Normalize non-finite JSON float tokens (`NaN`, `Infinity`, `-Infinity`) to
+/// `null`, matching the leniency of Python's `json` module.
+///
+/// Python emits these bare tokens by default and reads them back, so files
+/// produced by pycocotools / numpy pipelines frequently contain them, even
+/// though they are not valid JSON. serde_json (correctly) rejects them. To load
+/// such files we rewrite each non-finite token to `null` — which serde also
+/// uses when *serializing* a non-finite `f64` — but only when the token appears
+/// outside a JSON string, so string values that merely contain the substring
+/// `"NaN"`/`"Infinity"` (e.g. a file name) are left untouched. On `Option<f64>`
+/// fields (`area`, `score`) the `null` deserializes to `None`.
+///
+/// Returns the input unchanged and borrowed (no allocation) when it contains no
+/// such tokens, so the common case pays only a single linear scan. The second
+/// element is the number of tokens rewritten.
+fn sanitize_non_finite(input: &[u8]) -> (Cow<'_, [u8]>, usize) {
+    let n = input.len();
+    let mut out: Option<Vec<u8>> = None;
+    let mut count = 0usize;
+    let mut in_string = false;
+    let mut i = 0;
+
+    while i < n {
+        let b = input[i];
+
+        if in_string {
+            if b == b'\\' {
+                // Copy the backslash and the escaped byte verbatim so an
+                // escaped quote (`\"`) does not toggle the string state.
+                if let Some(o) = out.as_mut() {
+                    o.push(b);
+                    if i + 1 < n {
+                        o.push(input[i + 1]);
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_string = false;
+            }
+            if let Some(o) = out.as_mut() {
+                o.push(b);
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'"' {
+            in_string = true;
+            if let Some(o) = out.as_mut() {
+                o.push(b);
+            }
+            i += 1;
+            continue;
+        }
+
+        // Outside a string, the only bare identifier-like tokens are
+        // true/false/null and the non-finite floats we rewrite here. Gate the
+        // substring comparisons on the first byte so the common case (digits,
+        // punctuation, whitespace) skips them entirely.
+        let token_len = match b {
+            b'N' if input[i..].starts_with(b"NaN") => Some(3),
+            b'I' if input[i..].starts_with(b"Infinity") => Some(8),
+            b'-' if input[i..].starts_with(b"-Infinity") => Some(9),
+            _ => None,
+        };
+
+        if let Some(len) = token_len {
+            let o = out.get_or_insert_with(|| {
+                let mut v = Vec::with_capacity(n);
+                v.extend_from_slice(&input[..i]);
+                v
+            });
+            o.extend_from_slice(b"null");
+            count += 1;
+            i += len;
+            continue;
+        }
+
+        if let Some(o) = out.as_mut() {
+            o.push(b);
+        }
+        i += 1;
+    }
+
+    match out {
+        Some(v) => (Cow::Owned(v), count),
+        None => (Cow::Borrowed(input), count),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod sanitize_tests {
+    use super::sanitize_non_finite;
+
+    fn run(s: &str) -> (String, usize) {
+        let (bytes, n) = sanitize_non_finite(s.as_bytes());
+        (String::from_utf8(bytes.into_owned()).unwrap(), n)
+    }
+
+    #[test]
+    fn clean_input_is_borrowed_unchanged() {
+        let input = br#"{"a": [1.0, -2.5], "b": null}"#;
+        let (bytes, n) = sanitize_non_finite(input);
+        assert_eq!(n, 0);
+        assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn rewrites_the_non_finite_family() {
+        let (out, n) = run(r#"{"a": NaN, "b": Infinity, "c": -Infinity, "d": -3.5}"#);
+        assert_eq!(n, 3);
+        // -3.5 (a real negative number) must be preserved, not mangled.
+        assert_eq!(out, r#"{"a": null, "b": null, "c": null, "d": -3.5}"#);
+    }
+
+    #[test]
+    fn leaves_non_finite_substrings_inside_strings_alone() {
+        // Strings containing the tokens — including an escaped quote — untouched.
+        let (out, n) = run(r#"{"name": "NaN and \"Infinity\"", "v": NaN}"#);
+        assert_eq!(n, 1);
+        assert_eq!(out, r#"{"name": "NaN and \"Infinity\"", "v": null}"#);
+    }
+}
+
 impl COCO {
     /// Load a COCO annotation JSON file and build indices.
     pub fn new(annotation_file: &Path) -> crate::error::Result<Self> {
-        let file = std::fs::File::open(annotation_file)?;
-        let reader = std::io::BufReader::new(file);
-        let dataset: Dataset = serde_json::from_reader(reader)?;
+        let raw = std::fs::read(annotation_file)?;
+        let (bytes, n_fixed) = sanitize_non_finite(&raw);
+        if n_fixed > 0 {
+            eprintln!(
+                "hotcoco: normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
+                annotation_file.display()
+            );
+        }
+        let dataset: Dataset = serde_json::from_slice(&bytes)?;
         Ok(Self::from_dataset(dataset))
     }
 
@@ -278,7 +412,14 @@ impl COCO {
     /// and categories from self.
     pub fn load_res(&self, res_file: &Path) -> crate::error::Result<COCO> {
         // Read once into memory so we can retry parsing without re-opening.
-        let bytes = std::fs::read(res_file)?;
+        let raw = std::fs::read(res_file)?;
+        let (bytes, n_fixed) = sanitize_non_finite(&raw);
+        if n_fixed > 0 {
+            eprintln!(
+                "hotcoco: normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
+                res_file.display()
+            );
+        }
 
         // Try to parse as array first, then as Dataset.
         let anns: Vec<Annotation> = match serde_json::from_slice::<Vec<Annotation>>(&bytes) {

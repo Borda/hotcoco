@@ -38,6 +38,47 @@ fn test_load_res() {
 }
 
 #[test]
+fn test_load_gt_tolerates_non_finite_floats() {
+    // Python's json module emits bare NaN/Infinity/-Infinity (non-standard JSON)
+    // and reads them back happily, so pycocotools accepts such files. serde_json
+    // rejects them ("expected value" / "invalid number"). hotcoco should tolerate
+    // them by normalizing non-finite values to null (-> None on Option<f64>),
+    // matching pycocotools — WITHOUT corrupting strings that merely contain the
+    // substring "Infinity"/"NaN".
+    let json = r#"{
+  "images": [
+    {"id": 1, "width": 100, "height": 100, "file_name": "Infinity_scan.jpg"}
+  ],
+  "annotations": [
+    {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10.0, 20.0, 30.0, 40.0], "area": NaN, "score": Infinity},
+    {"id": 2, "image_id": 1, "category_id": 1, "bbox": [1.0, 2.0, 3.0, 4.0], "area": 12.0, "score": -Infinity}
+  ],
+  "categories": [{"id": 1, "name": "thing"}]
+}"#;
+    let path = std::env::temp_dir().join("hotcoco_nan_gt_test.json");
+    std::fs::write(&path, json).expect("write temp fixture");
+
+    let coco = COCO::new(&path).expect("Failed to load GT with non-finite floats");
+
+    assert_eq!(coco.dataset.images.len(), 1);
+    assert_eq!(coco.dataset.annotations.len(), 2);
+    assert_eq!(coco.dataset.categories.len(), 1);
+
+    // Non-finite Option<f64> fields normalize to None.
+    let a0 = &coco.dataset.annotations[0];
+    assert_eq!(a0.area, None, "NaN area should become None");
+    assert_eq!(a0.score, None, "Infinity score should become None");
+    let a1 = &coco.dataset.annotations[1];
+    assert_eq!(a1.area, Some(12.0), "finite area must be preserved");
+    assert_eq!(a1.score, None, "-Infinity score should become None");
+
+    // A string value that merely contains "Infinity" must be left untouched.
+    assert_eq!(coco.dataset.images[0].file_name, "Infinity_scan.jpg");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn test_bbox_evaluation_runs() {
     let gt_path = fixtures_dir().join("gt.json");
     let dt_path = fixtures_dir().join("dt.json");

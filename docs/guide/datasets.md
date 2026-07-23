@@ -9,6 +9,14 @@ so you can chain filter → split → sample in a single expression.
     Run `coco.stats()` first to understand your dataset before reshaping it. See the
     [`stats` API reference](../api/coco.md#stats) for the full return structure.
 
+!!! note "Non-standard `NaN`/`Infinity` values"
+    Python's `json` module writes and reads bare `NaN`, `Infinity`, and `-Infinity`
+    values, so annotation files produced by pycocotools or numpy pipelines sometimes
+    contain them even though they are not valid JSON. `COCO(...)` tolerates these:
+    non-finite values are normalized to `null` on load (becoming `None` on fields like
+    `area` and `score`), matching pycocotools' behavior. A one-line notice is printed
+    reporting how many values were normalized.
+
 ---
 
 ## filter
