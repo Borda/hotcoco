@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Bumped `crossbeam-epoch` (→0.9.20), `rand` (→0.9.5), and `quick-xml` (→0.41) to clear RUSTSEC-2026-0204, -0097, -0194, and -0195 security advisories. The `pyo3`/`numpy` 0.28→0.29 upgrade (RUSTSEC-2026-0176/-0177) is deferred as a tracked task and temporarily ignored in `deny.toml`.
+
 ## [0.4.1] - 2026-07-23
 
 ### Fixed
