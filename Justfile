@@ -48,6 +48,11 @@ docs:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Dependency audit (advisories/licenses/bans) — matches the CI cargo-deny gate.
+# Requires cargo-deny: `cargo install cargo-deny`.
+audit:
+    cargo deny check
+
 # Format all Rust code
 fmt:
     cargo fmt --all
