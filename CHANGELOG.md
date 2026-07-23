@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+## [0.4.1] - 2026-07-23
+
+### Fixed
+
 - COCO JSON loading now tolerates non-standard `NaN`, `Infinity`, and `-Infinity` float tokens. Python's `json` module emits and accepts these by default, so files produced by pycocotools/numpy pipelines frequently contain them even though they are invalid JSON; serde_json previously rejected such files with an `expected value` error. `COCO::new` and `load_res` now normalize non-finite tokens to `null` (matching serde's own float serialization), which becomes `None` on `Option<f64>` fields such as `area` and `score`. String values that merely contain the substrings `NaN`/`Infinity` are left untouched. As part of this, `COCO::new` reads the file via `serde_json::from_slice` instead of `from_reader`.
 
 ## [0.4.0] - 2026-04-06
