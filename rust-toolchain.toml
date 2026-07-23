@@ -1,0 +1,11 @@
+# Pin the toolchain so local development and CI use the identical rustc/clippy
+# version. This prevents lint drift — a newer CI clippy flagging code that an
+# older local clippy passed (and vice versa). CI honors this file via
+# actions-rust-lang/setup-rust-toolchain.
+#
+# Bump `channel` manually on a cadence (the /ship skill nudges when it goes
+# stale). After bumping, run `cargo clippy --workspace --all-targets -- -D
+# warnings` locally and fix any newly-surfaced lints before committing.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
