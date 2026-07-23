@@ -11,9 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Upgraded `pyo3` and `numpy` from 0.28 to 0.29, which clears the RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (missing `Sync` bound on `PyCFunction::new_closure`) security advisories. The corresponding `deny.toml` ignores have been removed. No public Python API changes; the binding sources compiled unchanged against the 0.29 API.
+
 ### Fixed
 
-- Bumped `crossbeam-epoch` (→0.9.20), `rand` (→0.9.5), and `quick-xml` (→0.41) to clear RUSTSEC-2026-0204, -0097, -0194, and -0195 security advisories. The `pyo3`/`numpy` 0.28→0.29 upgrade (RUSTSEC-2026-0176/-0177) is deferred as a tracked task and temporarily ignored in `deny.toml`.
+- Bumped `crossbeam-epoch` (→0.9.20), `rand` (→0.9.5), and `quick-xml` (→0.41) to clear RUSTSEC-2026-0204, -0097, -0194, and -0195 security advisories.
 
 ## [0.4.1] - 2026-07-23
 
