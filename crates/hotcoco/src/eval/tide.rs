@@ -49,7 +49,8 @@ impl COCOeval {
             fp[d] += fp[d - 1];
         }
 
-        let (_, curve) = super::accumulate::precision_recall_curve(&tp, &fp, num_gt, rec_thrs);
+        let (_, curve) =
+            crate::primitives::counts::precision_recall_curve(&tp, &fp, num_gt, rec_thrs);
         curve.iter().map(|(_, pr, _)| pr).sum::<f64>() / rec_thrs.len() as f64
     }
 

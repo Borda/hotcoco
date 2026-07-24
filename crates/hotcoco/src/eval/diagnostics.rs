@@ -124,7 +124,7 @@ fn bbox_iou(a: [f64; 4], b: [f64; 4]) -> f64 {
 /// Compute AP from detections for a single image given the GT count.
 ///
 /// Reuses the standard COCO 101-point interpolation with monotone precision correction
-/// via [`super::accumulate::precision_recall_curve`].
+/// via [`crate::primitives::counts::precision_recall_curve`].
 ///
 /// `detections` is `(score, is_tp)` sorted by score descending.
 /// `n_gt` is the total number of non-ignored GT annotations for this image.
@@ -150,8 +150,12 @@ fn compute_image_ap(detections: &[(f64, bool)], n_gt: u32) -> f64 {
     }
 
     let rec_thrs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
-    let (_final_recall, points) =
-        super::accumulate::precision_recall_curve(&tp_cum, &fp_cum, n_gt as usize, &rec_thrs);
+    let (_final_recall, points) = crate::primitives::counts::precision_recall_curve(
+        &tp_cum,
+        &fp_cum,
+        n_gt as usize,
+        &rec_thrs,
+    );
 
     // AP = mean precision at the 101 recall thresholds (unreached thresholds contribute 0)
     let sum: f64 = points.iter().map(|&(_, prec, _)| prec).sum();

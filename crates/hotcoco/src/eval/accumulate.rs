@@ -7,60 +7,6 @@ use crate::params::Params;
 use super::COCOeval;
 use super::types::{AccumulatedEval, EvalImg, EvalShape};
 
-/// Compute precision interpolated at fixed recall thresholds from cumulative TP/FP arrays.
-///
-/// `tp_cum` and `fp_cum` must already be cumulative (prefix-summed) and sorted by score
-/// descending. Returns:
-/// - the final recall achieved (`tp_cum[nd-1] / num_gt`)
-/// - for each recall threshold that is reached: `(threshold_idx, precision, detection_ptr)`
-///   where `detection_ptr` is the index into `tp_cum`/`fp_cum` where the threshold is first
-///   met (useful for recovering the corresponding sorted score from the caller).
-///
-/// Unreachable recall thresholds are omitted from the output.
-pub(super) fn precision_recall_curve(
-    tp_cum: &[f64],
-    fp_cum: &[f64],
-    num_gt: usize,
-    rec_thrs: &[f64],
-) -> (f64, Vec<(usize, f64, usize)>) {
-    let nd = tp_cum.len();
-    if nd == 0 || num_gt == 0 {
-        return (0.0, vec![]);
-    }
-
-    let num_gt_f = num_gt as f64;
-
-    // Recall and precision at each detection rank.
-    let mut rc = vec![0.0f64; nd];
-    let mut pr = vec![0.0f64; nd];
-    for d in 0..nd {
-        rc[d] = tp_cum[d] / num_gt_f;
-        let total = tp_cum[d] + fp_cum[d];
-        pr[d] = if total > 0.0 { tp_cum[d] / total } else { 0.0 };
-    }
-
-    let final_recall = rc[nd - 1];
-
-    // Make precision monotonically non-increasing from right to left (PASCAL VOC interpolation).
-    for d in (0..nd.saturating_sub(1)).rev() {
-        pr[d] = pr[d].max(pr[d + 1]);
-    }
-
-    // Two-pointer scan: map pr onto fixed recall thresholds.
-    let mut result = Vec::with_capacity(rec_thrs.len());
-    let mut rc_ptr = 0;
-    for (r_idx, &rec_thr) in rec_thrs.iter().enumerate() {
-        while rc_ptr < nd && rc[rc_ptr] < rec_thr {
-            rc_ptr += 1;
-        }
-        if rc_ptr < nd {
-            result.push((r_idx, pr[rc_ptr], rc_ptr));
-        }
-    }
-
-    (final_recall, result)
-}
-
 /// Accumulate per-image eval results into precision/recall arrays.
 ///
 /// When `img_filter` is `Some`, only eval_imgs whose `image_id` is in the set
@@ -242,8 +188,12 @@ pub(super) fn accumulate_impl(
                     fp[d] += fp[d - 1];
                 }
 
-                let (final_recall, curve) =
-                    precision_recall_curve(&tp, &fp, num_gt, &params.rec_thrs);
+                let (final_recall, curve) = crate::primitives::counts::precision_recall_curve(
+                    &tp,
+                    &fp,
+                    num_gt,
+                    &params.rec_thrs,
+                );
 
                 let recall_idx = shape.recall_idx(t_idx, k_idx, a_idx, m_idx);
                 recall_writes.push((recall_idx, final_recall));
