@@ -7,6 +7,7 @@ pub mod healthcheck;
 pub mod hierarchy;
 pub mod mask;
 pub mod params;
+pub mod primitives;
 pub mod types;
 
 pub use coco::COCO;
