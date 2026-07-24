@@ -12,10 +12,11 @@
 //! those families land.
 //!
 //! Submodules are added as each primitive is built:
-//! - [`sim`] — similarity kernels + the `SimKind` geometry axis (this slice).
-//! - `greedy` — COCO greedy matching (pycocotools-exact). *(pending)*
+//! - [`sim`] — similarity kernels + the `SimKind` geometry axis.
+//! - [`greedy`] — COCO greedy matching (pycocotools-exact).
 //! - `assign` — rectangular LSAP, semantic port of scipy. *(pending)*
 //! - `counts` — count structs, `GroupKey`, metric formulas, PR accumulator. *(pending)*
 //! - `report` — `EvalReport` (metrics + curves + params + provenance). *(pending)*
 
+pub mod greedy;
 pub mod sim;
