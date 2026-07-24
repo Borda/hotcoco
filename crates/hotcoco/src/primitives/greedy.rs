@@ -31,6 +31,13 @@ pub struct GreedyMatches {
 ///
 /// `gt_rematchable` and `gt_phase2_eligible` are length `g`.
 ///
+/// The matrix is flat (single allocation) rather than `sim`'s nested `[D][G]`
+/// because the matching loop is `T×D×G` and benefits from contiguous access.
+/// This doesn't conflict with the `sim` kernels' `[D][G]` output: a matcher
+/// always sits behind a reorder step (detections score-descending, GTs
+/// non-ignored-first), and that step is where the reordered flat matrix is
+/// produced — sim's raw output is never fed in directly.
+///
 /// # Algorithm (per IoU threshold, per detection in score order)
 /// Phase 1 scans non-ignored GTs for the highest-IoU available match `>= thr`.
 /// Only if phase 1 finds nothing does phase 2 scan the ignored GTs. A GT already

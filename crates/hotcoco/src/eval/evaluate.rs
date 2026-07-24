@@ -330,7 +330,9 @@ impl COCOeval {
         let mut dt_matches = vec![vec![0u64; d]; num_iou_thrs];
         let mut gt_matches = vec![vec![0u64; g]; num_iou_thrs];
         let mut dt_matched = vec![vec![false; d]; num_iou_thrs];
-        let mut gt_matched = vec![vec![false; g]; num_iou_thrs];
+        // Produced wholesale by greedy_match on the matched path, or all-false when
+        // there is no IoU data — bound in each branch below (avoids a discarded alloc).
+        let gt_matched: Vec<Vec<bool>>;
         // Initialize from dt_area_ignore so unmatched DTs have the correct ignore status
         // even when there are no GT annotations (iou_matrix is None).
         let mut dt_ignore_flags: Vec<Vec<bool>> =
@@ -357,8 +359,10 @@ impl COCOeval {
             // excluded from the fallback phase (matched in the separate pass below).
             let gt_rematchable: Vec<bool> =
                 (0..g).map(|gi| !is_oid && gt_iscrowd_sorted[gi]).collect();
+            // `is_oid` short-circuits, so gt_is_group_of_sorted (empty unless OID,
+            // length g when OID) is only indexed when the index is in bounds.
             let gt_phase2_eligible: Vec<bool> = (0..g)
-                .map(|gi| !(is_oid && gt_is_group_of_sorted.get(gi).copied().unwrap_or(false)))
+                .map(|gi| !(is_oid && gt_is_group_of_sorted[gi]))
                 .collect();
 
             let m = crate::primitives::greedy::greedy_match(
@@ -414,6 +418,9 @@ impl COCOeval {
                     }
                 }
             }
+        } else {
+            // No IoU data (no detections and/or no ground-truths): nothing matched.
+            gt_matched = vec![vec![false; g]; num_iou_thrs];
         }
 
         // LVIS: for not_exhaustive categories, mark all unmatched DTs as ignored
