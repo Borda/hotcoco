@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `COCOeval.eval` now includes the `params` and `date` keys, matching pycocotools'
+  dict exactly (`params`, `counts`, `date`, `precision`, `recall`, `scores` in that
+  order). `params` is the `Params` object used for evaluation; `date` uses
+  pycocotools' `'%Y-%m-%d %H:%M:%S'` format. Closes a Tier-1 drop-in gap vs
+  pycocotools. The numeric arrays are unchanged, so all metrics still match.
+
 ### Changed
 
 - Upgraded `pyo3` and `numpy` from 0.28 to 0.29, which clears the RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (missing `Sync` bound on `PyCFunction::new_closure`) security advisories. The corresponding `deny.toml` ignores have been removed. No public Python API changes; the binding sources compiled unchanged against the 0.29 API.
