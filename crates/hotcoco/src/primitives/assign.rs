@@ -67,9 +67,9 @@ impl<'a> Solver<'a> {
         for it in 0..nc {
             self.remaining[it] = nc - it - 1;
         }
-        self.sr.iter_mut().for_each(|x| *x = false);
-        self.sc.iter_mut().for_each(|x| *x = false);
-        self.shortest.iter_mut().for_each(|x| *x = f64::INFINITY);
+        self.sr.fill(false);
+        self.sc.fill(false);
+        self.shortest.fill(f64::INFINITY);
 
         let mut i = start;
         let mut sink = NONE;
@@ -165,23 +165,27 @@ pub fn lsap(cost: &[f64], nr: usize, nc: usize, maximize: bool) -> (Vec<usize>, 
     // Work on rows <= cols; transpose the cost matrix if the input is tall.
     let transpose = nc < nr;
     let (rn, cn) = if transpose { (nc, nr) } else { (nr, nc) };
-    let mut c = vec![0.0f64; rn * cn];
-    if transpose {
+    // Only allocate a working copy when the input must be transformed. Transpose
+    // needs a reordered buffer (fold the negation into the same pass); a plain
+    // maximize negates in one pass. The common minimize path borrows `cost`
+    // directly — no per-call nr*nc allocation (this runs at MOT scale).
+    let owned: Option<Vec<f64>> = if transpose {
+        let mut c = vec![0.0f64; rn * cn];
         for i in 0..nr {
             for j in 0..nc {
-                c[j * nr + i] = cost[i * nc + j];
+                let v = cost[i * nc + j];
+                c[j * nr + i] = if maximize { -v } else { v };
             }
         }
+        Some(c)
+    } else if maximize {
+        Some(cost.iter().map(|x| -x).collect())
     } else {
-        c.copy_from_slice(cost);
-    }
-    if maximize {
-        for x in &mut c {
-            *x = -*x;
-        }
-    }
+        None
+    };
+    let c: &[f64] = owned.as_deref().unwrap_or(cost);
 
-    let mut solver = Solver::new(&c, rn, cn);
+    let mut solver = Solver::new(c, rn, cn);
     solver.solve();
     let col4row = solver.col4row;
 
