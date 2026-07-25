@@ -61,6 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `primitives::assign::lsap` reported an infeasible cost matrix (a row with no finite
   entry) as a bare index-out-of-bounds panic in release builds, because the check was a
   `debug_assert!`. It now asserts with a message naming the cause, as scipy does.
+- Six README links pointed at documentation pages that do not exist and returned 404:
+  TIDE errors, confusion matrix, F-scores, and logging metrics are sections of
+  `guide/evaluation/`; format conversion is a section of `guide/datasets/`; the PyTorch
+  integrations page is at `api/integrations/`.
+- The Rust install snippet in `docs/getting-started/installation.md` still suggested
+  `hotcoco = "0.3"`.
+- The Objects365 sentence in `README.md` gave `39×` and `14×` in parentheses two lines
+  after stating that parenthesized speedups are versus pycocotools, though the `14×` is
+  versus faster-coco-eval. Both figures are unchanged; the baselines are now named.
 
 ## [0.4.1] - 2026-07-23
 
