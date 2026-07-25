@@ -3,7 +3,17 @@
 //! This slice provides the **detection rank-based PR accumulator**
 //! ([`precision_recall_curve`]) — the pycocotools/PASCAL-VOC precision-at-fixed-
 //! recall computation shared by detection's accumulate, TIDE, and diagnostics
-//! paths.
+//! paths — and [`average_precision`], the mechanical AP core layered on it
+//! (sort → classify → cumsum → interpolate → mean).
+//!
+//! # Empty-set conventions stay at the call site
+//!
+//! What AP *means* when there is no ground truth is a per-metric decision, not a
+//! mechanical one: TIDE reports `0.0` (a vacuous corpus AP), while per-image
+//! diagnostics reports `1.0` (an empty image with nothing predicted is
+//! legitimately perfect). These are different metrics, not drift, so the
+//! primitive takes no policy flag — callers guard `num_gt == 0` themselves and
+//! document why.
 //!
 //! The broader count vocabulary the plan envisions here — a `GroupKey` unifying
 //! the class axis and structs for TP/FP/FN, TPA/FPA/FNA, IDSW, per-track
@@ -67,6 +77,59 @@ pub fn precision_recall_curve(
     }
 
     (final_recall, result)
+}
+
+/// Average precision over `rec_thrs`, from per-detection match flags.
+///
+/// The mechanical AP core: sort by score descending → classify each detection as
+/// TP/FP (skipping ignored ones) → cumulative sum → interpolate onto `rec_thrs`
+/// via [`precision_recall_curve`] → mean. Thresholds beyond the achieved recall
+/// contribute zero, matching pycocotools' 101-point convention.
+///
+/// `scores`, `matched`, and `ignored` (when supplied) are parallel arrays over
+/// detections in any order; `ignored = None` means no detection is ignored. The
+/// sort is stable, so callers whose input is already score-descending keep their
+/// tie order.
+///
+/// Returns `0.0` when there are no detections or no ground truth — but see the
+/// [module note](self) on empty-set conventions: a caller that wants a different
+/// answer for `num_gt == 0` must guard before calling.
+pub fn average_precision(
+    scores: &[f64],
+    matched: &[bool],
+    ignored: Option<&[bool]>,
+    num_gt: usize,
+    rec_thrs: &[f64],
+) -> f64 {
+    let nd = scores.len();
+    if nd == 0 || num_gt == 0 || rec_thrs.is_empty() {
+        return 0.0;
+    }
+
+    let mut order: Vec<usize> = (0..nd).collect();
+    order.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut tp_cum = Vec::with_capacity(nd);
+    let mut fp_cum = Vec::with_capacity(nd);
+    let (mut tp, mut fp) = (0.0f64, 0.0f64);
+    for &i in &order {
+        if !ignored.is_some_and(|ig| ig[i]) {
+            if matched[i] {
+                tp += 1.0;
+            } else {
+                fp += 1.0;
+            }
+        }
+        tp_cum.push(tp);
+        fp_cum.push(fp);
+    }
+
+    let (_, curve) = precision_recall_curve(&tp_cum, &fp_cum, num_gt, rec_thrs);
+    curve.iter().map(|&(_, prec, _)| prec).sum::<f64>() / rec_thrs.len() as f64
 }
 
 #[cfg(test)]

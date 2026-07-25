@@ -3,14 +3,18 @@
 //! This is a faithful port of the C `maskApi.c` from pycocotools/cocoapi.
 //! The scan-line polygon rasterization and LEB128-like string encoding match
 //! the original exactly to ensure metric parity.
-
-use rayon::prelude::*;
+//!
+//! # Mechanics, not formulas
+//!
+//! This module owns the RLE *mechanics* — codec, area, `intersection_area`. The
+//! IoU *formulas* live in [`crate::primitives::sim`]; [`iou`] and [`bbox_iou`]
+//! below are re-exports of them, kept here so `hotcoco::mask::*` keeps mirroring
+//! `pycocotools.mask.*`. The re-export is one-way path sugar, never the
+//! definition.
 
 use crate::types::Rle;
 
-/// Minimum D×G product before IoU computation switches from sequential to parallel (rayon).
-/// Below this threshold, thread dispatch overhead exceeds the parallelism benefit.
-const MIN_PARALLEL_WORK: usize = 1024;
+pub use crate::primitives::sim::{bbox_iou, mask_iou as iou};
 
 /// Encode a column-major binary mask into RLE.
 ///
@@ -235,8 +239,11 @@ fn merge_two(a: &Rle, b: &Rle, intersect: bool) -> Rle {
 ///
 /// Walks both RLE streams simultaneously (same logic as `merge_two` with intersect=true)
 /// but only accumulates the count where both masks are foreground.
+///
+/// RLE *mechanics* — the IoU formula built on it lives in
+/// [`crate::primitives::sim::mask_iou`].
 #[inline]
-fn intersection_area(a: &Rle, b: &Rle) -> u64 {
+pub(crate) fn intersection_area(a: &Rle, b: &Rle) -> u64 {
     let n = (a.h as u64) * (a.w as u64);
     let mut ca = 0u64;
     let mut cb = 0u64;
@@ -284,94 +291,6 @@ fn intersection_area(a: &Rle, b: &Rle) -> u64 {
     }
 
     count
-}
-
-/// Compute IoU between `dt` and `gt` RLE masks.
-///
-/// Returns a D×G matrix (row-major, `dt.len()` rows, `gt.len()` columns).
-/// For `iscrowd[j] == true`, uses crowd IoU: intersection / area(dt) instead of intersection / union.
-pub fn iou(dt: &[Rle], gt: &[Rle], iscrowd: &[bool]) -> Vec<Vec<f64>> {
-    let d = dt.len();
-    let g = gt.len();
-    if d == 0 || g == 0 {
-        return vec![vec![]; d];
-    }
-
-    let dt_areas: Vec<u64> = dt.iter().map(area).collect();
-    let gt_areas: Vec<u64> = gt.iter().map(area).collect();
-
-    let compute_row = |i: usize| {
-        let dt_a = dt_areas[i] as f64;
-        let mut row = vec![0.0f64; g];
-        for j in 0..g {
-            let inter = intersection_area(&dt[i], &gt[j]);
-            let gt_a = gt_areas[j] as f64;
-            let inter_f = inter as f64;
-            let iou_val = if iscrowd[j] {
-                if dt_a == 0.0 { 0.0 } else { inter_f / dt_a }
-            } else {
-                let union = dt_a + gt_a - inter_f;
-                if union == 0.0 { 0.0 } else { inter_f / union }
-            };
-            row[j] = iou_val;
-        }
-        row
-    };
-
-    // Use rayon only when D×G is large enough to offset thread dispatch overhead.
-    if d * g >= MIN_PARALLEL_WORK {
-        (0..d).into_par_iter().map(compute_row).collect()
-    } else {
-        (0..d).map(compute_row).collect()
-    }
-}
-
-/// Compute bbox IoU between sets of bounding boxes.
-///
-/// Each bbox is `[x, y, w, h]`. Returns D×G matrix.
-pub fn bbox_iou(dt: &[[f64; 4]], gt: &[[f64; 4]], iscrowd: &[bool]) -> Vec<Vec<f64>> {
-    let d = dt.len();
-    let g = gt.len();
-    if d == 0 || g == 0 {
-        return vec![vec![]; d];
-    }
-
-    // Pre-compute GT areas and right/bottom coordinates (loop-invariant over DT rows).
-    let gt_areas: Vec<f64> = gt.iter().map(|b| b[2] * b[3]).collect();
-    let gt_x2: Vec<f64> = gt.iter().map(|b| b[0] + b[2]).collect();
-    let gt_y2: Vec<f64> = gt.iter().map(|b| b[1] + b[3]).collect();
-
-    let compute_row = |i: usize| {
-        let da = dt[i][2] * dt[i][3]; // w * h
-        let dt_x2 = dt[i][0] + dt[i][2];
-        let dt_y2 = dt[i][1] + dt[i][3];
-        let mut row = vec![0.0f64; g];
-        for j in 0..g {
-            let x1 = dt[i][0].max(gt[j][0]);
-            let y1 = dt[i][1].max(gt[j][1]);
-            let x2 = dt_x2.min(gt_x2[j]);
-            let y2 = dt_y2.min(gt_y2[j]);
-            let iw = (x2 - x1).max(0.0);
-            let ih = (y2 - y1).max(0.0);
-            let inter = iw * ih;
-
-            let iou_val = if iscrowd[j] {
-                if da == 0.0 { 0.0 } else { inter / da }
-            } else {
-                let union = da + gt_areas[j] - inter;
-                if union == 0.0 { 0.0 } else { inter / union }
-            };
-            row[j] = iou_val;
-        }
-        row
-    };
-
-    // Use rayon only when D×G is large enough to offset thread dispatch overhead.
-    if d * g >= MIN_PARALLEL_WORK {
-        (0..d).into_par_iter().map(compute_row).collect()
-    } else {
-        (0..d).map(compute_row).collect()
-    }
 }
 
 /// Convert a polygon (flat list of `[x0, y0, x1, y1, ...]`) to RLE.

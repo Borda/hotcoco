@@ -118,7 +118,15 @@ impl<'a> Solver<'a> {
     fn solve(&mut self) {
         for cur_row in 0..self.nr {
             let (sink, min_val) = self.augmenting_path(cur_row);
-            debug_assert!(sink != NONE, "lsap: infeasible (non-finite costs?)");
+            // A real assert, not `debug_assert`: with a NaN/infinite cost the
+            // shortest-path scan never improves on `INFINITY`, no sink is found,
+            // and the augmentation below would index `path[usize::MAX]` — an
+            // out-of-bounds panic with no explanation in release builds. scipy
+            // raises `ValueError` here; this says the same thing.
+            assert!(
+                sink != NONE,
+                "lsap: cost matrix is infeasible — it likely contains NaN or infinite entries"
+            );
 
             // Update dual variables along the scanned sets.
             self.u[cur_row] += min_val;
@@ -156,11 +164,21 @@ impl<'a> Solver<'a> {
 ///
 /// Costs must be finite; for finite costs a full `min(nr, nc)` assignment always
 /// exists, so this always returns a complete matching.
+///
+/// # Panics
+///
+/// If `cost.len() != nr * nc`, or if the matrix is infeasible (which for this
+/// solver means non-finite entries). Both are asserted rather than left to
+/// produce a downstream index panic.
 pub fn lsap(cost: &[f64], nr: usize, nc: usize, maximize: bool) -> (Vec<usize>, Vec<usize>) {
     if nr == 0 || nc == 0 {
         return (Vec::new(), Vec::new());
     }
-    debug_assert_eq!(cost.len(), nr * nc, "cost must be nr*nc row-major");
+    assert_eq!(
+        cost.len(),
+        nr * nc,
+        "lsap: cost must be nr*nc row-major ({nr}x{nc})"
+    );
 
     // Work on rows <= cols; transpose the cost matrix if the input is tall.
     let transpose = nc < nr;
@@ -366,5 +384,22 @@ mod tests {
                 assert!((got - opt).abs() < 1e-9, "minimize not optimal");
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "infeasible")]
+    fn all_non_finite_row_reports_infeasible_not_index_oob() {
+        // A row with no finite entry leaves the shortest-path scan stuck at
+        // INFINITY, so no sink is found. Before this was a real assert, the
+        // augmentation then indexed `path[usize::MAX]` and panicked out of bounds
+        // with no clue as to the cause. A single NaN is *not* enough — any finite
+        // entry in the row still yields a reachable column.
+        lsap(&[1.0, 2.0, f64::NAN, f64::NAN], 2, 2, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "row-major")]
+    fn wrong_length_cost_is_rejected() {
+        lsap(&[1.0, 2.0, 3.0], 2, 2, false);
     }
 }

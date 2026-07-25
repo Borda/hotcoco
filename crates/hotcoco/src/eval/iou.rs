@@ -1,7 +1,6 @@
 use crate::coco::COCO;
-use crate::geometry;
-use crate::mask;
-use crate::params::{IouType, Params};
+use crate::params::Params;
+use crate::primitives::sim::{self, SimKind};
 use crate::types::Rle;
 
 use super::{COCOeval, EvalMode};
@@ -23,17 +22,19 @@ impl COCOeval {
             return Vec::new();
         }
 
-        match params.iou_type {
-            IouType::Segm => {
+        // Dispatch on the geometry axis, not the eval-config one: `SimKind` is
+        // what selects a kernel, and every family (detection here, tracking and
+        // panoptic later) branches on the same four values. The helpers below do
+        // marshaling only — reshaping annotations into the kernel's input types.
+        match SimKind::from(params.iou_type) {
+            SimKind::Mask => {
                 Self::compute_segm_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
-            IouType::Bbox => {
+            SimKind::Bbox => {
                 Self::compute_bbox_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
-            IouType::Keypoints => {
-                Self::compute_oks_static(coco_gt, coco_dt, params, dt_anns, gt_anns)
-            }
-            IouType::Obb => {
+            SimKind::Oks => Self::compute_oks_static(coco_gt, coco_dt, params, dt_anns, gt_anns),
+            SimKind::Obb => {
                 Self::compute_obb_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
         }
@@ -53,7 +54,7 @@ impl COCOeval {
         }
     }
 
-    /// Compute segmentation mask IoU by converting annotations to RLE and calling `mask::iou`.
+    /// Compute segmentation mask IoU by converting annotations to RLE and calling `sim::mask_iou`.
     pub(super) fn compute_segm_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -82,10 +83,10 @@ impl COCOeval {
             })
             .unzip();
 
-        mask::iou(&dt_rles, &gt_rles, &iscrowd)
+        sim::mask_iou(&dt_rles, &gt_rles, &iscrowd)
     }
 
-    /// Compute bounding box IoU by extracting bbox arrays and calling `mask::bbox_iou`.
+    /// Compute bounding box IoU by extracting bbox arrays and calling `sim::bbox_iou`.
     pub(super) fn compute_bbox_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -111,7 +112,7 @@ impl COCOeval {
             })
             .unzip();
 
-        mask::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
+        sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
     }
 
     /// Compute OKS (Object Keypoint Similarity) between detection and GT keypoints.
@@ -131,7 +132,7 @@ impl COCOeval {
         // (COCO-decoupled, matrix-shaped). Here we only marshal the annotations
         // into the kernel's flat-slice form. A missing `keypoints` field maps to
         // an empty slice, which the kernel skips — matching the previous
-        // `None => continue` behaviour that left that row/column zero.
+        // `None => continue` behavior that left that row/column zero.
         let gt_anns: Vec<_> = gt_ids
             .iter()
             .filter_map(|&id| coco_gt.get_ann(id))
@@ -157,7 +158,7 @@ impl COCOeval {
         crate::primitives::sim::oks_matrix(&dt_keypoints, &gt, &params.kpt_oks_sigmas)
     }
 
-    /// Compute oriented bounding box IoU by extracting OBB arrays and calling `geometry::obb_iou`.
+    /// Compute oriented bounding box IoU by extracting OBB arrays and calling `sim::obb_iou`.
     pub(super) fn compute_obb_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -182,6 +183,6 @@ impl COCOeval {
             })
             .unzip();
 
-        geometry::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
+        sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
     }
 }

@@ -11,6 +11,39 @@
 //! flags, ordering detections and ground-truths, building the IoU matrix, and
 //! translating the returned indices back into annotation ids. This module owns
 //! only the assignment algorithm.
+//!
+//! # What this matcher is *not* for
+//!
+//! It looks like a general IoU-threshold matcher; it is not. It is the
+//! **detection lineage** matcher (COCO/LVIS/OID/TIDE), and its score-descending
+//! greediness is a pycocotools compatibility requirement, not an optimality
+//! claim — it does not maximize total similarity.
+//!
+//! - **Tracking-lineage metrics** (CLEAR, Identity, HOTA) must use
+//!   [`crate::primitives::assign::lsap`]: TrackEval solves an optimal assignment
+//!   per frame, and a greedy approximation silently changes IDSW/IDF1.
+//! - **Panoptic quality** needs no solver at all — an IoU > 0.5 match between
+//!   non-overlapping segments is provably unique.
+//!
+//! Reaching for this matcher outside detection is the likeliest way for the two
+//! lineages to collide.
+//!
+//! # Threshold-epsilon policy: caller-owned
+//!
+//! pycocotools does not use the raw threshold as its match floor — it starts each
+//! detection's search at `min(t, 1 - 1e-10)` (`evaluateImg`: `iou = min([t,
+//! 1-1e-10])`). That clamp is **the caller's to apply**: [`greedy_match`] compares
+//! against exactly the `iou_thrs` it is handed and adds no epsilon of its own, so
+//! a family whose thresholds mean something other than COCO's is not silently
+//! given COCO's fudge factor.
+//!
+//! The clamp is inert for every threshold `< 1.0`, so it never fires on COCO's
+//! default `0.5:0.05:0.95` sweep, nor on the single-threshold analysis callers.
+//! It is observable only at `t == 1.0`, where pycocotools still matches a pair
+//! whose IoU lies in `[1 - 1e-10, 1.0)` and an unclamped caller does not. No
+//! caller in this crate clamps today; that difference against pycocotools at
+//! `t == 1.0` is a known, deliberate carry-over of v0.4.x behavior, to be
+//! settled with the 1.0 detection driver rather than changed mid-0.5.
 
 /// Per-threshold greedy match results, indexed `[T]` over IoU thresholds.
 pub struct GreedyMatches {

@@ -13,8 +13,9 @@ Rust Core (all logic) ─┤
 ```
 
 - **Rust core** — types, masks, eval, dataset ops, format conversion, streaming
+- **`primitives/`** — the shared evaluation substrate: similarity kernels (`sim`), matching (`greedy`, `assign`), and count/AP aggregation (`counts`). One auditable home per operation. Detection composes these today; panoptic, tracking, and concepts will compose the same ones.
 - **Python CLI** (primary) — all subcommands: `$ coco eval`, `$ coco stats`, `$ coco merge`, `$ coco plot`, etc. Rich formatting, plots via matplotlib/plotly.
-- **Rust CLI** (`hotcoco-cli`) — evaluation only. JSON/CSV/markdown output, no plots, no Python. New features added on request.
+- **Rust CLI** (`hotcoco-cli`) — evaluation only. Subcommands `eval` (the default action, also accepted bare) and `completions`. JSON/CSV/markdown output, no plots, no Python. New features added on request.
 
 | Registry | Package | Contents |
 |----------|---------|----------|
@@ -25,6 +26,12 @@ Rust Core (all logic) ─┤
 ---
 
 ## Shipped
+
+### Evaluation Primitives Foundation
+
+**Shipped.**
+
+~~Extracted the shared evaluation substrate into `primitives/` — the groundwork for rebuilding detection on a stage architecture at 1.0, and for the panoptic/tracking/concepts families after it. `sim` owns every similarity kernel (bbox, mask, OBB, OKS) plus the scalar `bbox_iou_pair`; `greedy` owns pycocotools-exact matching; `assign` owns scipy-exact rectangular LSAP; `counts` owns the PR accumulator and the AP core. Collapsed the duplication this replaced: bbox IoU 4 impls → 1, the crowd/union formula 3 → 1, AP-from-matched 3 → 1, greedy matchers 2 → 1, and two disagreeing `MIN_PARALLEL_WORK` constants → 1. Behavior is unchanged throughout — parity with pycocotools holds and the confusion-matrix rewrite was proven byte-identical on val2017 across 160 configurations. `tests/architecture.rs` now fails the build if any of it is duplicated again.~~
 
 ### Plotting & PDF Report
 
@@ -207,7 +214,7 @@ Keypoint dataset for crowded scenes. Uses a modified OKS matching algorithm with
 
 **Shipped.**
 
-~~Tab completion for both CLIs: `coco-eval --completions <bash|zsh|fish|elvish|powershell>` (Rust, powered by `clap_complete`); `pip install "hotcoco[completions]"` enables `coco` tab completion via `argcomplete`.~~
+~~Tab completion for both CLIs: `coco-eval completions <bash|zsh|fish|elvish|powershell>` (Rust, powered by `clap_complete`; the older `--completions <shell>` flag still works but was unusable standalone until 0.5); `pip install "hotcoco[completions]"` enables `coco` tab completion via `argcomplete`.~~
 
 ### Viewer Migration: FastAPI + HTMX
 

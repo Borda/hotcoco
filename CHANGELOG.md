@@ -14,14 +14,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   order). `params` is the `Params` object used for evaluation; `date` uses
   pycocotools' `'%Y-%m-%d %H:%M:%S'` format. Closes a Tier-1 drop-in gap vs
   pycocotools. The numeric arrays are unchanged, so all metrics still match.
+- `primitives::sim` now owns every similarity kernel: the `bbox_iou`, `mask_iou`, and
+  `obb_iou` matrix kernels moved here from `mask`/`geometry`, joining `oks_matrix`.
+  A new scalar `bbox_iou_pair` is the single definition of single-pair bbox IoU.
+  `hotcoco::mask::iou`, `hotcoco::mask::bbox_iou`, and `hotcoco::geometry::obb_iou`
+  still resolve — they are now re-exports, so the `pycocotools.mask` drop-in surface
+  is unchanged.
+- `primitives::counts::average_precision` — the mechanical AP core (sort → classify →
+  cumsum → interpolate → mean), now shared by TIDE and per-image diagnostics.
+- `SimKind` gained `From<IouType>`, so detection dispatches on the geometry axis.
+- `coco-eval` gained subcommands: `coco-eval eval …` and `coco-eval completions <shell>`.
+  The bare form (`coco-eval --gt … --dt …`) is unchanged and still supported.
+- Architecture conformance tests (`crates/hotcoco/tests/architecture.rs`) that fail the
+  build if the IoU formula, the parallelism threshold, or greedy matching is duplicated
+  outside `primitives/`.
 
 ### Changed
 
 - Upgraded `pyo3` and `numpy` from 0.28 to 0.29, which clears the RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (missing `Sync` bound on `PyCFunction::new_closure`) security advisories. The corresponding `deny.toml` ignores have been removed. No public Python API changes; the binding sources compiled unchanged against the 0.29 API.
+- The confusion matrix now uses the shared `primitives::greedy::greedy_match` instead of
+  its own greedy loop, so every matcher in the crate shares one tie-breaking rule.
+  Verified byte-identical on val2017 across 160 threshold/max-det/min-score
+  configurations, including at the match boundary.
+- `primitives::greedy` documents the pycocotools threshold-epsilon clamp
+  (`min(t, 1 - 1e-10)`) as **caller-owned**. It is inert below `t = 1.0` and no caller
+  applies it today, so behavior is unchanged; the difference at `t = 1.0` is now
+  written down rather than implicit.
+- The release workflow only triggers on true version tags (`v[0-9]+.[0-9]+.[0-9]+*`),
+  and `cargo publish` failures now fail the release instead of being downgraded to a
+  warning — only an already-published version is tolerated.
 
 ### Fixed
 
 - Bumped `crossbeam-epoch` (→0.9.20), `rand` (→0.9.5), and `quick-xml` (→0.41) to clear RUSTSEC-2026-0204, -0097, -0194, and -0195 security advisories.
+- `coco-eval --completions <shell>` works standalone. It previously required `--gt` and
+  `--dt`, which clap validated before the completions branch ran — so the flag could
+  never generate a completion script on its own.
+- `MIN_PARALLEL_WORK`, the threshold at which IoU kernels switch to rayon, was defined
+  twice with different values (1024 in `mask`, 1000 in `geometry`) under a comment
+  claiming they matched. There is now one constant.
+- The internal path-dependency pins in `hotcoco-cli` and `hotcoco-pyo3` had lagged at
+  `0.4.0` since the 0.4.1 release. crates.io resolves these for published builds, so a
+  stale pin publishes against an older API than was tested. They now live in
+  `[workspace.dependencies]` next to `[workspace.package] version`, and the members
+  inherit them — so the mismatch is visible in one file instead of hidden in two.
+- `primitives::assign::lsap` reported an infeasible cost matrix (a row with no finite
+  entry) as a bare index-out-of-bounds panic in release builds, because the check was a
+  `debug_assert!`. It now asserts with a message naming the cause, as scipy does.
 
 ## [0.4.1] - 2026-07-23
 

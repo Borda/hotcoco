@@ -6,9 +6,31 @@
 //! similarities that are:
 //! - in `[0, 1]`, higher = better,
 //! - directly threshold-comparable (a match is `sim >= threshold`),
-//! - crowd/ignore-aware: the per-GT `iscrowd` flag changes the formula for that
-//!   column (e.g. IoU uses detection-area-only union against a crowd GT), exactly
-//!   as pycocotools does.
+//! - crowd/ignore-aware **for the IoU kernels**: the per-column `iscrowd` flag
+//!   switches that column's formula (see [intersection-over-area](#crowd-columns-are-intersection-over-area)),
+//!   exactly as pycocotools does. [`oks_matrix`] is the documented exception — it
+//!   takes no flags, because pycocotools handles keypoint crowd/ignore in
+//!   `evaluateImg` (via `gtIg`) rather than in `computeOks`. Adding a parameter
+//!   later would be a breaking change, so the asymmetry is stated rather than
+//!   papered over.
+//!
+//! # Which argument the flags index
+//!
+//! The flag slice indexes the **second** argument, whatever role it plays —
+//! written `gt` here because detection passes ground truth there. IoU is symmetric
+//! in the non-crowd branch, so a family may swap the arguments to get a
+//! `[GT][tracker]`-oriented matrix (TrackEval's convention), but then the flags
+//! describe *that* second argument. [`oks_matrix`] is asymmetric and cannot be
+//! swapped at all.
+//!
+//! # Crowd columns are intersection-over-area
+//!
+//! For a flagged column the formula is `intersection / area(first argument)` —
+//! i.e. IoA, not IoU. Detection calls this "crowd", but the quantity is general:
+//! it is exactly what MOT preprocessing needs for distractor suppression
+//! (TrackEval's `do_ioa=True`). A tracking driver wanting IoA against ignore
+//! regions should call `bbox_iou(dets, ignore_regions, &vec![true; n])` rather
+//! than write its own.
 //!
 //! Distance-based similarities (the 3D seam) enter later via a normalization
 //! adapter (`1 - d / d_max`); they are not part of this slice.
@@ -26,22 +48,195 @@
 //! deliberately distinct from [`crate::params::IouType`] (the eval-config axis):
 //! `IouType::Segm` is computed with `SimKind::Mask`, `IouType::Keypoints` with
 //! `SimKind::Oks`. Parsers accept `"segm"` as an alias for `"mask"`.
+//!
+//! # Where the math lives
+//!
+//! This module **defines** every similarity formula. [`crate::mask`] and
+//! [`crate::geometry`] own only the *mechanics* the formulas are built from (the
+//! RLE codec and `intersection_area`; polygon clipping and
+//! `obb_intersection_area`) and re-export these kernels back under their historic
+//! paths. Those re-exports are one-way path sugar — never the definition — so
+//! `hotcoco::mask::iou` keeps resolving for the pycocotools drop-in surface while
+//! an auditor asking "where is IoU computed?" bounces exactly once, to here.
+//!
+//! Because those historic paths are Tier-1 drop-in surface mirroring
+//! `pycocotools.mask`, **the signatures of [`mask_iou`], [`bbox_iou`], and
+//! [`obb_iou`] are effectively frozen**: buffer-reusing or batched variants must
+//! be added under new names, never by changing these. This paragraph is the
+//! canonical statement of that rule; other modules link here rather than restate it.
 
 use std::fmt;
 use std::str::FromStr;
 
-// The built-in matrix kernels already live on the geometry/mask modules and
-// already satisfy the contract above. Re-export them here so `primitives::sim`
-// is the one canonical similarity surface (no duplicated math).
-pub use crate::geometry::obb_iou;
-pub use crate::mask::bbox_iou;
-pub use crate::mask::iou as mask_iou;
+use rayon::prelude::*;
+
+use crate::geometry::{obb_intersection_area, obb_to_corners};
+use crate::mask::{area as rle_area, intersection_area};
+use crate::types::Rle;
+
+/// Minimum D×G product before a kernel switches from sequential to parallel
+/// (rayon). Below this threshold, thread dispatch overhead exceeds the
+/// parallelism benefit. One constant for every kernel — the per-row work is
+/// independent, so this only trades dispatch overhead, never results.
+const MIN_PARALLEL_WORK: usize = 1024;
+
+/// The shared IoU closing formula, identical across bbox/mask/OBB.
+///
+/// When the column is flagged, this is **intersection-over-area**: divide by
+/// `dt_area` alone (a detection inside a crowd region is not penalized for the
+/// region's extent). Otherwise it is standard intersection-over-union. See the
+/// [module note](self#crowd-columns-are-intersection-over-area) — the IoA branch
+/// is reusable beyond detection's crowd semantics.
+#[inline]
+fn iou_from_areas(inter: f64, dt_area: f64, gt_area: f64, gt_is_crowd: bool) -> f64 {
+    if gt_is_crowd {
+        if dt_area == 0.0 { 0.0 } else { inter / dt_area }
+    } else {
+        let union = dt_area + gt_area - inter;
+        if union == 0.0 { 0.0 } else { inter / union }
+    }
+}
+
+/// Run a per-detection-row kernel, going parallel only past [`MIN_PARALLEL_WORK`].
+///
+/// `pub(crate)` so a future kernel outside this module (panoptic, a
+/// distance-derived kind) can obey the one-threshold rule that
+/// `tests/architecture.rs` enforces, instead of being forced to redeclare the
+/// constant and trip the guard.
+#[inline]
+pub(crate) fn rows<F>(d: usize, g: usize, compute_row: F) -> Vec<Vec<f64>>
+where
+    F: Fn(usize) -> Vec<f64> + Sync + Send,
+{
+    if d * g >= MIN_PARALLEL_WORK {
+        (0..d).into_par_iter().map(compute_row).collect()
+    } else {
+        (0..d).map(compute_row).collect()
+    }
+}
+
+/// Compute IoU between `dt` and `gt` RLE masks.
+///
+/// Returns a D×G matrix (row-major, `dt.len()` rows, `gt.len()` columns).
+/// For `iscrowd[j] == true`, uses crowd IoU: intersection / area(dt) instead of
+/// intersection / union.
+pub fn mask_iou(dt: &[Rle], gt: &[Rle], iscrowd: &[bool]) -> Vec<Vec<f64>> {
+    let d = dt.len();
+    let g = gt.len();
+    if d == 0 || g == 0 {
+        return vec![vec![]; d];
+    }
+
+    let dt_areas: Vec<u64> = dt.iter().map(rle_area).collect();
+    let gt_areas: Vec<u64> = gt.iter().map(rle_area).collect();
+
+    rows(d, g, |i| {
+        let dt_a = dt_areas[i] as f64;
+        (0..g)
+            .map(|j| {
+                let inter = intersection_area(&dt[i], &gt[j]) as f64;
+                iou_from_areas(inter, dt_a, gt_areas[j] as f64, iscrowd[j])
+            })
+            .collect()
+    })
+}
+
+/// IoU between two axis-aligned bounding boxes, each `[x, y, w, h]`.
+///
+/// The scalar counterpart of [`bbox_iou`] — the one place a single-pair bbox IoU
+/// is defined, so analysis code never hand-rolls it.
+///
+/// `#[inline]` is load-bearing, not decoration: [`bbox_iou`]'s inner loop only
+/// auto-vectorizes because this body is inlined into it. Without inlining the
+/// matrix kernel degrades to one call per pair, each copying two `[f64; 4]` by
+/// value.
+#[inline]
+pub fn bbox_iou_pair(a: [f64; 4], b: [f64; 4], b_is_crowd: bool) -> f64 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = (a[0] + a[2]).min(b[0] + b[2]);
+    let y2 = (a[1] + a[3]).min(b[1] + b[3]);
+    let iw = (x2 - x1).max(0.0);
+    let ih = (y2 - y1).max(0.0);
+    iou_from_areas(iw * ih, a[2] * a[3], b[2] * b[3], b_is_crowd)
+}
+
+/// Compute bbox IoU between sets of bounding boxes.
+///
+/// Each bbox is `[x, y, w, h]`. Returns D×G matrix.
+pub fn bbox_iou(dt: &[[f64; 4]], gt: &[[f64; 4]], iscrowd: &[bool]) -> Vec<Vec<f64>> {
+    let d = dt.len();
+    let g = gt.len();
+    if d == 0 || g == 0 {
+        return vec![vec![]; d];
+    }
+
+    rows(d, g, |i| {
+        (0..g)
+            .map(|j| bbox_iou_pair(dt[i], gt[j], iscrowd[j]))
+            .collect()
+    })
+}
+
+/// IoU between two pre-computed rotated rectangle corner sets.
+///
+/// `area_a` and `area_b` are the rectangle areas (w × h).
+/// Returns 0.0 for zero-area boxes or non-overlapping boxes.
+pub(crate) fn obb_iou_pair(
+    corners_a: &[(f64, f64); 4],
+    area_a: f64,
+    corners_b: &[(f64, f64); 4],
+    area_b: f64,
+    b_is_crowd: bool,
+) -> f64 {
+    if area_a <= 0.0 || area_b <= 0.0 {
+        return 0.0;
+    }
+
+    let inter_area = obb_intersection_area(corners_a, corners_b);
+    if inter_area <= 0.0 {
+        return 0.0;
+    }
+
+    iou_from_areas(inter_area, area_a, area_b, b_is_crowd)
+}
+
+/// Compute D×G IoU matrix for oriented bounding boxes.
+///
+/// `dt` contains detection OBBs `[cx, cy, w, h, angle]`, `gt` contains ground truth OBBs,
+/// and `iscrowd` indicates whether each GT is a crowd annotation (one per GT).
+///
+/// When `iscrowd[j]` is true, IoU = intersection / dt_area (matching bbox crowd semantics).
+pub fn obb_iou(dt: &[[f64; 5]], gt: &[[f64; 5]], iscrowd: &[bool]) -> Vec<Vec<f64>> {
+    let d = dt.len();
+    let g = gt.len();
+    if d == 0 || g == 0 {
+        return vec![vec![]; d];
+    }
+
+    // Pre-compute GT corners and areas (loop-invariant over DT rows).
+    let gt_corners: Vec<[(f64, f64); 4]> = gt.iter().map(obb_to_corners).collect();
+    let gt_areas: Vec<f64> = gt.iter().map(|b| b[2] * b[3]).collect();
+
+    rows(d, g, |i| {
+        let corners_a = obb_to_corners(&dt[i]);
+        let area_a = dt[i][2] * dt[i][3];
+        (0..g)
+            .map(|j| obb_iou_pair(&corners_a, area_a, &gt_corners[j], gt_areas[j], iscrowd[j]))
+            .collect()
+    })
+}
 
 /// The geometry axis for similarity: which built-in kernel computes the matrix.
 ///
 /// Each kind maps to a matrix kernel in this module: [`bbox_iou`], [`mask_iou`],
 /// [`obb_iou`], [`oks_matrix`].
+///
+/// Marked `#[non_exhaustive]`: later families are expected to add kinds (a
+/// panoptic kind, a distance-derived kind for 3D), and downstream code must not
+/// be broken by that. Match with a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SimKind {
     /// Axis-aligned bounding boxes — [`bbox_iou`].
     Bbox,

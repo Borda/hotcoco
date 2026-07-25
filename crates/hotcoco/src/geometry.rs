@@ -1,12 +1,17 @@
 //! Computational geometry primitives for oriented bounding box (OBB) evaluation.
 //!
-//! Provides rotated IoU computation via Sutherland-Hodgman polygon clipping.
+//! Provides rotated-rectangle mechanics: corner/AABB conversion, polygon area,
+//! and Sutherland-Hodgman clipping (exposed to the similarity layer as the
+//! crate-internal `obb_intersection_area`).
 //! All angles are in radians, counter-clockwise positive.
+//!
+//! # Mechanics, not formulas
+//!
+//! The rotated-IoU *formula* lives in [`crate::primitives::sim`]; [`obb_iou`]
+//! below is a re-export of it. The re-export is one-way path sugar, never the
+//! definition.
 
-use rayon::prelude::*;
-
-/// Minimum D×G work before switching to parallel execution (same threshold as mask::bbox_iou).
-const MIN_PARALLEL_WORK: usize = 1000;
+pub use crate::primitives::sim::obb_iou;
 
 /// Convert an OBB `[cx, cy, w, h, angle]` to its 4 corner points.
 ///
@@ -183,84 +188,27 @@ pub fn corners_to_obb(coords: &[f64]) -> [f64; 5] {
     [cx, cy, w, h, angle]
 }
 
-/// Compute IoU between two pre-computed rotated rectangle corner sets.
+/// Intersection area of two rotated rectangles, via Sutherland-Hodgman clipping.
 ///
-/// `area_a` and `area_b` are the rectangle areas (w × h).
-/// Returns 0.0 for zero-area boxes or non-overlapping boxes.
-fn obb_iou_pair(
+/// Rotated-rectangle *mechanics* — the IoU formula built on it lives in
+/// [`crate::primitives::sim::obb_iou`].
+pub(crate) fn obb_intersection_area(
     corners_a: &[(f64, f64); 4],
-    area_a: f64,
     corners_b: &[(f64, f64); 4],
-    area_b: f64,
-    b_is_crowd: bool,
 ) -> f64 {
-    if area_a <= 0.0 || area_b <= 0.0 {
-        return 0.0;
-    }
-
-    let intersection = sutherland_hodgman_clip(corners_a, corners_b);
-    let inter_area = polygon_area(&intersection);
-
-    if inter_area <= 0.0 {
-        return 0.0;
-    }
-
-    if b_is_crowd {
-        inter_area / area_a
-    } else {
-        let union_area = area_a + area_b - inter_area;
-        if union_area <= 0.0 {
-            0.0
-        } else {
-            inter_area / union_area
-        }
-    }
+    polygon_area(&sutherland_hodgman_clip(corners_a, corners_b))
 }
 
 /// Convenience wrapper for computing IoU between two OBB parameter arrays.
 #[cfg(test)]
 fn obb_iou_single(a: &[f64; 5], b: &[f64; 5], b_is_crowd: bool) -> f64 {
-    obb_iou_pair(
+    crate::primitives::sim::obb_iou_pair(
         &obb_to_corners(a),
         a[2] * a[3],
         &obb_to_corners(b),
         b[2] * b[3],
         b_is_crowd,
     )
-}
-
-/// Compute D×G IoU matrix for oriented bounding boxes.
-///
-/// `dt` contains detection OBBs `[cx, cy, w, h, angle]`, `gt` contains ground truth OBBs,
-/// and `iscrowd` indicates whether each GT is a crowd annotation (one per GT).
-///
-/// When `iscrowd[j]` is true, IoU = intersection / dt_area (matching bbox crowd semantics).
-pub fn obb_iou(dt: &[[f64; 5]], gt: &[[f64; 5]], iscrowd: &[bool]) -> Vec<Vec<f64>> {
-    let d = dt.len();
-    let g = gt.len();
-    if d == 0 || g == 0 {
-        return vec![vec![]; d];
-    }
-
-    // Pre-compute GT corners and areas (loop-invariant over DT rows).
-    let gt_corners: Vec<[(f64, f64); 4]> = gt.iter().map(obb_to_corners).collect();
-    let gt_areas: Vec<f64> = gt.iter().map(|b| b[2] * b[3]).collect();
-
-    let compute_row = |i: usize| {
-        let corners_a = obb_to_corners(&dt[i]);
-        let area_a = dt[i][2] * dt[i][3];
-        let mut row = vec![0.0f64; g];
-        for j in 0..g {
-            row[j] = obb_iou_pair(&corners_a, area_a, &gt_corners[j], gt_areas[j], iscrowd[j]);
-        }
-        row
-    };
-
-    if d * g >= MIN_PARALLEL_WORK {
-        (0..d).into_par_iter().map(compute_row).collect()
-    } else {
-        (0..d).map(compute_row).collect()
-    }
 }
 
 #[cfg(test)]

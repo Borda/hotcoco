@@ -37,6 +37,30 @@ impl fmt::Display for IouType {
     }
 }
 
+impl From<IouType> for crate::primitives::sim::SimKind {
+    /// Project this eval-config axis onto the geometry axis.
+    ///
+    /// The two are deliberately separate types: an `IouType` says what the user
+    /// asked to evaluate (Tier-1 config surface, serialized, fixed at four
+    /// variants), while a [`SimKind`](crate::primitives::sim::SimKind) says which
+    /// kernel computes it (`#[non_exhaustive]`, expected to grow). The mapping is
+    /// total *today*, which is why this is `From` and not `TryFrom`, and why it
+    /// only goes this direction.
+    ///
+    /// It lives here rather than beside `SimKind` so that `primitives` — the
+    /// bottom layer every family builds on — does not depend on the eval-config
+    /// module above it.
+    fn from(iou_type: IouType) -> Self {
+        use crate::primitives::sim::SimKind;
+        match iou_type {
+            IouType::Bbox => SimKind::Bbox,
+            IouType::Segm => SimKind::Mask,
+            IouType::Keypoints => SimKind::Oks,
+            IouType::Obb => SimKind::Obb,
+        }
+    }
+}
+
 impl FromStr for IouType {
     type Err = String;
 

@@ -3,9 +3,9 @@ use std::borrow::Cow;
 use rayon::prelude::*;
 
 use crate::coco::COCO;
-use crate::geometry;
-use crate::mask;
 use crate::params::IouType;
+use crate::primitives;
+use crate::primitives::sim;
 use crate::types::Rle;
 
 use super::COCOeval;
@@ -41,7 +41,7 @@ impl COCOeval {
                     .collect();
                 if dt_bbs.len() == d && gt_bbs.len() == g {
                     let iscrowd = vec![false; g];
-                    mask::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
+                    sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
                 } else {
                     vec![vec![0.0; g]; d]
                 }
@@ -62,7 +62,7 @@ impl COCOeval {
                     let dt_r: Vec<Rle> = dt_rles.into_iter().flatten().collect();
                     let gt_r: Vec<Rle> = gt_rles.into_iter().flatten().collect();
                     let iscrowd = vec![false; g];
-                    mask::iou(&dt_r, &gt_r, &iscrowd)
+                    sim::mask_iou(&dt_r, &gt_r, &iscrowd)
                 } else {
                     // Bbox fallback when any RLE is missing
                     Self::compute_bbox_iou_static(
@@ -85,7 +85,7 @@ impl COCOeval {
                     .collect();
                 if dt_obbs.len() == d && gt_obbs.len() == g {
                     let iscrowd = vec![false; g];
-                    geometry::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
+                    sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
                 } else {
                     vec![vec![0.0; g]; d]
                 }
@@ -219,35 +219,40 @@ impl COCOeval {
                     Self::cross_category_iou(&dt_ids, &gt_ids, coco_dt, coco_gt, iou_type);
 
                 // --- Greedy matching at iou_thr (DTs already in score-sorted order) ---
-                let mut gt_matched = vec![false; g];
+                //
+                // The shared matcher, at its simplest setting: one threshold, every
+                // GT non-ignored (so phase 2 never runs), nothing rematchable (no
+                // crowd — this is a cross-category matrix, where a crowd GT would
+                // double-count). `iou_thr` is passed through unclamped, per the
+                // caller-owned threshold-epsilon policy in `primitives::greedy`.
+                //
+                // The degenerate shapes need no special-casing: `cross_category_iou`
+                // returns an empty matrix exactly when `d == 0 || g == 0`, and
+                // `greedy_match` never indexes the matrix in either case — it yields
+                // one `None` per detection, so every DT falls through to the
+                // background row and every GT to the background column.
+                let iou_flat: Vec<f64> = iou_matrix.into_iter().flatten().collect();
+                let mut matches = primitives::greedy::greedy_match(
+                    &iou_flat,
+                    d,
+                    g,
+                    g, // all GTs non-ignored
+                    &vec![false; g],
+                    &vec![true; g],
+                    &[iou_thr],
+                );
+                // Take both halves of the result — recomputing `gt_matched` from
+                // `dt_gt` would be a second source of truth for the same fact.
+                let matched = matches.dt_gt.swap_remove(0);
+                let gt_matched = matches.gt_matched.swap_remove(0);
 
-                for di in 0..d {
-                    let mut best_iou = iou_thr;
-                    let mut best_gi: Option<usize> = None;
-
-                    if !iou_matrix.is_empty() {
-                        let row = &iou_matrix[di];
-                        for (gi, (&is_matched, &iou)) in
-                            gt_matched.iter().zip(row.iter()).enumerate()
-                        {
-                            if is_matched {
-                                continue;
-                            }
-                            if iou >= best_iou {
-                                best_iou = iou;
-                                best_gi = Some(gi);
-                            }
-                        }
-                    }
-
-                    if let Some(gi) = best_gi {
-                        gt_matched[gi] = true;
-                        let dt_cat_idx = dt_pairs[di].0;
+                for (di, &gi_opt) in matched.iter().enumerate() {
+                    let dt_cat_idx = dt_pairs[di].0;
+                    if let Some(gi) = gi_opt {
                         let gt_cat_idx = gt_pairs[gi].0;
                         local[gt_cat_idx * k + dt_cat_idx] += 1;
                     } else {
                         // Unmatched DT → false positive (background row)
-                        let dt_cat_idx = dt_pairs[di].0;
                         local[num_cats * k + dt_cat_idx] += 1;
                     }
                 }
