@@ -164,14 +164,7 @@ def _ann(
     score: float | None = None,
     is_group_of: bool | None = None,
 ) -> dict:
-    ann = {
-        "id": id,
-        "image_id": image_id,
-        "category_id": category_id,
-        "bbox": bbox,
-        "area": area,
-        "iscrowd": 0,
-    }
+    ann = {"id": id, "image_id": image_id, "category_id": category_id, "bbox": bbox, "area": area, "iscrowd": 0}
     if score is not None:
         ann["score"] = score
     if is_group_of is not None:
@@ -352,22 +345,14 @@ def test_basic_hierarchy():
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000)],  # Poodle
-            "categories": [
-                _cat(1, "poodle", "dog"),
-                _cat(2, "dog", "animal"),
-                _cat(3, "animal"),
-            ],
+            "categories": [_cat(1, "poodle", "dog"), _cat(2, "dog", "animal"), _cat(3, "animal")],
         }
     )
     dt = _make_coco(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 2, [10, 10, 100, 100], 10000, score=0.9)],  # Dog
-            "categories": [
-                _cat(1, "poodle", "dog"),
-                _cat(2, "dog", "animal"),
-                _cat(3, "animal"),
-            ],
+            "categories": [_cat(1, "poodle", "dog"), _cat(2, "dog", "animal"), _cat(3, "animal")],
         }
     )
 
@@ -425,7 +410,7 @@ def test_group_of_no_fn():
         {
             "images": [_img()],
             "annotations": [
-                _ann(1, 1, 1, [0, 0, 100, 100], 10000, score=0.9),  # Matches normal GT only
+                _ann(1, 1, 1, [0, 0, 100, 100], 10000, score=0.9)  # Matches normal GT only
             ],
             "categories": [_cat(1, "person")],
         }

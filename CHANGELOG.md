@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The release workflow only triggers on true version tags (`v[0-9]+.[0-9]+.[0-9]+*`),
   and `cargo publish` failures now fail the release instead of being downgraded to a
   warning — only an already-published version is tolerated.
+- The Python tree is now clean under `just py-lint` and `just py-fmt-check`, which had
+  drifted to 48 ruff errors across 13 unformatted files because neither the pre-commit
+  hook nor CI runs them. Beyond formatting, this removed five unused imports, three dead
+  local variables, and one unresolvable annotation (`plot/core.py` annotated a return as
+  `"np.ndarray"` while importing numpy only inside the function body — now declared
+  under `TYPE_CHECKING`, so the annotation resolves without making numpy a hard import).
 - The dashboard confusion matrix shows the raw count alongside the normalized rate in
   its hover, completing what the code already intended — the raw matrix was being read
   and discarded under a comment reading "Hover text with counts". A rate alone cannot

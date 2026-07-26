@@ -3,7 +3,8 @@
 hotcoco command-line interface.
 
 Usage:
-    coco eval --gt <gt.json> --dt <dt.json> [--iou-type bbox|segm|keypoints] [--lvis] [--tide] [--calibration] [--report out.pdf] [--slices slices.json]
+    coco eval --gt <gt.json> --dt <dt.json> [--iou-type bbox|segm|keypoints]
+        [--lvis] [--tide] [--calibration] [--report out.pdf] [--slices slices.json]
     coco healthcheck <annotation_file> [--dt <detections.json>]
     coco stats <annotation_file>
     coco filter <file> -o <output> [options]
@@ -21,7 +22,7 @@ import os
 import sys
 import textwrap
 
-from hotcoco._style import Timer, Spinner, dim, error, green, red, section, status, warning, yellow
+from hotcoco._style import Spinner, Timer, dim, error, green, red, section, status, warning, yellow
 
 
 def _table(columns, rows, footer=None):
@@ -723,7 +724,8 @@ def cmd_explore(args):
                     summary[k] = summary.get(k, 0) + s[k]
             status(
                 "Evaluated",
-                f"{args.iou_type}  TP={summary.get('tp', 0):,}  FP={summary.get('fp', 0):,}  FN={summary.get('fn', 0):,}",
+                f"{args.iou_type}  TP={summary.get('tp', 0):,}  "
+                f"FP={summary.get('fp', 0):,}  FN={summary.get('fn', 0):,}",
                 elapsed=t.elapsed,
             )
         except Exception as e:
@@ -775,7 +777,7 @@ def cmd_sample(args):
 
 def cmd_compare(args):
     try:
-        from hotcoco import COCO, COCOeval, compare
+        from hotcoco import COCOeval, compare
     except ImportError:
         error("hotcoco is not installed")
         sys.exit(1)
@@ -895,7 +897,10 @@ def main():
         "eval",
         parents=[_json_parent],
         help="evaluate detections against ground truth (bbox, segm, keypoints)",
-        description="Run COCO evaluation and print AP/AR metrics. Supports bbox, segmentation, and keypoint evaluation with optional TIDE error analysis, sliced evaluation, and PDF reports.",
+        description=(
+            "Run COCO evaluation and print AP/AR metrics. Supports bbox, segmentation, and "
+            "keypoint evaluation with optional TIDE error analysis, sliced evaluation, and PDF reports."
+        ),
         epilog=textwrap.dedent("""\
             examples:
               coco eval --gt ann.json --dt det.json
@@ -1007,7 +1012,10 @@ def main():
         "healthcheck",
         parents=[_json_parent],
         help="validate a COCO dataset for common errors",
-        description="Check a COCO annotation file for common errors and warnings, including duplicate IDs, missing references, invalid bounding boxes, and annotation/image mismatches.",
+        description=(
+            "Check a COCO annotation file for common errors and warnings, including duplicate IDs, "
+            "missing references, invalid bounding boxes, and annotation/image mismatches."
+        ),
         epilog=textwrap.dedent("""\
             examples:
               coco healthcheck ann.json
@@ -1133,7 +1141,10 @@ def main():
         "compare",
         parents=[_json_parent],
         help="compare two model evaluations on the same dataset",
-        description="Pairwise model comparison with metric deltas, per-category AP breakdown, and optional bootstrap confidence intervals.",
+        description=(
+            "Pairwise model comparison with metric deltas, per-category AP breakdown, "
+            "and optional bootstrap confidence intervals."
+        ),
         epilog=textwrap.dedent("""\
             examples:
               coco compare --gt ann.json --dt-a baseline.json --dt-b improved.json

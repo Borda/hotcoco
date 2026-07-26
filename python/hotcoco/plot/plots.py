@@ -1,18 +1,13 @@
-"""Public plot functions: pr_curve, confusion_matrix, top_confusions, per_category_ap, tide_errors, reliability_diagram, comparison_bar, category_deltas."""
+"""Public plot functions: pr_curve, confusion_matrix, top_confusions, per_category_ap,
+tide_errors, reliability_diagram, comparison_bar, category_deltas.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from .core import (
-    _annotate_f1_peak,
-    _configure_axes,
-    _import_mpl,
-    _mask_invalid_prec,
-    _new_figure,
-    _save_and_return,
-)
+from .core import _annotate_f1_peak, _configure_axes, _import_mpl, _mask_invalid_prec, _new_figure, _save_and_return
 from .data import PlotData
 from .theme import _build_rc
 
@@ -120,7 +115,6 @@ def pr_curve_by_category(
     -------
     (Figure, Axes)
     """
-    import numpy as np
 
     mpl, _, _ = _import_mpl()
     data = PlotData.from_coco_eval(coco_eval)
@@ -216,7 +210,9 @@ def pr_curve_top_n(
 
         ax.set(xlim=(0, 1), ylim=(0, 1), aspect="equal", xlabel="Recall", ylabel="Precision")
         ax.legend(fontsize=8, loc="lower left")
-        _configure_axes(ax, "Precision-Recall by Category", subtitle=f"IoU={data.iou_thresholds[t_idx]:.2f}", value_axis="y")
+        _configure_axes(
+            ax, "Precision-Recall by Category", subtitle=f"IoU={data.iou_thresholds[t_idx]:.2f}", value_axis="y"
+        )
     return _save_and_return(fig, ax, save_path)
 
 
@@ -412,6 +408,7 @@ def confusion_matrix(
         ax.set_frame_on(False)
         _configure_axes(ax, "Confusion Matrix", value_axis=None)
         from mpl_toolkits.axes_grid1 import make_axes_locatable
+
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.08)
         fig.colorbar(im, cax=cax)
@@ -677,22 +674,13 @@ def reliability_diagram(
         fig, ax = _new_figure((6, 6), ax, layout="compressed")
 
         # Gap shading: over/under-confident regions
-        ax.fill_between(
-            [0, 1], [0, 1], [0, 0], alpha=0.06, color="gray", label="_nolegend_",
-        )
+        ax.fill_between([0, 1], [0, 1], [0, 0], alpha=0.06, color="gray", label="_nolegend_")
 
         # Perfect calibration diagonal
         ax.plot([0, 1], [0, 1], "--", color="gray", linewidth=1, label="Perfect", zorder=1)
 
         # Accuracy bars
-        ax.bar(
-            midpoints[nonempty],
-            accuracies[nonempty],
-            width=bin_width * 0.85,
-            alpha=0.7,
-            label="Accuracy",
-            zorder=2,
-        )
+        ax.bar(midpoints[nonempty], accuracies[nonempty], width=bin_width * 0.85, alpha=0.7, label="Accuracy", zorder=2)
 
         # Gap bars -- calibration error in both directions.
         # Overconfident (accuracy < confidence): solid gap above the bar.
@@ -708,42 +696,51 @@ def reliability_diagram(
         overconfident = gaps > 0
         if overconfident.any():
             ax.bar(
-                mid[overconfident], gaps[overconfident],
+                mid[overconfident],
+                gaps[overconfident],
                 bottom=acc[overconfident],
-                width=bar_w, alpha=0.35, color=gap_color,
-                label="Gap", zorder=3,
+                width=bar_w,
+                alpha=0.35,
+                color=gap_color,
+                label="Gap",
+                zorder=3,
             )
             has_gap_label = True
 
         underconfident = gaps < 0
         if underconfident.any():
             ax.bar(
-                mid[underconfident], -gaps[underconfident],
+                mid[underconfident],
+                -gaps[underconfident],
                 bottom=conf[underconfident],
-                width=bar_w, facecolor="none", edgecolor=gap_color,
-                hatch="///", alpha=0.5, linewidth=0,
+                width=bar_w,
+                facecolor="none",
+                edgecolor=gap_color,
+                hatch="///",
+                alpha=0.5,
+                linewidth=0,
                 label="_nolegend_" if has_gap_label else "Gap",
                 zorder=3,
             )
 
-        ax.set(
-            xlim=(0, 1), ylim=(0, 1), aspect="equal",
-            xlabel="Confidence", ylabel="Accuracy",
-        )
+        ax.set(xlim=(0, 1), ylim=(0, 1), aspect="equal", xlabel="Confidence", ylabel="Accuracy")
         ax.legend(fontsize=9, loc="upper left")
 
         # ECE/MCE annotation
         ax.text(
-            0.95, 0.05,
+            0.95,
+            0.05,
             f"ECE = {ece:.4f}\nMCE = {mce:.4f}",
             transform=ax.transAxes,
             fontsize=9,
-            ha="right", va="bottom",
+            ha="right",
+            va="bottom",
             bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.8, "edgecolor": "gray"},
         )
 
         _configure_axes(
-            ax, "Reliability Diagram",
+            ax,
+            "Reliability Diagram",
             subtitle=f"IoU\u2265{cal['iou_threshold']:.2f}, {cal['num_detections']:,} detections",
             value_axis="y",
         )
@@ -817,8 +814,14 @@ def comparison_bar(
 
         ax.bar(x - bar_width / 2, vals_a, bar_width, label=name_a, color=color_a)
         ax.bar(
-            x + bar_width / 2, vals_b, bar_width, label=name_b, color=color_b,
-            yerr=yerr_b, capsize=3, error_kw={"linewidth": 1},
+            x + bar_width / 2,
+            vals_b,
+            bar_width,
+            label=name_b,
+            color=color_b,
+            yerr=yerr_b,
+            capsize=3,
+            error_kw={"linewidth": 1},
         )
 
         ax.set_xticks(x)
@@ -890,10 +893,6 @@ def category_deltas(
         ax.set_yticklabels(names)
         ax.invert_yaxis()
         ax.set_xlabel(f"AP Delta ({name_b} \u2212 {name_a})")
-        _configure_axes(
-            ax, "Per-Category AP Delta",
-            subtitle=f"{name_b} vs {name_a}",
-            value_axis="x",
-        )
+        _configure_axes(ax, "Per-Category AP Delta", subtitle=f"{name_b} vs {name_a}", value_axis="x")
 
     return _save_and_return(fig, ax, save_path)

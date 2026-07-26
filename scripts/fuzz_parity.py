@@ -296,6 +296,7 @@ def run_both(gt_dataset, dt_results, iou_type):
 def _metric_names_for(iou_type):
     """Get canonical metric names from the Rust evaluator."""
     from hotcoco import COCO
+
     return RsCOCOeval(COCO(), COCO(), iou_type).metric_keys()
 
 

@@ -5,6 +5,7 @@ Entry points:
   - coco explore CLI      — standalone server
   - browse.prepare_annotation_data()  — JSON-serializable annotation data for canvas overlay
 """
+
 from __future__ import annotations
 
 import math
@@ -46,11 +47,7 @@ def _assign_cat_colors(cat_ids: list[int]) -> dict[int, tuple[int, int, int]]:
 def _lighten_color(rgb: tuple[int, int, int], factor: float = 0.4) -> tuple[int, int, int]:
     """Blend RGB toward white by *factor* (0 = original, 1 = white)."""
     r, g, b = rgb
-    return (
-        int(r + (255 - r) * factor),
-        int(g + (255 - g) * factor),
-        int(b + (255 - b) * factor),
-    )
+    return (int(r + (255 - r) * factor), int(g + (255 - g) * factor), int(b + (255 - b) * factor))
 
 
 def _is_jupyter() -> bool:
@@ -69,14 +66,13 @@ def _require_browse_deps():
         import jinja2  # noqa: F401
         import uvicorn  # noqa: F401
     except ImportError:
-        raise ImportError(
-            "Browse dependencies required. Install with: pip install hotcoco[browse]"
-        ) from None
+        raise ImportError("Browse dependencies required. Install with: pip install hotcoco[browse]") from None
 
 
 # ---------------------------------------------------------------------------
 # Image I/O
 # ---------------------------------------------------------------------------
+
 
 def _load_image(image_dir: str, file_name: str, img_info: dict | None = None):
     """Load image from disk; return a gray placeholder if file is missing."""
@@ -111,6 +107,7 @@ def _resize_thumbnail(img, max_size: int = 320):
 # ---------------------------------------------------------------------------
 # Public rendering API
 # ---------------------------------------------------------------------------
+
 
 def render_thumbnail(
     coco,
@@ -175,8 +172,7 @@ def render_thumbnail(
 
 def _draw_dashed_rect(draw, x0, y0, x1, y1, color, width=2, dash_len=6):
     """Draw a dashed rectangle on a PIL ImageDraw."""
-    for start, end in [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)),
-                        ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]:
+    for start, end in [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]:
         _draw_dashed_line(draw, start, end, color, width, dash_len)
 
 
@@ -217,15 +213,20 @@ def _draw_dashed_line(draw, start, end, color, width=2, dash_len=6):
     while pos < length:
         seg_end = min(pos + dash_len, length)
         if drawing:
-            draw.line(
-                [(x0 + ux * pos, y0 + uy * pos), (x0 + ux * seg_end, y0 + uy * seg_end)],
-                fill=color, width=width,
-            )
+            draw.line([(x0 + ux * pos, y0 + uy * pos), (x0 + ux * seg_end, y0 + uy * seg_end)], fill=color, width=width)
         pos = seg_end
         drawing = not drawing
 
 
-def prepare_annotation_data(coco, img_id: int, cat_colors: dict, dt_coco=None, score_thr: float = 0.0, img_info: dict | None = None, eval_index=None) -> dict:
+def prepare_annotation_data(
+    coco,
+    img_id: int,
+    cat_colors: dict,
+    dt_coco=None,
+    score_thr: float = 0.0,
+    img_info: dict | None = None,
+    eval_index=None,
+) -> dict:
     """Prepare annotations as a JSON-serializable dict for client-side canvas rendering.
 
     Returns dict with: image (id/width/height), annotations (list), skeleton (links), nav.
@@ -235,7 +236,11 @@ def prepare_annotation_data(coco, img_id: int, cat_colors: dict, dt_coco=None, s
     if img_info is None:
         imgs = coco.load_imgs([img_id])
         if not imgs:
-            return {"image": {"id": img_id, "width": 0, "height": 0, "file_name": ""}, "annotations": [], "skeleton": []}
+            return {
+                "image": {"id": img_id, "width": 0, "height": 0, "file_name": ""},
+                "annotations": [],
+                "skeleton": [],
+            }
         img_info = imgs[0]
 
     annotations = []

@@ -18,10 +18,7 @@ class COCO:
     image_dir: str | None
 
     def __init__(
-        self,
-        annotation_file: str | dict[str, Any] | None = None,
-        *,
-        image_dir: str | None = None,
+        self, annotation_file: str | dict[str, Any] | None = None, *, image_dir: str | None = None
     ) -> None: ...
 
     # --- Query ---
@@ -33,16 +30,9 @@ class COCO:
         iscrowd: bool | None = None,
     ) -> list[int]: ...
     def get_cat_ids(
-        self,
-        cat_nms: list[str] = ...,
-        sup_nms: list[str] = ...,
-        cat_ids: list[int] = ...,
+        self, cat_nms: list[str] = ..., sup_nms: list[str] = ..., cat_ids: list[int] = ...
     ) -> list[int]: ...
-    def get_img_ids(
-        self,
-        img_ids: list[int] = ...,
-        cat_ids: list[int] = ...,
-    ) -> list[int]: ...
+    def get_img_ids(self, img_ids: list[int] = ..., cat_ids: list[int] = ...) -> list[int]: ...
 
     # --- Load ---
     def load_anns(self, ids: list[int]) -> list[dict[str, Any]]: ...
@@ -76,17 +66,9 @@ class COCO:
     ) -> COCO: ...
     def save(self, path: str) -> None: ...
     def split(
-        self,
-        val_frac: float = 0.2,
-        test_frac: float | None = None,
-        seed: int = 42,
+        self, val_frac: float = 0.2, test_frac: float | None = None, seed: int = 42
     ) -> tuple[COCO, COCO] | tuple[COCO, COCO, COCO]: ...
-    def sample(
-        self,
-        n: int | None = None,
-        frac: float | None = None,
-        seed: int = 42,
-    ) -> COCO: ...
+    def sample(self, n: int | None = None, frac: float | None = None, seed: int = 42) -> COCO: ...
 
     # --- Conversion ---
     def to_yolo(self, output_dir: str) -> dict[str, int]: ...
@@ -122,17 +104,8 @@ class COCO:
         areaRng: list[float] | None = None,
         iscrowd: bool | None = None,
     ) -> list[int]: ...
-    def getCatIds(
-        self,
-        catNms: list[str] = ...,
-        supNms: list[str] = ...,
-        catIds: list[int] = ...,
-    ) -> list[int]: ...
-    def getImgIds(
-        self,
-        imgIds: list[int] = ...,
-        catIds: list[int] = ...,
-    ) -> list[int]: ...
+    def getCatIds(self, catNms: list[str] = ..., supNms: list[str] = ..., catIds: list[int] = ...) -> list[int]: ...
+    def getImgIds(self, imgIds: list[int] = ..., catIds: list[int] = ...) -> list[int]: ...
     def loadAnns(self, ids: list[int]) -> list[dict[str, Any]]: ...
     def loadCats(self, ids: list[int]) -> list[dict[str, Any]]: ...
     def loadImgs(self, ids: list[int]) -> list[dict[str, Any]]: ...
@@ -175,9 +148,7 @@ class COCOeval:
     # --- Results ---
     def summary_lines(self) -> list[str]: ...
     def metric_keys(self) -> list[str]: ...
-    def get_results(
-        self, prefix: str | None = None, per_class: bool = False
-    ) -> dict[str, float]: ...
+    def get_results(self, prefix: str | None = None, per_class: bool = False) -> dict[str, float]: ...
     def print_results(self) -> None: ...
     def results(self, per_class: bool = False) -> dict[str, Any]: ...
     def save_results(self, path: str, per_class: bool = False) -> None: ...
@@ -185,23 +156,12 @@ class COCOeval:
 
     # --- Diagnostics ---
     def confusion_matrix(
-        self,
-        iou_thr: float = 0.5,
-        max_det: int | None = None,
-        min_score: float | None = None,
+        self, iou_thr: float = 0.5, max_det: int | None = None, min_score: float | None = None
     ) -> dict[str, Any]: ...
-    def tide_errors(
-        self, pos_thr: float = 0.5, bg_thr: float = 0.1
-    ) -> dict[str, Any]: ...
-    def calibration(
-        self, n_bins: int = 10, iou_threshold: float = 0.5
-    ) -> dict[str, Any]: ...
-    def slice_by(
-        self, slices: dict[str, list[int]] | Callable[[dict[str, Any]], str]
-    ) -> dict[str, Any]: ...
-    def image_diagnostics(
-        self, iou_thr: float = 0.5, score_thr: float = 0.5
-    ) -> dict[str, Any]: ...
+    def tide_errors(self, pos_thr: float = 0.5, bg_thr: float = 0.1) -> dict[str, Any]: ...
+    def calibration(self, n_bins: int = 10, iou_threshold: float = 0.5) -> dict[str, Any]: ...
+    def slice_by(self, slices: dict[str, list[int]] | Callable[[dict[str, Any]], str]) -> dict[str, Any]: ...
+    def image_diagnostics(self, iou_thr: float = 0.5, score_thr: float = 0.5) -> dict[str, Any]: ...
 
     # --- Properties ---
     @property
@@ -272,13 +232,9 @@ class Hierarchy:
     @staticmethod
     def from_parent_map(parent_map: dict[int, int]) -> Hierarchy: ...
     @staticmethod
-    def from_file(
-        path: str, label_to_id: dict[str, int] | None = None
-    ) -> Hierarchy: ...
+    def from_file(path: str, label_to_id: dict[str, int] | None = None) -> Hierarchy: ...
     @staticmethod
-    def from_dict(
-        tree_dict: dict[str, Any], label_to_id: dict[str, int] | None = None
-    ) -> Hierarchy: ...
+    def from_dict(tree_dict: dict[str, Any], label_to_id: dict[str, int] | None = None) -> Hierarchy: ...
     def ancestors(self, cat_id: int) -> list[int]: ...
     def children(self, cat_id: int) -> list[int]: ...
     def parent(self, cat_id: int) -> int | None: ...
@@ -288,11 +244,7 @@ class Hierarchy:
 # ---------------------------------------------------------------------------
 
 def compare(
-    eval_a: COCOeval,
-    eval_b: COCOeval,
-    n_bootstrap: int = 0,
-    seed: int = 42,
-    confidence: float = 0.95,
+    eval_a: COCOeval, eval_b: COCOeval, n_bootstrap: int = 0, seed: int = 42, confidence: float = 0.95
 ) -> dict[str, Any]: ...
 def init_as_pycocotools() -> None: ...
 def init_as_lvis() -> None: ...
@@ -321,9 +273,7 @@ class mask:
     @overload
     def decode(rle: list[dict[str, Any]]) -> npt.NDArray[np.uint8]: ...
     @staticmethod
-    def decode(
-        rle: dict[str, Any] | list[dict[str, Any]],
-    ) -> npt.NDArray[np.uint8]:
+    def decode(rle: dict[str, Any] | list[dict[str, Any]]) -> npt.NDArray[np.uint8]:
         """Decode RLE to binary mask. Single dict → 2D, list → 3D."""
         ...
     @staticmethod
@@ -333,41 +283,27 @@ class mask:
     @overload
     def area(rle: list[dict[str, Any]]) -> npt.NDArray[np.uint64]: ...
     @staticmethod
-    def area(
-        rle: dict[str, Any] | list[dict[str, Any]],
-    ) -> int | npt.NDArray[np.uint64]:
+    def area(rle: dict[str, Any] | list[dict[str, Any]]) -> int | npt.NDArray[np.uint64]:
         """Compute mask area. Single dict → int, list → array."""
         ...
     @staticmethod
-    def to_bbox(
-        rle: dict[str, Any] | list[dict[str, Any]],
-    ) -> npt.NDArray[np.float64]:
+    def to_bbox(rle: dict[str, Any] | list[dict[str, Any]]) -> npt.NDArray[np.float64]:
         """Convert RLE to bounding box [x, y, w, h]."""
         ...
     @staticmethod
-    def toBbox(
-        rle: dict[str, Any] | list[dict[str, Any]],
-    ) -> npt.NDArray[np.float64]: ...
+    def toBbox(rle: dict[str, Any] | list[dict[str, Any]]) -> npt.NDArray[np.float64]: ...
     @staticmethod
-    def merge(
-        rles: dict[str, Any] | list[dict[str, Any]], intersect: bool = False
-    ) -> dict[str, Any]:
+    def merge(rles: dict[str, Any] | list[dict[str, Any]], intersect: bool = False) -> dict[str, Any]:
         """Merge RLE masks via union (default) or intersection."""
         ...
     @staticmethod
     def iou(
-        dt: dict[str, Any] | list[dict[str, Any]],
-        gt: dict[str, Any] | list[dict[str, Any]],
-        iscrowd: list[bool],
+        dt: dict[str, Any] | list[dict[str, Any]], gt: dict[str, Any] | list[dict[str, Any]], iscrowd: list[bool]
     ) -> npt.NDArray[np.float64]:
         """Compute IoU between dt and gt RLE masks. Shape: (D, G)."""
         ...
     @staticmethod
-    def bbox_iou(
-        dt: list[list[float]],
-        gt: list[list[float]],
-        iscrowd: list[bool],
-    ) -> npt.NDArray[np.float64]:
+    def bbox_iou(dt: list[list[float]], gt: list[list[float]], iscrowd: list[bool]) -> npt.NDArray[np.float64]:
         """Compute IoU between dt and gt bounding boxes. Shape: (D, G)."""
         ...
     @staticmethod
@@ -384,23 +320,17 @@ class mask:
     def frBbox(bb: list[float], h: int, w: int) -> dict[str, Any]: ...
     @staticmethod
     def frPyObjects(
-        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]],
-        h: int,
-        w: int,
+        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]], h: int, w: int
     ) -> list[dict[str, Any]]:
         """Convert segmentation objects to RLE (pycocotools compat)."""
         ...
     @staticmethod
     def fr_py_objects(
-        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]],
-        h: int,
-        w: int,
+        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]], h: int, w: int
     ) -> list[dict[str, Any]]: ...
     @staticmethod
     def fr_py_objects_snake(
-        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]],
-        h: int,
-        w: int,
+        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]], h: int, w: int
     ) -> list[dict[str, Any]]: ...
     @staticmethod
     def rle_to_string(rle: dict[str, Any]) -> str:

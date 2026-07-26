@@ -1,4 +1,5 @@
 """Backward-compatible wrapper — delegates to COCOeval.image_diagnostics()."""
+
 from __future__ import annotations
 
 

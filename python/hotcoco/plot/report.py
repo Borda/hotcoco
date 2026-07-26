@@ -13,6 +13,7 @@ from .theme import CHROME, SERIES_COLORS
 # Metric display helpers
 # ---------------------------------------------------------------------------
 
+
 def _metric_math(key: str) -> str:
     """Return a LaTeX display string for a metric key.
 
@@ -58,8 +59,8 @@ def _area_desc(size_key: str, area_ranges: dict) -> str:
     if label not in area_ranges:
         return label
     lo, hi = area_ranges[label]
-    lo_px = round(lo ** 0.5) if lo > 0 else 0
-    hi_px = round(hi ** 0.5) if hi < 1e9 else None
+    lo_px = round(lo**0.5) if lo > 0 else 0
+    hi_px = round(hi**0.5) if hi < 1e9 else None
     if lo == 0 and hi_px:
         return f"area < {hi_px}\u00b2"
     if lo_px and hi_px:
@@ -113,6 +114,7 @@ def _build_metric_rows(data: PlotData) -> tuple[list, list, str]:
     ar_kpi_key = ar_rows[0][0] if ar_rows else "AR100"
     return ap_rows, ar_rows, ar_kpi_key
 
+
 # ---------------------------------------------------------------------------
 # Layout constants (inches, letter page)
 # ---------------------------------------------------------------------------
@@ -165,14 +167,7 @@ def _kpi_tile(ax, value: str, label: str, vc) -> None:
         spine.set_linewidth(0.6)
     ax.text(0.5, 0.62, value, fontsize=9, fontweight="bold", color=vc, ha="center", va="center", transform=ax.transAxes)
     ax.text(
-        0.5,
-        0.28,
-        _metric_math(label),
-        fontsize=8,
-        color=_RC["muted"],
-        ha="center",
-        va="center",
-        transform=ax.transAxes,
+        0.5, 0.28, _metric_math(label), fontsize=8, color=_RC["muted"], ha="center", va="center", transform=ax.transAxes
     )
 
 
@@ -211,9 +206,7 @@ def _draw_table_caption(ax, label: str) -> None:
 def _draw_metrics_table(ax, rows, metrics) -> None:
     ax.set_axis_off()
     ax.set_facecolor("none")
-    cell_text = [
-        [_metric_math(name_key), desc, f"{metrics.get(mkey, 0.0):.3f}"] for name_key, desc, mkey in rows
-    ]
+    cell_text = [[_metric_math(name_key), desc, f"{metrics.get(mkey, 0.0):.3f}"] for name_key, desc, mkey in rows]
     tbl = ax.table(cellText=cell_text, colWidths=[0.19, 0.59, 0.22], bbox=[0, 0, 1, 1], cellLoc="left", edges="open")
     tbl.auto_set_font_size(False)
     n = len(rows)
@@ -292,9 +285,7 @@ def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, *, is_oi
     ax.set_ylabel("Precision", fontsize=6, color=_RC["muted"], labelpad=3)
 
     if is_oid:
-        handles = [
-            _L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{metrics.get('AP', 0):.3f}  AP50"),
-        ]
+        handles = [_L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{metrics.get('AP', 0):.3f}  AP50")]
     else:
         handles = [
             _L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{metrics.get('AP50', 0):.3f}  AP50"),
@@ -381,7 +372,20 @@ def _draw_context_box(
 
 
 def _draw_metrics_block(
-    fig, gs_cell, AP_ROWS, AR_ROWS, metrics, recall_pts, pr50, pr75, pr_mean, f1_peak, ar_kpi_key="AR100", *, is_oid=False, block_h=0.0
+    fig,
+    gs_cell,
+    AP_ROWS,
+    AR_ROWS,
+    metrics,
+    recall_pts,
+    pr50,
+    pr75,
+    pr_mean,
+    f1_peak,
+    ar_kpi_key="AR100",
+    *,
+    is_oid=False,
+    block_h=0.0,
 ) -> None:
     gs_met = gs_cell.subgridspec(1, 3, width_ratios=[9, 9, 4], wspace=0.1)
 
@@ -419,10 +423,7 @@ def _draw_metrics_block(
     _draw_report_pr_curve(ax_pr_cur, recall_pts, pr50, pr75, pr_mean, metrics, is_oid=is_oid)
 
     if is_oid:
-        kpi_data = [
-            (f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_50"]),
-            (f"{f1_peak:.3f}", "F1", _RC["text"]),
-        ]
+        kpi_data = [(f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_50"]), (f"{f1_peak:.3f}", "F1", _RC["text"])]
     else:
         kpi_data = [
             (f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_mean"]),
@@ -435,7 +436,9 @@ def _draw_metrics_block(
         _kpi_tile(fig.add_subplot(gs_kpi[i]), val, lbl, vc)
 
 
-def _draw_category_section(fig, gs_cell, cat_items, n_cols, rows_per_col, has_counts, ann_counts, img_counts, virtual_cats=None) -> None:
+def _draw_category_section(
+    fig, gs_cell, cat_items, n_cols, rows_per_col, has_counts, ann_counts, img_counts, virtual_cats=None
+) -> None:
     from matplotlib.patches import Rectangle
 
     gs_cat = gs_cell.subgridspec(
@@ -694,24 +697,21 @@ def report(
     n_cols = 3
     rows_per_col = math.ceil(n_cats / n_cols) if n_cats > 0 else 1
     n_captions = 2 if AR_ROWS else 1
-    block_h = max(
-        n_captions * _CAP_H + (len(AP_ROWS) + len(AR_ROWS)) * _ROW_H + _GAP * 1.5,
-        _MIN_BLOCK_H,
-    )
+    block_h = max(n_captions * _CAP_H + (len(AP_ROWS) + len(AR_ROWS)) * _ROW_H + _GAP * 1.5, _MIN_BLOCK_H)
     cat_h = _CAT_HDR_H + rows_per_col * _CAT_ROW_H
 
     # Single source of truth: row heights drive both page_h and height_ratios.
     # Row index names match the unpacked constants below.
     _row_heights = [
-        _HEADER_H,    # _R_HEADER
-        _GAP * 0.5,   # _R_GAP1
-        _CTX_H,       # _R_CTX
-        _GAP * 0.8,   # _R_GAP2
-        _SECTION_H,   # _R_SEC1
-        block_h,      # _R_METRICS
-        _GAP * 0.6,   # _R_GAP3
-        _SECTION_H,   # _R_SEC2
-        cat_h,        # _R_CATS
+        _HEADER_H,  # _R_HEADER
+        _GAP * 0.5,  # _R_GAP1
+        _CTX_H,  # _R_CTX
+        _GAP * 0.8,  # _R_GAP2
+        _SECTION_H,  # _R_SEC1
+        block_h,  # _R_METRICS
+        _GAP * 0.6,  # _R_GAP3
+        _SECTION_H,  # _R_SEC2
+        cat_h,  # _R_CATS
     ]
     _R_HEADER, _R_GAP1, _R_CTX, _R_GAP2, _R_SEC1, _R_METRICS, _R_GAP3, _R_SEC2, _R_CATS = range(9)
     page_h = sum(_row_heights) + 2 * _MARGIN_V
@@ -738,14 +738,31 @@ def report(
             )
             _draw_section_heading(fig.add_subplot(gs[_R_SEC1]), "SUMMARY METRICS")
             _draw_metrics_block(
-                fig, gs[_R_METRICS], AP_ROWS, AR_ROWS, metrics,
-                data.recall_pts, pr50, pr75, pr_mean, f1_peak,
-                ar_kpi_key=ar_kpi_key, is_oid=is_oid, block_h=block_h
+                fig,
+                gs[_R_METRICS],
+                AP_ROWS,
+                AR_ROWS,
+                metrics,
+                data.recall_pts,
+                pr50,
+                pr75,
+                pr_mean,
+                f1_peak,
+                ar_kpi_key=ar_kpi_key,
+                is_oid=is_oid,
+                block_h=block_h,
             )
             _draw_section_heading(fig.add_subplot(gs[_R_SEC2]), "PER-CATEGORY AP  \u00b7  SORTED DESCENDING")
             _draw_category_section(
-                fig, gs[_R_CATS], cat_items, n_cols, rows_per_col,
-                has_counts, ann_counts, img_counts, virtual_cats=virtual_cats,
+                fig,
+                gs[_R_CATS],
+                cat_items,
+                n_cols,
+                rows_per_col,
+                has_counts,
+                ann_counts,
+                img_counts,
+                virtual_cats=virtual_cats,
             )
             _draw_footer(fig, page_h)
 

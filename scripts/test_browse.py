@@ -3,6 +3,7 @@
 Run with:
     uv run pytest scripts/test_browse.py -v
 """
+
 import os
 import tempfile
 
@@ -10,14 +11,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_coco(dataset_dict):
     """Build a COCO object from an in-memory dataset dict."""
     from hotcoco import COCO
+
     return COCO(dataset_dict)
 
 
@@ -28,8 +30,12 @@ def _minimal_dataset(with_segm=False, with_kpts=False):
     img.save(os.path.join(tmpdir, "img001.jpg"))
 
     ann = {
-        "id": 1, "image_id": 1, "category_id": 1,
-        "bbox": [10, 10, 30, 20], "area": 600, "iscrowd": 0,
+        "id": 1,
+        "image_id": 1,
+        "category_id": 1,
+        "bbox": [10, 10, 30, 20],
+        "area": 600,
+        "iscrowd": 0,
         "segmentation": [],
     }
     if with_segm:
@@ -56,15 +62,18 @@ def _minimal_dataset(with_segm=False, with_kpts=False):
 # Color palette tests
 # ---------------------------------------------------------------------------
 
+
 def test_assign_cat_colors_deterministic():
     from hotcoco.browse import _assign_cat_colors
+
     colors1 = _assign_cat_colors([1, 2, 3])
     colors2 = _assign_cat_colors([1, 2, 3])
     assert colors1 == colors2
 
 
 def test_assign_cat_colors_wraps_palette():
-    from hotcoco.browse import _assign_cat_colors, _PALETTE
+    from hotcoco.browse import _PALETTE, _assign_cat_colors
+
     n = len(_PALETTE)
     colors = _assign_cat_colors([0, n, 2 * n])
     # cat 0 and cat n should share the same color
@@ -73,6 +82,7 @@ def test_assign_cat_colors_wraps_palette():
 
 def test_assign_cat_colors_returns_rgb_tuples():
     from hotcoco.browse import _assign_cat_colors
+
     colors = _assign_cat_colors([42])
     c = colors[42]
     assert isinstance(c, tuple) and len(c) == 3
@@ -83,8 +93,10 @@ def test_assign_cat_colors_returns_rgb_tuples():
 # _is_jupyter
 # ---------------------------------------------------------------------------
 
+
 def test_is_jupyter_returns_false_outside_notebook():
     from hotcoco.browse import _is_jupyter
+
     assert _is_jupyter() is False
 
 
@@ -92,8 +104,10 @@ def test_is_jupyter_returns_false_outside_notebook():
 # _load_image
 # ---------------------------------------------------------------------------
 
+
 def test_load_image_returns_pil_image(tmp_path):
     from hotcoco.browse import _load_image
+
     img_path = tmp_path / "test.jpg"
     Image.new("RGB", (50, 40), color=(10, 20, 30)).save(str(img_path))
     result = _load_image(str(tmp_path), "test.jpg")
@@ -103,6 +117,7 @@ def test_load_image_returns_pil_image(tmp_path):
 
 def test_load_image_missing_returns_placeholder(tmp_path):
     from hotcoco.browse import _load_image
+
     result = _load_image(str(tmp_path), "nonexistent.jpg")
     assert isinstance(result, Image.Image)
     # placeholder is gray
@@ -114,8 +129,10 @@ def test_load_image_missing_returns_placeholder(tmp_path):
 # render_thumbnail
 # ---------------------------------------------------------------------------
 
+
 def test_render_thumbnail_returns_pil_image():
     from hotcoco.browse import render_thumbnail
+
     dataset, tmpdir = _minimal_dataset()
     coco = _make_coco(dataset)
     result = render_thumbnail(coco, 1, tmpdir)
@@ -124,6 +141,7 @@ def test_render_thumbnail_returns_pil_image():
 
 def test_render_thumbnail_respects_max_size():
     from hotcoco.browse import render_thumbnail
+
     dataset, tmpdir = _minimal_dataset()
     coco = _make_coco(dataset)
     result = render_thumbnail(coco, 1, tmpdir, max_size=50)
@@ -134,8 +152,10 @@ def test_render_thumbnail_respects_max_size():
 # render_annotated_image
 # ---------------------------------------------------------------------------
 
+
 def test_render_annotated_image_returns_tuple():
-    from hotcoco.browse import render_annotated_image, _assign_cat_colors
+    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+
     dataset, tmpdir = _minimal_dataset(with_segm=True)
     coco = _make_coco(dataset)
     cat_colors = _assign_cat_colors([1])
@@ -147,7 +167,8 @@ def test_render_annotated_image_returns_tuple():
 
 
 def test_render_annotated_image_full_resolution():
-    from hotcoco.browse import render_annotated_image, _assign_cat_colors
+    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+
     dataset, tmpdir = _minimal_dataset()
     coco = _make_coco(dataset)
     cat_colors = _assign_cat_colors([1])
@@ -156,7 +177,8 @@ def test_render_annotated_image_full_resolution():
 
 
 def test_render_annotated_image_segm_returns_bool_mask():
-    from hotcoco.browse import render_annotated_image, _assign_cat_colors
+    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+
     dataset, tmpdir = _minimal_dataset(with_segm=True)
     coco = _make_coco(dataset)
     cat_colors = _assign_cat_colors([1])
@@ -167,7 +189,8 @@ def test_render_annotated_image_segm_returns_bool_mask():
 
 
 def test_render_annotated_image_bbox_returns_tuple():
-    from hotcoco.browse import render_annotated_image, _assign_cat_colors
+    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+
     dataset, tmpdir = _minimal_dataset()
     coco = _make_coco(dataset)
     cat_colors = _assign_cat_colors([1])
@@ -178,7 +201,8 @@ def test_render_annotated_image_bbox_returns_tuple():
 
 
 def test_render_annotated_image_with_keypoints():
-    from hotcoco.browse import render_annotated_image, _assign_cat_colors
+    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+
     dataset, tmpdir = _minimal_dataset(with_segm=True, with_kpts=True)
     coco = _make_coco(dataset)
     cat_colors = _assign_cat_colors([1])
@@ -190,19 +214,23 @@ def test_render_annotated_image_with_keypoints():
 # build_app
 # ---------------------------------------------------------------------------
 
+
 def test_build_app_returns_blocks():
     pytest.importorskip("gradio")
     from hotcoco.browse import build_app
+
     dataset, tmpdir = _minimal_dataset()
     coco = _make_coco(dataset)
     app = build_app(coco, image_dir=tmpdir)
     import gradio as gr
+
     assert isinstance(app, gr.Blocks)
 
 
 def test_build_app_raises_without_image_dir():
     pytest.importorskip("gradio")
     from hotcoco.browse import build_app
+
     dataset, tmpdir = _minimal_dataset()
     coco = _make_coco(dataset)
     with pytest.raises(ValueError, match="image_dir is required"):
@@ -213,9 +241,11 @@ def test_build_app_falls_back_to_coco_image_dir():
     pytest.importorskip("gradio")
     from hotcoco import COCO
     from hotcoco.browse import build_app
+
     dataset, tmpdir = _minimal_dataset()
     coco = COCO(dataset, image_dir=tmpdir)
     import gradio as gr
+
     app = build_app(coco)  # no explicit image_dir
     assert isinstance(app, gr.Blocks)
 
@@ -224,8 +254,10 @@ def test_build_app_falls_back_to_coco_image_dir():
 # COCO.browse() Python API
 # ---------------------------------------------------------------------------
 
+
 def test_coco_has_image_dir_attribute():
     from hotcoco import COCO
+
     coco = COCO()
     assert hasattr(coco, "image_dir")
     assert coco.image_dir is None
@@ -233,6 +265,7 @@ def test_coco_has_image_dir_attribute():
 
 def test_coco_image_dir_via_constructor():
     from hotcoco import COCO
+
     dataset, tmpdir = _minimal_dataset()
     coco = COCO(dataset, image_dir=tmpdir)
     assert coco.image_dir == tmpdir
@@ -240,6 +273,7 @@ def test_coco_image_dir_via_constructor():
 
 def test_coco_image_dir_setter():
     from hotcoco import COCO
+
     coco = COCO()
     coco.image_dir = "/tmp/images"
     assert coco.image_dir == "/tmp/images"
@@ -248,6 +282,7 @@ def test_coco_image_dir_setter():
 def test_coco_browse_raises_without_image_dir():
     pytest.importorskip("gradio")
     from hotcoco import COCO
+
     dataset, _ = _minimal_dataset()
     coco = COCO(dataset)
     with pytest.raises(ValueError, match="image_dir is required"):
@@ -258,10 +293,12 @@ def test_coco_browse_returns_blocks():
     pytest.importorskip("gradio")
     import gradio as gr
     from hotcoco import COCO
+
     dataset, tmpdir = _minimal_dataset()
     coco = COCO(dataset, image_dir=tmpdir)
     # Don't actually launch -- just build
     from hotcoco import browse as _browse
+
     app = _browse.build_app(coco)
     assert isinstance(app, gr.Blocks)
 
@@ -270,14 +307,12 @@ def test_coco_browse_returns_blocks():
 # CLI: coco explore
 # ---------------------------------------------------------------------------
 
+
 def test_explore_argparse_help():
     """coco explore --help exits 0."""
     import subprocess
-    result = subprocess.run(
-        ["uv", "run", "coco", "explore", "--help"],
-        capture_output=True,
-        text=True,
-    )
+
+    result = subprocess.run(["uv", "run", "coco", "explore", "--help"], capture_output=True, text=True)
     assert result.returncode == 0
     assert "--gt" in result.stdout
     assert "--images" in result.stdout
@@ -299,8 +334,9 @@ def test_explore_missing_gradio_exits_1(tmp_path, monkeypatch):
     # Remove cached gradio from sys.modules if present
     sys.modules.pop("gradio", None)
 
-    from hotcoco.cli import cmd_explore
     import argparse
+
+    from hotcoco.cli import cmd_explore
 
     args = argparse.Namespace(gt="x.json", images=str(tmp_path), batch_size=12, port=7860, share=False)
     with pytest.raises(SystemExit) as exc:
