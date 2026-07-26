@@ -6,11 +6,9 @@ Run with: uv run pytest scripts/test_stubs.py -v
 from __future__ import annotations
 
 import ast
-import inspect
 from pathlib import Path
 
 import hotcoco
-
 
 STUB_PATH = Path(__file__).resolve().parent.parent / "python" / "hotcoco" / "__init__.pyi"
 
@@ -62,8 +60,19 @@ def test_top_level_exports_covered():
     stub_names = _parse_stub_names()["__top__"]
     runtime_names = _public_names(hotcoco)
 
-    # These are re-exports or internal names we don't need to stub
-    skip = {"LVIS", "LVISeval", "LVISResults", "CocoDetection", "CocoEvaluator", "hotcoco", "integrations"}
+    # These are re-exports or internal names we don't need to stub.
+    # "annotations" is the _Feature object bound by `from __future__ import
+    # annotations` in __init__.py — a language directive, not public API.
+    skip = {
+        "LVIS",
+        "LVISeval",
+        "LVISResults",
+        "CocoDetection",
+        "CocoEvaluator",
+        "hotcoco",
+        "integrations",
+        "annotations",
+    }
     runtime_names -= skip
 
     missing = runtime_names - stub_names

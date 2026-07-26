@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `import hotcoco` raised `TypeError: unsupported operand type(s) for |` on Python 3.9,
+  the oldest version declared by `requires-python` and served by the single `abi3-py39`
+  wheel. `python/hotcoco/__init__.py` and `python/hotcoco/_style.py` used PEP 604
+  `X | None` unions in annotations that Python evaluates at runtime (function
+  signatures, and an annotated attribute assignment), which requires 3.10. Both files
+  now carry `from __future__ import annotations`, so the annotations are never
+  evaluated. Reproduced and verified fixed on CPython 3.9.6.
+- CI now runs the Python smoke test on a `["3.9", "3.12"]` matrix instead of 3.12 only.
+  The declared support floor had never been exercised, which is why the import failure
+  above shipped.
 - Bumped `crossbeam-epoch` (→0.9.20), `rand` (→0.9.5), and `quick-xml` (→0.41) to clear RUSTSEC-2026-0204, -0097, -0194, and -0195 security advisories.
 - `coco-eval --completions <shell>` works standalone. It previously required `--gt` and
   `--dt`, which clap validated before the completions branch ran — so the flag could
