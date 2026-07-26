@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `hotcoco` extension through `.venv`, so it type-checks call sites against the
   hand-written `__init__.pyi` — catching the signature drift that
   `scripts/test_stubs.py` cannot see, since that test checks name coverage only.
+- Python lint is now enforced instead of merely available. The pre-commit hook runs
+  `ruff format --check` and `ruff check` whenever Python files are staged (and fails
+  loudly if `uv` is missing rather than skipping), and CI gained a `python-lint` job.
+  `just py-lint` and `just py-fmt-check` had existed for a while but gated nothing,
+  which is how the tree accumulated 48 ruff errors.
 
 ### Changed
 

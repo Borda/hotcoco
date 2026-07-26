@@ -45,6 +45,23 @@ jobs:
       - name: Tests
         run: cargo test -p hotcoco -p hotcoco-cli
 
+  python-lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Pinned so a new ruff release cannot turn a green PR red on its own.
+      # Keep in step with the `ruff` pin in pyproject.toml's [dev] extra; these
+      # are the same checks as `just py-fmt-check` and `just py-lint`.
+      - name: Ruff format check
+        run: uvx ruff@0.15.6 format --check python/ scripts/
+
+      - name: Ruff lint
+        run: uvx ruff@0.15.6 check python/ scripts/
+
   python:
     name: Python smoke test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
