@@ -1,6 +1,12 @@
 # One-time environment setup (run this first, before anything else)
 setup:
     uv sync --all-extras
+    # rust-analyzer backs editor/LSP code intelligence. It is not in
+    # rust-toolchain.toml on purpose (that would make CI download it too), and a
+    # channel bump drops it, so re-run `just setup` after bumping. Note
+    # ~/.cargo/bin/rust-analyzer is a rustup proxy: `which` finds it even when
+    # the component is missing, so absence only shows up as a failed spawn.
+    rustup component add rust-analyzer
 
 # Build the Python extension (required before running any Python scripts)
 # Run `just setup` first if maturin is missing.

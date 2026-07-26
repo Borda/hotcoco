@@ -5,7 +5,15 @@
 #
 # Bump `channel` manually on a cadence (the /ship skill nudges when it goes
 # stale). After bumping, run `cargo clippy --workspace --all-targets -- -D
-# warnings` locally and fix any newly-surfaced lints before committing.
+# warnings` locally and fix any newly-surfaced lints before committing, then
+# re-run `just setup` — a channel switch drops any component not listed here,
+# including rust-analyzer.
+#
+# rust-analyzer is deliberately NOT listed below. Components here are installed
+# by CI too (actions-rust-lang/setup-rust-toolchain runs `rustup toolchain
+# install`, and its `components:` input only ADDS, it cannot subtract), so
+# listing it would make all five CI jobs download an editor backend they never
+# use. `just setup` installs it locally instead.
 [toolchain]
 channel = "1.97.1"
 components = ["rustfmt", "clippy"]

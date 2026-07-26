@@ -39,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   loudly if `uv` is missing rather than skipping), and CI gained a `python-lint` job.
   `just py-lint` and `just py-fmt-check` had existed for a while but gated nothing,
   which is how the tree accumulated 48 ruff errors.
+- `just setup` now installs the `rust-analyzer` rustup component. Because the toolchain
+  is pinned and the component was never installed for the pinned version, editors and
+  LSP clients had no Rust code intelligence in this repo — silently, because
+  `~/.cargo/bin/rust-analyzer` is a rustup proxy: `which` resolved it while every spawn
+  failed with "Unknown binary". It is deliberately *not* listed in `rust-toolchain.toml`,
+  since CI installs that file's components and the setup action's `components:` input
+  only adds and cannot subtract — listing it there would make all five CI jobs download
+  an editor backend they never use. Re-run `just setup` after a channel bump; switching
+  channels drops any component not in the toolchain file.
 
 ### Changed
 
