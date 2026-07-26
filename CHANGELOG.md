@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Architecture conformance tests (`crates/hotcoco/tests/architecture.rs`) that fail the
   build if the IoU formula, the parallelism threshold, or greedy matching is duplicated
   outside `primitives/`.
+- `[tool.pyright]` config for the Python package, scoped to `python/` (excluding the
+  untyped `scripts/` and vendored `external/`) at `basic` strictness with
+  `pythonVersion = "3.9"` to match ruff's `target-version`. It resolves the compiled
+  `hotcoco` extension through `.venv`, so it type-checks call sites against the
+  hand-written `__init__.pyi` — catching the signature drift that
+  `scripts/test_stubs.py` cannot see, since that test checks name coverage only.
 
 ### Changed
 
@@ -53,9 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its hover, completing what the code already intended — the raw matrix was being read
   and discarded under a comment reading "Hover text with counts". A rate alone cannot
   distinguish one stray detection from a systematic confusion.
+- `ruff` is pinned to `>=0.15,<0.16` instead of `>=0.4`. Lint results are now a gate
+  (pre-commit and CI), so an unconstrained ruff could fail a PR that changed no code.
 
 ### Fixed
 
+- `shapely` was never declared as a dependency, so `scripts/fuzz_obb_parity.py` — the
+  OBB IoU fuzz harness the `/parity` skill offers on request — failed at collection with
+  `ModuleNotFoundError` for anyone whose venv did not happen to have it. It is now in the
+  `dev` extra, and all 9 OBB parity tests pass.
 - `import hotcoco` raised `TypeError: unsupported operand type(s) for |` on Python 3.9,
   the oldest version declared by `requires-python` and served by the single `abi3-py39`
   wheel. `python/hotcoco/__init__.py` and `python/hotcoco/_style.py` used PEP 604
