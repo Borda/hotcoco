@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `eval/summarize.rs` is split by responsibility. It was 861 lines doing five unrelated
+  jobs — the metric catalog, the reduction, output formatting, pipeline orchestration,
+  and `f_scores` — which made "where is AP75 defined?" and "where is it computed?" the
+  same unhelpful answer. Now: `eval/metrics.rs` owns the catalog (pure `MetricDef`
+  configuration, no evaluation data), `eval/summarize.rs` owns only the reduction
+  (accumulated arrays + definitions → numbers, 127 lines), and `eval/report.rs` owns
+  presentation (`summarize_lines`, `summarize`, `metric_keys`, `get_results`,
+  `f_scores`, `print_results`, `results`). `run()` moved to the `COCOeval` facade in
+  `eval/mod.rs`, where the other pipeline entry points live. No public path changed and
+  no behavior changed.
+
 - TIDE's false-positive classifier is now a free `classify_fp` function over an
   explicit `FpEvidence` struct, with `ErrType` promoted out of the function body.
   The tidecv priority order (`Loc > Cls > Dupe > Bkg > Both`) is a parity contract,

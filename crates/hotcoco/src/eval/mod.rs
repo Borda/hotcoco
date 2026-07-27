@@ -12,6 +12,8 @@ mod diagnostics;
 mod evaluate;
 pub mod expand;
 mod iou;
+mod metrics;
+mod report;
 mod results;
 pub mod slice;
 mod summarize;
@@ -144,6 +146,16 @@ impl COCOeval {
             freq_groups: FreqGroups::default(),
             hierarchy: None,
         }
+    }
+
+    /// Run the full evaluation pipeline in one call: `evaluate` → `accumulate` → `summarize`.
+    ///
+    /// Equivalent to calling the three methods in sequence. Primarily used with LVIS
+    /// pipelines (e.g. Detectron2 / MMDetection) that expect a single `run()` entry point.
+    pub fn run(&mut self) {
+        self.evaluate();
+        self.accumulate();
+        self.summarize();
     }
 
     /// Create a new COCOeval configured for Open Images detection evaluation.

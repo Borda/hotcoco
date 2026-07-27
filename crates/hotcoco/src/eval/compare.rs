@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use super::COCOeval;
 use super::accumulate::accumulate_impl;
-use super::summarize::{MetricDef, build_metric_defs, per_cat_ap_static, summarize_impl};
+use super::metrics::{MetricDef, build_metric_defs};
+use super::summarize::{per_cat_ap_static, summarize_impl};
 
 /// Options for pairwise model comparison.
 #[derive(Debug, Clone)]
