@@ -30,7 +30,7 @@ pub use diagnostics::{
 };
 pub use matching::EvalImg;
 pub use mode::EvalMode;
-pub use results::EvalResults;
+pub use results::{EvalParams, EvalResults};
 pub use slice::{SliceResult, SlicedResults};
 pub use tide::TideErrors;
 

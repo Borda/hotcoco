@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use crate::params::{Params, default_iou_thrs};
+use crate::params::{IouType, Params, default_iou_thrs};
+use crate::primitives::report::{EvalReport, Provenance};
 
 use super::accumulate::AccumulatedEval;
 use super::metrics::build_metric_defs;
@@ -345,32 +346,21 @@ impl COCOeval {
     /// * `per_class` — When `true`, includes per-category AP values in the result.
     ///   Categories where all precision values are −1 are excluded.
     pub fn results(&self, per_class: bool) -> crate::error::Result<EvalResults> {
-        let stats = self.stats.as_ref().ok_or_else(|| {
-            "summarize() must be called before results(). \
-             Run evaluate(), accumulate(), and summarize() first."
-                .to_string()
-        })?;
+        // A projection of the report, so the two can never disagree about a
+        // metric. `params` is taken from the typed `Params` rather than from the
+        // report's opaque `serde_json::Value`, which keeps the serialized shape
+        // of `EvalResults` byte-stable for anyone parsing saved result files.
+        let report = self.report()?;
 
-        let keys = self.metric_keys();
-
-        let metrics: HashMap<String, f64> = keys
-            .iter()
-            .zip(stats.iter())
-            .map(|(&k, &v)| (k.to_string(), v))
-            .collect();
-
+        // `None` (not an empty map) when `accumulate()` has not run, matching the
+        // pre-1.0 behavior — an empty map would claim "no classes scored" where
+        // the truth is "per-class data was never computed".
         let per_class_map = if per_class {
-            self.eval.as_ref().map(|eval| {
-                let per_cat = self.per_cat_ap(eval);
-                per_cat
+            self.eval.as_ref().map(|_| {
+                report
+                    .per_class
                     .iter()
-                    .zip(self.params.cat_ids.iter())
-                    .filter(|&(&ap, _)| ap >= 0.0)
-                    .filter_map(|(&ap, &cat_id)| {
-                        self.coco_gt
-                            .get_cat(cat_id)
-                            .map(|cat| (cat.name.clone(), ap))
-                    })
+                    .filter_map(|(name, m)| m.get("AP").map(|&ap| (name.clone(), ap)))
                     .collect()
             })
         } else {
@@ -380,8 +370,104 @@ impl COCOeval {
         Ok(EvalResults {
             hotcoco_version: env!("CARGO_PKG_VERSION").to_string(),
             params: EvalParams::from_params(&self.params, self.eval_mode),
-            metrics,
+            metrics: report.metrics.into_iter().collect(),
             per_class: per_class_map,
         })
+    }
+
+    /// Assemble a [`EvalReport`] from this evaluation.
+    ///
+    /// Requires [`summarize`](COCOeval::summarize) to have been called. This is
+    /// the shape every metric family reports in, so a renderer that can draw a
+    /// detection report can draw a panoptic or tracking one unchanged.
+    ///
+    /// # Provenance
+    ///
+    /// [`Provenance::ParityVerified`] for bbox, segm, and keypoints, which are
+    /// checked against pycocotools; [`Provenance::Extension`] for oriented boxes,
+    /// which are a real metric but have no reference implementation to be
+    /// standard against. See [`Provenance`] — this is what stops extension
+    /// numbers being presented as leaderboard numbers.
+    ///
+    /// # Curves
+    ///
+    /// The aggregate precision-recall curve per IoU threshold (`pr@0.50` …),
+    /// meaned over categories at `area="all"` and the largest `max_dets`, plus
+    /// the shared `rec_thrs` x-axis. That is the slice a chart actually draws;
+    /// the full `T×R×K×A×M` tensor stays reachable through
+    /// [`accumulated`](COCOeval::accumulated) rather than being copied in here
+    /// (on COCO it is ~1M floats).
+    pub fn report(&self) -> crate::error::Result<EvalReport> {
+        let stats = self.stats.as_ref().ok_or_else(|| {
+            "summarize() must be called before report(). \
+             Run evaluate(), accumulate(), and summarize() first."
+                .to_string()
+        })?;
+
+        let provenance = if self.params.iou_type == IouType::Obb {
+            Provenance::Extension
+        } else {
+            Provenance::ParityVerified
+        };
+
+        let keys = self.metric_keys();
+        let mut report = EvalReport::new("detection", provenance)
+            .with_metrics(keys.iter().copied().zip(stats.iter().copied()))
+            .with_params(serde_json::to_value(EvalParams::from_params(
+                &self.params,
+                self.eval_mode,
+            ))?);
+
+        let Some(eval) = &self.eval else {
+            return Ok(report);
+        };
+
+        // Per-class AP. Categories with no valid precision anywhere report -1.0
+        // and are omitted rather than recorded as a real score.
+        for (&ap, &cat_id) in self.per_cat_ap(eval).iter().zip(self.params.cat_ids.iter()) {
+            if ap >= 0.0 {
+                if let Some(cat) = self.coco_gt.get_cat(cat_id) {
+                    report = report.with_class_metric(cat.name.clone(), "AP", ap);
+                }
+            }
+        }
+
+        // LVIS frequency buckets as a structured group axis. Same values as the
+        // APr/APc/APf headline metrics — this is a view of them, not a second
+        // computation — but it saves renderers from string-matching metric names
+        // to discover that a grouping exists.
+        if self.eval_mode == EvalMode::Lvis {
+            for (group, key) in [("rare", "APr"), ("common", "APc"), ("frequent", "APf")] {
+                if let Some(v) = report.metrics.get(key).copied() {
+                    report = report.with_group_metric(group, "AP", v);
+                }
+            }
+        }
+
+        // Aggregate PR curves: mean precision over categories at each recall
+        // threshold, for each IoU threshold.
+        let a_idx = self.area_all_idx();
+        let m_idx = eval.shape.m - 1;
+        for (t_idx, &thr) in self.params.iou_thrs.iter().enumerate() {
+            let curve: Vec<f64> = (0..eval.shape.r)
+                .map(|r_idx| {
+                    let vals: Vec<f64> = (0..eval.shape.k)
+                        .map(|k_idx| {
+                            eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
+                        })
+                        .filter(|&v| v >= 0.0)
+                        .collect();
+                    if vals.is_empty() {
+                        -1.0
+                    } else {
+                        vals.iter().sum::<f64>() / vals.len() as f64
+                    }
+                })
+                .collect();
+            report = report.with_curve(format!("pr@{thr:.2}"), curve);
+        }
+        report = report.with_curve("rec_thrs", self.params.rec_thrs.clone());
+
+        Ok(report)
     }
 }

@@ -36,9 +36,10 @@
 //! - [`assign`] — rectangular LSAP, semantic port of scipy.
 //! - [`counts`] — detection rank-based PR accumulator (broader count vocabulary
 //!   lands with the family that needs it).
-//! - `report` — `EvalReport` (metrics + curves + params + provenance). *(pending)*
+//! - [`report`] — `EvalReport` (metrics + curves + params + provenance).
 
 pub mod assign;
 pub mod counts;
 pub mod greedy;
+pub mod report;
 pub mod sim;

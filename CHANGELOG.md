@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `primitives::report::EvalReport` — the shape every metric family reports in, and the
+  last pending item in `primitives`. Carries headline `metrics`, nested `per_class` and
+  `per_group` breakdowns, renderable `curves`, and the producing `params`, so a renderer
+  that can draw a detection result will be able to draw a panoptic or tracking one
+  unchanged.
+
+  `Provenance` (`ParityVerified` / `Extension` / `UserComposed`) records whether numbers
+  may be compared against a leaderboard. Family drivers set it and it survives
+  serialization, so a deserialized report renders as what it actually is. Oriented-box
+  evaluation reports `Extension`: it is a real metric, but no reference implementation
+  exists for it to be standard against.
+
+- `COCOeval::report()` assembles one. `curves` holds the aggregate precision-recall
+  curve per IoU threshold (`pr@0.50` …), meaned over categories at `area="all"` and the
+  largest `max_dets`, plus the shared `rec_thrs` axis — the slice a chart actually draws.
+  The full `T×R×K×A×M` tensor (~1M floats on COCO) stays reachable via `accumulated()`
+  rather than being copied into the report.
+
+- `EvalParams` is now exported. It was `pub` and appeared as a public field of
+  `EvalResults`, but its module was private, so downstream code could receive the type
+  and never name it.
+
 - `just semver` — checks the public Rust API against the last published release via
   `cargo-semver-checks`. The 1.0 reorganisation moves nearly every type between modules
   while promising the crate-root paths keep resolving, and this is the mechanical proof

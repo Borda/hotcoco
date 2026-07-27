@@ -5095,3 +5095,164 @@ fn tier2_eval_module_path_still_resolves() {
     let _: Option<hotcoco::EvalMode> = None;
     let _: Option<hotcoco::COCOeval> = None;
 }
+
+// ---------------------------------------------------------------------------
+// EvalReport
+// ---------------------------------------------------------------------------
+
+fn bbox_eval_on_fixtures() -> COCOeval {
+    let coco_gt = COCO::new(&fixtures_dir().join("gt.json")).expect("Failed to load GT");
+    let coco_dt = coco_gt
+        .load_res(&fixtures_dir().join("dt.json"))
+        .expect("Failed to load DT");
+    let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+    ev.run();
+    ev
+}
+
+/// `results()` is a projection of `report()`, so the two can never disagree
+/// about a metric. Asserting it here is what makes the projection worth having.
+#[test]
+fn test_report_and_results_agree_on_metrics() {
+    let ev = bbox_eval_on_fixtures();
+    let report = ev.report().expect("report");
+    let results = ev.results(true).expect("results");
+
+    assert_eq!(report.metrics.len(), results.metrics.len());
+    for (key, value) in &results.metrics {
+        assert_eq!(
+            report.metric(key),
+            Some(*value),
+            "metric {key} differs between report() and results()"
+        );
+    }
+
+    let per_class = results.per_class.expect("per_class requested");
+    assert_eq!(per_class.len(), report.per_class.len());
+    for (name, ap) in &per_class {
+        assert_eq!(report.per_class[name]["AP"], *ap, "per-class AP for {name}");
+    }
+}
+
+/// The serialized shape of `EvalResults` is a compatibility contract — users
+/// parse saved result files — so re-basing it on `EvalReport` must not move it.
+#[test]
+fn test_eval_results_json_shape_is_stable() {
+    let ev = bbox_eval_on_fixtures();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&ev.results(true).expect("results").to_json().expect("json"))
+            .expect("valid json");
+
+    let obj = parsed.as_object().expect("top level is an object");
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["hotcoco_version", "metrics", "params", "per_class"],
+        "EvalResults gained or lost a top-level key"
+    );
+
+    let mut param_keys: Vec<&str> = parsed["params"]
+        .as_object()
+        .expect("params object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    param_keys.sort_unstable();
+    assert_eq!(
+        param_keys,
+        [
+            "area_ranges",
+            "eval_mode",
+            "iou_thresholds",
+            "iou_type",
+            "max_dets"
+        ],
+        "EvalParams gained or lost a key"
+    );
+
+    // `per_class: None` must stay absent rather than serialize as null.
+    let without: serde_json::Value =
+        serde_json::from_str(&ev.results(false).expect("results").to_json().expect("json"))
+            .expect("valid json");
+    assert!(
+        without
+            .as_object()
+            .expect("object")
+            .get("per_class")
+            .is_none(),
+        "per_class must be omitted, not null, when not requested"
+    );
+}
+
+/// bbox/segm/keypoints are checked against pycocotools; oriented boxes have no
+/// reference implementation, so they must not claim to be benchmark-standard.
+#[test]
+fn test_report_provenance_marks_obb_as_extension() {
+    let ev = bbox_eval_on_fixtures();
+    let report = ev.report().expect("report");
+    assert_eq!(report.task, "detection");
+    assert_eq!(report.provenance, hotcoco::Provenance::ParityVerified);
+    assert!(report.provenance.is_benchmark_standard());
+
+    let coco_gt = COCO::new(&fixtures_dir().join("gt.json")).expect("GT");
+    let coco_dt = coco_gt
+        .load_res(&fixtures_dir().join("dt.json"))
+        .expect("DT");
+    let mut obb = COCOeval::new(coco_gt, coco_dt, IouType::Obb);
+    obb.run();
+    let obb_report = obb.report().expect("report");
+    assert_eq!(obb_report.provenance, hotcoco::Provenance::Extension);
+    assert!(
+        !obb_report.provenance.is_benchmark_standard(),
+        "OBB has no reference implementation and must not read as leaderboard-comparable"
+    );
+}
+
+/// Curves carry the aggregate slice a chart draws — one PR curve per IoU
+/// threshold plus the shared x-axis — not the full T*R*K*A*M tensor.
+#[test]
+fn test_report_curves_are_the_aggregate_slice() {
+    let ev = bbox_eval_on_fixtures();
+    let report = ev.report().expect("report");
+    let acc = ev.accumulated().expect("accumulated");
+
+    assert_eq!(
+        report.curves.len(),
+        ev.params.iou_thrs.len() + 1,
+        "one curve per IoU threshold, plus rec_thrs"
+    );
+    let rec_thrs = &report.curves["rec_thrs"];
+    assert_eq!(rec_thrs.len(), acc.shape.r);
+    for thr in &ev.params.iou_thrs {
+        let curve = &report.curves[&format!("pr@{thr:.2}")];
+        assert_eq!(
+            curve.len(),
+            acc.shape.r,
+            "curve is indexed by recall threshold"
+        );
+    }
+
+    // Precision is a fraction or the -1 "no data" sentinel — never anything else.
+    for (name, curve) in &report.curves {
+        if name == "rec_thrs" {
+            continue;
+        }
+        for &v in curve {
+            assert!((0.0..=1.0).contains(&v) || v == -1.0, "{name} has {v}");
+        }
+    }
+}
+
+#[test]
+fn test_report_requires_summarize() {
+    let coco_gt = COCO::new(&fixtures_dir().join("gt.json")).expect("GT");
+    let coco_dt = coco_gt
+        .load_res(&fixtures_dir().join("dt.json"))
+        .expect("DT");
+    let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+    assert!(
+        ev.report().is_err(),
+        "report() before summarize() must error"
+    );
+}

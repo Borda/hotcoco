@@ -59,7 +59,7 @@ impl EvalResults {
 
 impl EvalParams {
     /// Create from a [`Params`] struct and evaluation mode.
-    pub(super) fn from_params(params: &Params, eval_mode: EvalMode) -> Self {
+    pub(in crate::detection) fn from_params(params: &Params, eval_mode: EvalMode) -> Self {
         let area_ranges: HashMap<String, [f64; 2]> = params
             .area_ranges
             .iter()

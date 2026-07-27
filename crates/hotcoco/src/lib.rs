@@ -14,8 +14,8 @@ pub use convert::{ConvertError, CvatStats, DotaStats, VocStats, YoloStats};
 pub use detection::{
     AccumulatedEval, AnnotationIndex, BootstrapCI, COCOeval, CalibrationBin, CalibrationResult,
     CategoryDelta, CompareOpts, ComparisonResult, ConfusionMatrix, DtStatus, ErrorProfile, EvalImg,
-    EvalMode, EvalResults, EvalShape, GtStatus, ImageDiagnostics, ImageSummary, LabelError,
-    LabelErrorType, SliceResult, SlicedResults, TideErrors, compare,
+    EvalMode, EvalParams, EvalResults, EvalShape, GtStatus, ImageDiagnostics, ImageSummary,
+    LabelError, LabelErrorType, SliceResult, SlicedResults, TideErrors, compare,
 };
 pub use error::Error;
 
@@ -54,6 +54,7 @@ pub mod hierarchy {
 }
 pub use detection::hierarchy::Hierarchy;
 pub use params::{AreaRange, IouType, Params};
+pub use primitives::report::{EvalReport, Provenance};
 pub use quality::{
     CategoryStats, DatasetStats, DatasetSummary, Finding, HealthReport, Layer, SummaryStats,
 };
