@@ -223,8 +223,10 @@ impl COCOeval {
                 // The shared matcher, at its simplest setting: one threshold, every
                 // GT non-ignored (so phase 2 never runs), nothing rematchable (no
                 // crowd — this is a cross-category matrix, where a crowd GT would
-                // double-count). `iou_thr` is passed through unclamped, per the
-                // caller-owned threshold-epsilon policy in `primitives::greedy`.
+                // double-count). `iou_thr` is passed through **unclamped**: the
+                // confusion matrix is hotcoco-native analysis over a user-chosen
+                // threshold, so it does not inherit pycocotools' `min(t, 1-1e-10)`
+                // match floor. See the policy table in `primitives::greedy`.
                 //
                 // The degenerate shapes need no special-casing: `cross_category_iou`
                 // returns an empty matrix exactly when `d == 0 || g == 0`, and

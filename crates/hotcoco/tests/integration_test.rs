@@ -4904,3 +4904,129 @@ fn test_empty_max_dets_panics() {
     coco_eval.params.max_dets = vec![];
     coco_eval.evaluate(); // should panic with a clear message
 }
+
+// ---------------------------------------------------------------------------
+// Threshold-epsilon policy (pycocotools' `min(t, 1-1e-10)` match floor)
+// ---------------------------------------------------------------------------
+
+/// One image, one GT and one DT, both category 1, bboxes as given.
+fn one_box_pair(
+    image_id: u64,
+    gt_bbox: [f64; 4],
+    dt_bbox: [f64; 4],
+) -> (Image, Annotation, Annotation) {
+    let img = Image {
+        id: image_id,
+        file_name: format!("img{image_id}.jpg"),
+        height: 200,
+        width: 200,
+        license: None,
+        coco_url: None,
+        flickr_url: None,
+        date_captured: None,
+        neg_category_ids: vec![],
+        not_exhaustive_category_ids: vec![],
+    };
+    let gt = Annotation {
+        id: image_id * 10,
+        image_id,
+        category_id: 1,
+        bbox: Some(gt_bbox),
+        area: Some(gt_bbox[2] * gt_bbox[3]),
+        iscrowd: false,
+        segmentation: None,
+        keypoints: None,
+        num_keypoints: None,
+        score: None,
+        obb: None,
+        is_group_of: None,
+    };
+    let dt = Annotation {
+        id: image_id * 10 + 1,
+        image_id,
+        category_id: 1,
+        bbox: Some(dt_bbox),
+        area: Some(dt_bbox[2] * dt_bbox[3]),
+        iscrowd: false,
+        segmentation: None,
+        keypoints: None,
+        num_keypoints: None,
+        score: Some(0.9),
+        obb: None,
+        is_group_of: None,
+    };
+    (img, gt, dt)
+}
+
+/// At `iou_thr == 1.0`, pycocotools searches from `min(t, 1-1e-10)`, so a pair
+/// whose IoU lies in `[1-1e-10, 1.0)` still matches. hotcoco applies the same
+/// clamp in the detection `evaluate()` path via
+/// `primitives::greedy::coco_match_floor`.
+///
+/// Image 1 is *near*-identical: a 100x100 GT against a 100 x 100.000000005 DT,
+/// giving IoU = 1/(1 + 5e-11) ~= 1 - 5e-11, which sits above the 1-1e-10 floor
+/// but strictly below 1.0. Image 2 is exactly identical (IoU exactly 1.0).
+///
+/// Clamped (correct): both match, AP = 1.0.
+/// Unclamped (pre-1.0 behavior): only image 2 matches, AP = 0.5.
+#[test]
+fn test_match_floor_clamped_at_iou_threshold_one() {
+    let (img1, gt1, dt1) = one_box_pair(
+        1,
+        [0.0, 0.0, 100.0, 100.0],
+        [0.0, 0.0, 100.0, 100.000000005],
+    );
+    let (img2, gt2, dt2) = one_box_pair(2, [0.0, 0.0, 100.0, 100.0], [0.0, 0.0, 100.0, 100.0]);
+
+    let categories = vec![Category {
+        id: 1,
+        name: "thing".into(),
+        supercategory: None,
+        skeleton: None,
+        keypoints: None,
+        frequency: None,
+    }];
+
+    let gt_dataset = Dataset {
+        info: None,
+        images: vec![img1.clone(), img2.clone()],
+        annotations: vec![gt1, gt2],
+        categories: categories.clone(),
+        licenses: vec![],
+    };
+    let dt_dataset = Dataset {
+        info: None,
+        images: vec![img1, img2],
+        annotations: vec![dt1, dt2],
+        categories,
+        licenses: vec![],
+    };
+
+    let coco_gt = COCO::from_dataset(gt_dataset);
+    let coco_dt = COCO::from_dataset(dt_dataset);
+
+    let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+    ev.params.iou_thrs = vec![1.0];
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+
+    let ap = ev.stats().expect("stats")[0];
+    assert!(
+        (ap - 1.0).abs() < 1e-12,
+        "AP at iou_thr=1.0 should be 1.0 with the pycocotools match floor \
+         (got {ap}); 0.5 means the near-identical pair was not matched, i.e. \
+         the min(t, 1-1e-10) clamp is missing"
+    );
+}
+
+/// The clamp must be inert below 1.0 — otherwise it would perturb the default
+/// 0.50:0.05:0.95 sweep, which is the whole reason it is safe to apply.
+#[test]
+fn test_match_floor_is_inert_below_one() {
+    use hotcoco::primitives::greedy::coco_match_floor;
+    for t in [0.0, 0.1, 0.5, 0.75, 0.95, 0.99, 0.999999] {
+        assert_eq!(coco_match_floor(t), t, "clamp must not fire at t={t}");
+    }
+    assert_eq!(coco_match_floor(1.0), 1.0 - 1e-10);
+}

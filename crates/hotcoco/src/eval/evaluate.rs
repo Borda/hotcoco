@@ -191,6 +191,17 @@ impl COCOeval {
             .last()
             .expect("asserted non-empty above");
 
+        // pycocotools searches from `min(t, 1-1e-10)`, not from `t`. Inert below
+        // 1.0, so the default 0.50:0.95 sweep is untouched; at t == 1.0 it admits
+        // near-identical pairs, which is the drop-in behavior. Resolved once here
+        // and shared — see `EvalImgContext::match_floors`.
+        let match_floors: Vec<f64> = self
+            .params
+            .iou_thrs
+            .iter()
+            .map(|&t| crate::primitives::greedy::coco_match_floor(t))
+            .collect();
+
         // Build shared context (borrows self after self.ious is fully populated).
         let ctx = EvalImgContext {
             coco_gt: &self.coco_gt,
@@ -198,6 +209,7 @@ impl COCOeval {
             params: &self.params,
             ious: &self.ious,
             eval_mode: self.eval_mode,
+            match_floors: &match_floors,
         };
 
         // Tuple: (cat_id, area_rng, img_id, not_exhaustive_cat)
@@ -365,6 +377,8 @@ impl COCOeval {
                 .map(|gi| !(is_oid && gt_is_group_of_sorted[gi]))
                 .collect();
 
+            // Both matching phases below share `ctx.match_floors` — pycocotools'
+            // clamped thresholds. See the policy table in `primitives::greedy`.
             let m = crate::primitives::greedy::greedy_match(
                 &iou_flat,
                 d,
@@ -372,7 +386,7 @@ impl COCOeval {
                 num_gt_not_ignored,
                 &gt_rematchable,
                 &gt_phase2_eligible,
-                &ctx.params.iou_thrs,
+                ctx.match_floors,
             );
 
             // Translate matched indices back into annotation ids + ignore flags.
@@ -394,7 +408,7 @@ impl COCOeval {
             // Multiple DTs can match the same group-of GT (no gt_matched check).
             // Matched DTs are genuine TPs (dt_ignore = false).
             if is_oid {
-                for (t_idx, &iou_thr) in ctx.params.iou_thrs.iter().enumerate() {
+                for (t_idx, &iou_thr) in ctx.match_floors.iter().enumerate() {
                     for di in 0..d {
                         if dt_matched[t_idx][di] {
                             continue; // Already matched in standard pass

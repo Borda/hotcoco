@@ -28,7 +28,7 @@
 //! Reaching for this matcher outside detection is the likeliest way for the two
 //! lineages to collide.
 //!
-//! # Threshold-epsilon policy: caller-owned
+//! # Threshold-epsilon policy: caller-owned, with one canonical clamp
 //!
 //! pycocotools does not use the raw threshold as its match floor — it starts each
 //! detection's search at `min(t, 1 - 1e-10)` (`evaluateImg`: `iou = min([t,
@@ -38,12 +38,41 @@
 //! given COCO's fudge factor.
 //!
 //! The clamp is inert for every threshold `< 1.0`, so it never fires on COCO's
-//! default `0.5:0.05:0.95` sweep, nor on the single-threshold analysis callers.
-//! It is observable only at `t == 1.0`, where pycocotools still matches a pair
-//! whose IoU lies in `[1 - 1e-10, 1.0)` and an unclamped caller does not. No
-//! caller in this crate clamps today; that difference against pycocotools at
-//! `t == 1.0` is a known, deliberate carry-over of v0.4.x behavior, to be
-//! settled with the 1.0 detection driver rather than changed mid-0.5.
+//! default `0.5:0.05:0.95` sweep. It is observable only at `t == 1.0`, where
+//! pycocotools still matches a pair whose IoU lies in `[1 - 1e-10, 1.0)` and an
+//! unclamped caller does not.
+//!
+//! **Settled at 1.0** (this paragraph replaces the v0.4.x "known carry-over"
+//! note). Callers that claim pycocotools matching semantics apply
+//! [`coco_match_floor`]; callers implementing a different reference do not:
+//!
+//! | Caller | Clamped? | Why |
+//! |---|---|---|
+//! | the detection `evaluate()` path (incl. the OID group-of pass) | **yes** | pycocotools drop-in parity; both matching phases in one `evaluate()` must share a floor or `t == 1.0` is internally incoherent |
+//! | TIDE (`pos_thr`/`bg_thr`) | no | parity contract is *tidecv*, not pycocotools — clamping would diverge from that reference |
+//! | confusion matrix, per-image diagnostics, calibration | no | hotcoco-native analysis with a user-chosen threshold; COCO's fudge factor is not implied |
+//!
+//! Identical geometry yields exactly `1.0` (`inter / (a + a - inter) == a / a`),
+//! so unclamped callers still match exact duplicates at `t == 1.0`; the clamp only
+//! additionally admits *near*-identical pairs.
+
+/// pycocotools' match floor for an IoU threshold: `min(t, 1 - 1e-10)`.
+///
+/// The canonical definition of the clamp described in the [module
+/// docs][self#threshold-epsilon-policy-caller-owned-with-one-canonical-clamp].
+/// It exists so the detection lineage has **one** spelling of the epsilon rather
+/// than a literal repeated at each call site; [`greedy_match`] deliberately does
+/// not apply it for you.
+///
+/// ```
+/// # use hotcoco::primitives::greedy::coco_match_floor;
+/// assert_eq!(coco_match_floor(0.5), 0.5);       // inert below 1.0
+/// assert_eq!(coco_match_floor(1.0), 1.0 - 1e-10);
+/// ```
+#[inline]
+pub fn coco_match_floor(iou_thr: f64) -> f64 {
+    iou_thr.min(1.0 - 1e-10)
+}
 
 /// Per-threshold greedy match results, indexed `[T]` over IoU thresholds.
 pub struct GreedyMatches {

@@ -199,7 +199,7 @@ impl AccumulatedEval {
 /// Read-only context shared across all [`COCOeval::evaluate_img_static`] calls
 /// within a single [`COCOeval::evaluate`] invocation.
 ///
-/// Grouping these four shared references avoids passing them individually to every
+/// Grouping these shared references avoids passing them individually to every
 /// call and removes the `#[allow(clippy::too_many_arguments)]` suppressor.
 pub(super) struct EvalImgContext<'a> {
     pub(super) coco_gt: &'a COCO,
@@ -207,4 +207,11 @@ pub(super) struct EvalImgContext<'a> {
     pub(super) params: &'a Params,
     pub(super) ious: &'a HashMap<(u64, u64), IouMatrix>,
     pub(super) eval_mode: super::EvalMode,
+    /// `params.iou_thrs` with pycocotools' match floor applied
+    /// ([`crate::primitives::greedy::coco_match_floor`]). Resolved once per
+    /// `evaluate()` rather than per image-category pair: this is read inside a
+    /// rayon fan-out over every (category, area range, image) tuple, so deriving
+    /// it at the call site would allocate a short `Vec` hundreds of thousands of
+    /// times per evaluation.
+    pub(super) match_floors: &'a [f64],
 }

@@ -9,9 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `primitives::greedy::coco_match_floor` — the canonical spelling of pycocotools'
+  `min(t, 1 - 1e-10)` match floor, so the detection lineage has one definition of the
+  clamp instead of a literal repeated at each call site.
+
 ### Changed
 
 ### Fixed
+
+- Detection matching now applies pycocotools' match floor. pycocotools starts each
+  detection's search at `min(t, 1 - 1e-10)` rather than at `t`; hotcoco compared
+  against the raw threshold, so a detection whose IoU fell in `[1 - 1e-10, 1.0)`
+  matched in pycocotools but not in hotcoco. The clamp is inert for every threshold
+  below 1.0, so the default `0.50:0.05:0.95` sweep and every published metric are
+  unchanged — it is observable only at `iou_thr == 1.0`. On COCO val2017 at
+  `iou_thr = 1.0` this closed a real divergence: 7,688 match decisions before,
+  13,724 after, which is exactly pycocotools' count. AP is unaffected on that data
+  because the affected pairs sit in ignored partitions, but on non-ignored geometry
+  the difference is material (AP 0.25 → 1.0 on a two-image regression fixture).
+
+  The policy is now settled and documented as a table in `primitives::greedy`:
+  the detection `evaluate()` path (including the Open Images group-of pass) clamps;
+  TIDE does not, because its parity contract is *tidecv* rather than pycocotools;
+  and the confusion matrix, per-image diagnostics, and calibration do not, because
+  they are hotcoco-native analysis over a user-chosen threshold. `greedy_match`
+  itself still adds no epsilon of its own — the clamp remains caller-applied.
 
 ## [0.5.0] - 2026-07-26
 
