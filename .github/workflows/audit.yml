@@ -23,10 +23,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Prebuilt binary, not EmbarkStudios/cargo-deny-action (a Docker action).
+      # Beyond the Docker Hub flakiness that broke CI, the Docker form was actively
+      # wrong here: a registry timeout made `steps.deny.outcome` = failure, which
+      # would have filed a bogus "dependency advisory detected" issue. Installing
+      # separately means an infra failure fails this step — which is NOT
+      # continue-on-error — so the job goes red instead of crying wolf.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # `cargo-deny` (hyphen) invokes the binary directly rather than through the
+      # `cargo` shim: this job installs no toolchain, and going via `cargo` would
+      # make rustup download the channel pinned in rust-toolchain.toml for a check
+      # that only parses manifests.
       - name: cargo-deny check
         id: deny
         continue-on-error: true
-        uses: EmbarkStudios/cargo-deny-action@v2
+        run: cargo-deny check
 
       - name: Open tracking issue on new advisory
         if: steps.deny.outcome == 'failure'

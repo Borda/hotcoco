@@ -38,9 +38,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Installed as a prebuilt binary rather than via EmbarkStudios/cargo-deny-action,
+      # which is a *Docker* action. GitHub builds every Docker action during job
+      # setup — before the first step runs — so a Docker Hub blip killed the whole
+      # job (no checkout, no clippy, no tests) and reported it as a CI failure.
+      # Reordering steps would not have helped; the Docker dependency had to go.
+      - name: Install cargo-deny
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
       - name: Dependency audit
         if: matrix.os == 'ubuntu-latest'
-        uses: EmbarkStudios/cargo-deny-action@v2
+        run: cargo deny check
 
       - name: Tests
         run: cargo test -p hotcoco -p hotcoco-cli
