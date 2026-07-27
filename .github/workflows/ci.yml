@@ -62,9 +62,16 @@ jobs:
       # re-exports all still resolved while `hotcoco::types::SummaryStats` had
       # silently stopped existing. Only this caught it.
       #
-      # Compares against the last release published to crates.io, so it is
-      # ubuntu-only (one baseline download is plenty) and needs no pinned
-      # fixture. Mirrors `just semver`.
+      # Compares against the newest release on crates.io, so it is ubuntu-only
+      # (one baseline download is plenty) and needs no pinned fixture.
+      #
+      # The baseline is deliberately not pinned. cargo-semver-checks only fails
+      # when the version bump is too small for the API change, so pinning an old
+      # baseline silently disables it: against a pinned 0.5.0, every release from
+      # 1.0.0 onward reads as a major bump, which permits any removal — the run
+      # reports success after executing zero checks. Letting it track the latest
+      # published version keeps the comparison a patch/minor one, which is where
+      # the checks actually run. Mirrors `just semver`.
       - name: Install cargo-semver-checks
         if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@v2
@@ -73,7 +80,7 @@ jobs:
 
       - name: Public API check
         if: matrix.os == 'ubuntu-latest'
-        run: cargo semver-checks check-release -p hotcoco --baseline-version 0.5.0
+        run: cargo semver-checks check-release -p hotcoco
 
   python-lint:
     name: Python lint

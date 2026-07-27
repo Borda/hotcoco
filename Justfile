@@ -63,9 +63,21 @@ audit:
 # The 1.0 rewrite moves nearly every type between modules while promising the
 # crate-root paths keep resolving; this is the mechanical proof of that, rather
 # than re-reading lib.rs by hand.
+#
+# The baseline is deliberately NOT pinned. cargo-semver-checks compares the
+# working tree against the newest version on crates.io and only reports a
+# failure when the version bump is too small for the API change — so pinning an
+# old baseline silently kills the check. Against a pinned 0.5.0, every release
+# from 1.0.0 onward reads as a major bump, which permits any removal: the run
+# reports "no semver update required" after executing *zero* checks.
+#
+# Pass a baseline explicitly only to answer a specific question, e.g.
+#   just semver --baseline-version 0.5.0
+# which is how the 1.0 Tier-2 audit was run while the tree was still 0.5.0.
+#
 # Requires cargo-semver-checks: `cargo install cargo-semver-checks --locked`.
-semver baseline="0.5.0":
-    cargo semver-checks check-release -p hotcoco --baseline-version {{baseline}}
+semver *ARGS:
+    cargo semver-checks check-release -p hotcoco {{ARGS}}
 
 # Format all Rust code
 fmt:
