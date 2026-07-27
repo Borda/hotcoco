@@ -56,6 +56,25 @@ jobs:
       - name: Tests
         run: cargo test -p hotcoco -p hotcoco-cli
 
+      # The 1.0 reorganisation moves nearly every type between modules while
+      # promising the crate-root paths keep resolving. Reading lib.rs is not
+      # enough to verify that — during the `quality/` move, the crate-root
+      # re-exports all still resolved while `hotcoco::types::SummaryStats` had
+      # silently stopped existing. Only this caught it.
+      #
+      # Compares against the last release published to crates.io, so it is
+      # ubuntu-only (one baseline download is plenty) and needs no pinned
+      # fixture. Mirrors `just semver`.
+      - name: Install cargo-semver-checks
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Public API check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo semver-checks check-release -p hotcoco --baseline-version 0.5.0
+
   python-lint:
     name: Python lint
     runs-on: ubuntu-latest
