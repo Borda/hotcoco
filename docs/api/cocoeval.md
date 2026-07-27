@@ -309,6 +309,72 @@ Print a formatted results table to stdout. For LVIS, matches the lvis-api `print
 
 ---
 
+### `report`
+
+```python
+report() -> dict
+```
+
+Return a full evaluation report. Must be called after `summarize()` (or `run()`). Raises `RuntimeError` otherwise.
+
+This is the shape every hotcoco metric family reports in, so code that renders a detection report will render a panoptic or tracking one unchanged.
+
+**Returns** a dict with:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `"task"` | `str` | `"detection"`. |
+| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — see below. |
+| `"metrics"` | `dict[str, float]` | Summary metrics keyed by name. |
+| `"per_class"` | `dict[str, dict[str, float]]` | `{class_name: {metric: value}}`. |
+| `"per_group"` | `dict[str, dict[str, float]]` | LVIS frequency buckets in LVIS mode; empty otherwise. |
+| `"curves"` | `dict[str, list[float]]` | One precision-recall curve per IoU threshold, plus `"rec_thrs"`. |
+| `"params"` | `dict` | The evaluation parameters used. |
+
+```python
+ev.run()
+report = ev.report()
+
+report["metrics"]["AP"]              # 0.377
+report["per_class"]["person"]["AP"]  # 0.521
+```
+
+#### Checking provenance
+
+`provenance` records whether these numbers may be compared against a published leaderboard:
+
+| Value | Meaning |
+|-------|---------|
+| `"parity_verified"` | Checked against the reference implementation. bbox, segm, and keypoints match pycocotools. |
+| `"extension"` | A real metric with no reference implementation to be standard against — oriented bounding boxes. Fine for comparing your own models; not a leaderboard number. |
+
+```python
+if report["provenance"] != "parity_verified":
+    print(f"note: {report['provenance']} — not benchmark-standard")
+```
+
+#### Plotting the curves
+
+`curves` holds the aggregate precision-recall curve for each IoU threshold, meaned over
+categories at `area="all"` and the largest `max_dets` — the slice a chart actually draws.
+All PR curves share the `"rec_thrs"` x-axis.
+
+```python
+import matplotlib.pyplot as plt
+
+curves = report["curves"]
+for iou in ("pr@0.50", "pr@0.75", "pr@0.95"):
+    plt.plot(curves["rec_thrs"], curves[iou], label=iou)
+plt.xlabel("recall")
+plt.ylabel("precision")
+plt.legend()
+```
+
+For the full per-category arrays use [`eval["precision"]`](#eval) instead — on COCO that
+is roughly a million floats, which is why the report carries only the aggregate.
+
+---
+
 ### `results`
 
 ```python

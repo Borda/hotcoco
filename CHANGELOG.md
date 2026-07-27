@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   evaluation reports `Extension`: it is a real metric, but no reference implementation
   exists for it to be standard against.
 
-- `COCOeval::report()` assembles one. `curves` holds the aggregate precision-recall
+- `COCOeval.report()` in Python and `COCOeval::report()` in Rust assemble one. `curves` holds the aggregate precision-recall
   curve per IoU threshold (`pr@0.50` …), meaned over categories at `area="all"` and the
   largest `max_dets`, plus the shared `rec_thrs` axis — the slice a chart actually draws.
   The full `T×R×K×A×M` tensor (~1M floats on COCO) stays reachable via `accumulated()`

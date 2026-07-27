@@ -1347,6 +1347,51 @@ For LVIS, matches the lvis-api ``print_results()`` style. Must be called after
         self.inner.print_results();
     }
 
+    #[doc = "Return a full evaluation report as a dict.
+
+Must be called after ``summarize()`` (or ``run()``). This is the shape every
+hotcoco metric family reports in, so code that renders a detection report will
+render a panoptic or tracking one unchanged.
+
+Returns a dict with:
+
+- ``task``: ``'detection'``
+- ``provenance``: ``'parity_verified'`` for bbox/segm/keypoints, which are checked
+  against pycocotools; ``'extension'`` for oriented boxes, which are a real metric
+  but have no reference implementation to be standard against. Check this before
+  presenting numbers as comparable to a published leaderboard.
+- ``metrics``: summary metrics (AP, AP50, AP75, ...)
+- ``per_class``: ``{class_name: {metric: value}}``
+- ``per_group``: ``{group_name: {metric: value}}`` — LVIS frequency buckets in
+  LVIS mode, empty otherwise
+- ``curves``: ``{name: [values]}`` — one aggregate precision-recall curve per IoU
+  threshold (``'pr@0.50'`` ...) plus the shared ``'rec_thrs'`` x-axis
+- ``params``: the evaluation parameters used
+
+The curves are the aggregate slice a chart draws, meaned over categories at
+``area='all'`` and the largest ``max_dets``. For the full per-category arrays use
+``.eval['precision']``, which is ~1M floats on COCO.
+
+Examples
+--------
+>>> ev = COCOeval(gt, dt, 'bbox')
+>>> ev.run()
+>>> report = ev.report()
+>>> report['provenance']
+'parity_verified'
+>>> plt.plot(report['curves']['rec_thrs'], report['curves']['pr@0.50'])
+
+Returns
+-------
+dict
+    Metrics, breakdowns, curves, provenance, and parameters."]
+    fn report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let report = self.inner.report().map_err(to_pyerr)?;
+        let json_str = report.to_json().map_err(to_pyerr)?;
+        let json_mod = py.import("json")?;
+        Ok(json_mod.call_method1("loads", (json_str,))?.unbind())
+    }
+
     #[doc = "Return evaluation results as a dict.
 
 Must be called after ``summarize()`` (or ``run()``). Returns a dict with:

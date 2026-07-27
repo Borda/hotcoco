@@ -549,3 +549,59 @@ def test_virtual_nodes():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "-x", "--tb=short"]))
+
+
+# ---------------------------------------------------------------------------
+# EvalReport
+# ---------------------------------------------------------------------------
+
+
+def _eval_for_report(iou_type="bbox"):
+    gt = _make_minimal_gt(
+        iou_type, annotations=[_make_bbox_ann(1, bbox=[10, 10, 50, 50]), _make_bbox_ann(2, bbox=[100, 100, 40, 40])]
+    )
+    dt = [_make_bbox_det(bbox=[10, 10, 50, 50], score=0.9), _make_bbox_det(bbox=[100, 100, 40, 40], score=0.8)]
+    coco_gt = _make_coco(gt)
+    coco_dt = coco_gt.load_res(dt)
+    ev = RsCOCOeval(coco_gt, coco_dt, iou_type)
+    with suppress_stdout():
+        ev.run()
+    return ev
+
+
+def test_report_dict_shape():
+    report = _eval_for_report().report()
+
+    assert set(report) == {"task", "provenance", "metrics", "per_class", "per_group", "curves", "params"}
+    assert report["task"] == "detection"
+    assert report["metrics"]["AP"] == pytest.approx(1.0)
+    # Nested per-class, not flattened "AP/name".
+    assert all(isinstance(v, dict) for v in report["per_class"].values())
+
+
+def test_report_provenance_distinguishes_extension_from_parity():
+    """OBB has no reference implementation, so it must not read as leaderboard-comparable."""
+    assert _eval_for_report("bbox").report()["provenance"] == "parity_verified"
+    assert _eval_for_report("obb").report()["provenance"] == "extension"
+
+
+def test_report_curves_are_plottable():
+    report = _eval_for_report().report()
+    curves = report["curves"]
+
+    rec_thrs = curves["rec_thrs"]
+    assert len(rec_thrs) == 101
+    # One curve per IoU threshold, each sharing the rec_thrs x-axis.
+    pr_curves = {k: v for k, v in curves.items() if k.startswith("pr@")}
+    assert len(pr_curves) == 10
+    for name, curve in pr_curves.items():
+        assert len(curve) == len(rec_thrs), name
+
+
+def test_report_and_results_agree():
+    ev = _eval_for_report()
+    report, results = ev.report(), ev.results(per_class=True)
+
+    assert report["metrics"] == results["metrics"]
+    for name, ap in results["per_class"].items():
+        assert report["per_class"][name]["AP"] == ap

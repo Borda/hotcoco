@@ -1,3 +1,61 @@
+//! A pure-Rust implementation of COCO-style evaluation.
+//!
+//! ```no_run
+//! use hotcoco::{COCO, COCOeval, params::IouType};
+//! # fn main() -> hotcoco::error::Result<()> {
+//! let gt = COCO::new(std::path::Path::new("instances_val2017.json"))?;
+//! let dt = gt.load_res(std::path::Path::new("detections.json"))?;
+//!
+//! let mut ev = COCOeval::new(gt, dt, IouType::Bbox);
+//! ev.run();                       // evaluate -> accumulate -> summarize
+//! let report = ev.report()?;      // metrics, per-class, curves, provenance
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # How the crate is laid out
+//!
+//! | Module | What lives there |
+//! |---|---|
+//! | [`types`] | The COCO schema — `Dataset`, `Image`, `Annotation`, `Category`, `Rle`. |
+//! | [`coco`] | The dataset object: load, index, query, filter, merge, split, sample. |
+//! | [`mask`], [`geometry`] | RLE codec and rotated-rect mechanics. |
+//! | [`primitives`] | The shared evaluation substrate — similarity kernels, matching, accumulation, [`EvalReport`]. |
+//! | [`detection`] | The detection metric family: AP/AR, LVIS, Open Images, TIDE, calibration, confusion. |
+//! | [`quality`] | Dataset introspection: health checks and statistics. |
+//! | [`convert`] | YOLO, Pascal VOC, CVAT, and DOTA conversion. |
+//!
+//! [`primitives`] is where an auditor should look to answer "how is similarity
+//! computed?", "how are detections matched?", "how is AP accumulated?" — there is
+//! exactly one implementation of each, and `tests/architecture.rs` fails the build
+//! if a second appears.
+//!
+//! # Module renames in 1.0, and what still compiles
+//!
+//! 1.0 renamed `eval` to [`detection`], because detection is now one metric family
+//! among several rather than the only one. Two modules moved for the same reason:
+//! the Open Images hierarchy is detection machinery, and health checks belong with
+//! dataset statistics rather than beside the schema.
+//!
+//! | Pre-1.0 path | Now | Status |
+//! |---|---|---|
+//! | `hotcoco::eval` | [`detection`] | deprecated alias |
+//! | `hotcoco::hierarchy` | [`detection::hierarchy`] | deprecated alias |
+//! | `hotcoco::healthcheck` | [`quality::healthcheck`] | deprecated alias |
+//! | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | [`quality`] | deprecated re-export |
+//!
+//! **Nothing stops compiling.** Every path above still resolves; each emits a
+//! deprecation warning pointing at its replacement. The aliases are kept for the
+//! whole 1.x series and removed at 2.0.
+//!
+//! **The crate-root re-exports are not deprecated and are the recommended paths.**
+//! [`COCOeval`], [`Hierarchy`], [`HealthReport`], [`SummaryStats`] and the rest are
+//! unchanged — most code needs no edit at all.
+//!
+//! The Python API is entirely unaffected: `hotcoco.COCOeval`,
+//! `init_as_pycocotools()`, and the `pycocotools`/LVIS drop-in surface are
+//! permanent compatibility guarantees.
+
 pub mod coco;
 pub mod convert;
 pub mod detection;

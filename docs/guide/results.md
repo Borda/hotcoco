@@ -159,6 +159,68 @@ After calling `accumulate()`, the full precision/recall curves are available:
 
 Precision has shape `[T x R x K x A x M]`. Recall has shape `[T x K x A x M]`. A value of `-1` means no data (e.g. no GT annotations for that category/area combination).
 
+## The evaluation report
+
+`report()` returns everything about a finished evaluation in one dict — metrics,
+per-class and per-group breakdowns, plottable curves, and the parameters that
+produced them.
+
+```python
+ev = COCOeval(coco_gt, coco_dt, "bbox")
+ev.run()
+
+report = ev.report()
+report["metrics"]["AP"]              # 0.377
+report["per_class"]["person"]["AP"]  # 0.521
+```
+
+Every hotcoco metric family reports in this shape, so a function that renders one
+renders them all. Panoptic, tracking, and concept metrics slot into the same code
+as they land.
+
+### Check provenance before you publish a number
+
+`provenance` says whether a result is comparable to a published leaderboard:
+
+```python
+report["provenance"]   # 'parity_verified'
+```
+
+`"parity_verified"` means the numbers were checked against the reference
+implementation — bbox, segm, and keypoints match pycocotools. `"extension"` means a
+real metric that has no reference implementation to be standard against, currently
+oriented bounding boxes. Extension numbers are fine for comparing your own models
+against each other; they are not leaderboard numbers.
+
+The distinction is easy to lose once results reach a chart, so it travels with the
+data and survives saving and reloading:
+
+```python
+if report["provenance"] != "parity_verified":
+    print(f"note: {report['provenance']} — not benchmark-standard")
+```
+
+### Plotting precision-recall curves
+
+`curves` holds one aggregate PR curve per IoU threshold, all sharing the
+`"rec_thrs"` x-axis:
+
+```python
+import matplotlib.pyplot as plt
+
+curves = report["curves"]
+for iou in ("pr@0.50", "pr@0.75", "pr@0.95"):
+    plt.plot(curves["rec_thrs"], curves[iou], label=iou)
+
+plt.xlabel("recall")
+plt.ylabel("precision")
+plt.legend()
+```
+
+These are meaned over categories at `area="all"` and the largest `max_dets` — the
+slice a chart draws. For per-category curves, read the `eval["precision"]` array
+directly, as shown below.
+
 ## Extracting per-category AP
 
 The simplest way is `get_results(per_class=True)`, which returns a flat dict with one entry per category:

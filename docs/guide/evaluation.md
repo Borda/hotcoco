@@ -38,6 +38,33 @@ Every COCO evaluation follows the same pattern:
 
 The only thing that changes between eval types is the `iou_type` parameter and the format of your detections.
 
+## The `detection` namespace
+
+hotcoco is growing from a COCO evaluation library into a perception evaluation
+toolkit, with one namespace per metric family. `hotcoco.detection` is the first;
+panoptic, tracking, and concept metrics follow the same shape.
+
+```python
+from hotcoco import detection
+
+ev = detection.COCOeval(coco_gt, coco_dt, "bbox")
+ev.run()
+```
+
+This is purely additive sugar. `hotcoco.detection.COCOeval` *is* `hotcoco.COCOeval` —
+the same object under the family name, useful when you evaluate several families in
+one script and want the imports to read consistently.
+
+!!! note "The top-level names are permanent"
+
+    `hotcoco.COCOeval`, `hotcoco.mask`, `init_as_pycocotools()`, and the LVIS
+    helpers are compatibility guarantees, not deprecated aliases. If you are
+    replacing `pycocotools`, keep importing from the top level — nothing here
+    changes for you, now or later.
+
+    The LVIS helpers stay top-level on purpose: they exist to mirror `lvis-api`'s
+    import paths, so moving them under a family namespace would defeat them.
+
 ## Bounding box evaluation
 
 Set `iou_type` to `"bbox"` (Python) or `IouType::Bbox` (Rust).
