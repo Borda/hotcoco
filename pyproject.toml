@@ -45,6 +45,10 @@ dev = [
     # Reference implementation for the OBB IoU fuzz harness
     # (scripts/fuzz_obb_parity.py), which could not run without it.
     "shapely>=2.0",
+    # Reference implementation for scripts/parity_tide.py. Listed because its
+    # absence used to make that script exit 0 after comparing against nothing,
+    # so the TIDE gate silently passed while verifying no such thing.
+    "tidecv>=1.0.1",
 ]
 torch = [
     "torch>=1.9",

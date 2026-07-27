@@ -131,6 +131,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `scripts/parity_tide.py` can now fail. It exited 0 in both failure modes: when a ΔAP
+  exceeded tolerance it printed "Some values exceed tolerance" and fell through, and
+  when `tidecv` was absent it printed a skip notice and exited 0 after comparing
+  hotcoco's numbers against nothing. Both now exit non-zero, and `tidecv` joins the dev
+  extras beside the other reference implementations so it is installed rather than
+  silently missing.
+
 - `import hotcoco.mask` now works. It raised `ModuleNotFoundError` while
   `from hotcoco import mask` succeeded, because PyO3's `add_submodule` makes a submodule
   reachable as an attribute without registering it in `sys.modules`. Anyone migrating

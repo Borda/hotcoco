@@ -103,15 +103,20 @@ try:
             f"tc={tc_v:.4f} (n={tc_cnt:5d})  diff={diff:.4f}  {status}{note}"
         )
 
-    if all_ok:
-        print("\nAll ΔAP values within tolerance (±0.005 for Cls/Loc/Both/Dupe/Bkg; ±0.10 for Miss).")
-    else:
+    if not all_ok:
         print("\nSome values exceed tolerance.")
+        sys.exit(1)
+
+    print("\nAll ΔAP values within tolerance (±0.005 for Cls/Loc/Both/Dupe/Bkg; ±0.10 for Miss).")
 
 except ImportError:
-    print("\ntidecv not installed — skipping reference comparison.")
+    # Exit non-zero: without the reference this script has printed hotcoco's own
+    # numbers and compared them to nothing. Exiting 0 made it look like a passing
+    # parity check, which is how the TIDE gate went unverified for a whole
+    # refactor of the TIDE classifier.
+    print("\ntidecv not installed — cannot compare against the reference.")
     print("Install with: uv pip install tidecv")
-    sys.exit(0)
+    sys.exit(1)
 except Exception as e:
     import traceback
 
