@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- TIDE's false-positive classifier is now a free `classify_fp` function over an
+  explicit `FpEvidence` struct, with `ErrType` promoted out of the function body.
+  The tidecv priority order (`Loc > Cls > Dupe > Bkg > Both`) is a parity contract,
+  and it previously lived as an inline `else` block inside a nested loop with a
+  function-local enum — so it could not be read or tested on its own. It now carries
+  the priority table in its docs and has unit tests covering every variant, each
+  precedence pair, and the inclusive interval bounds. Behavior is unchanged.
+  `ErrType::as_str` also replaces a second, separate enumeration of the variants in
+  the aggregation step.
+
 ### Fixed
 
 - Detection matching now applies pycocotools' match floor. pycocotools starts each

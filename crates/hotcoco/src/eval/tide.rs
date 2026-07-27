@@ -5,6 +5,74 @@ use rayon::prelude::*;
 use super::COCOeval;
 use super::types::{EvalImg, TideErrors};
 
+/// TIDE false-positive error types, named as in tidecv.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ErrType {
+    Cls,
+    Loc,
+    Both,
+    Dupe,
+    Bkg,
+}
+
+impl ErrType {
+    /// The key this error type is reported under. Single source of the spelling —
+    /// the aggregation must not re-enumerate the variants.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            ErrType::Cls => "Cls",
+            ErrType::Loc => "Loc",
+            ErrType::Both => "Both",
+            ErrType::Dupe => "Dupe",
+            ErrType::Bkg => "Bkg",
+        }
+    }
+}
+
+/// What [`classify_fp`] needs to know about one false-positive detection.
+///
+/// Gathering this is the caller's job (it needs the per-image IoU views and the
+/// cross-category scan); deciding what it *means* is the parity contract below.
+pub(super) struct FpEvidence {
+    /// Highest IoU with any same-class GT (0.0 if there are none).
+    pub(super) max_same_iou: f64,
+    /// Highest IoU with any *different*-class GT (0.0 if there are none).
+    pub(super) max_cross_iou: f64,
+    /// Some same-class GT with IoU >= `pos_thr` was already matched by a
+    /// higher-scoring detection.
+    pub(super) best_same_gt_matched: bool,
+}
+
+/// Classify a false positive into a TIDE error type.
+///
+/// **This is the tidecv parity contract**, extracted so it is readable and
+/// testable on its own: the priority order is load-bearing, and reordering two
+/// arms silently changes every published TIDE number.
+///
+/// Priority matches tidecv (`BoxError > ClassError > DuplicateError >
+/// BackgroundError > OtherError`):
+///
+/// | Order | Type | Condition |
+/// |---|---|---|
+/// | 1 | `Loc`  | same-class max IoU in `[bg_thr, pos_thr]` — the upper bound is inclusive and is what excludes `Dupe`, whose same-class IoU exceeds `pos_thr` |
+/// | 2 | `Cls`  | cross-class max IoU >= `pos_thr` (and `Loc` did not fire) |
+/// | 3 | `Dupe` | a same-class GT at IoU >= `pos_thr` is already matched by a higher-scoring TP |
+/// | 4 | `Bkg`  | max IoU with any GT <= `bg_thr` (same-class is already below `bg_thr` here, so only cross-class needs checking) |
+/// | 5 | `Both` | fallthrough — cross-class IoU in `(bg_thr, pos_thr)` |
+pub(super) fn classify_fp(ev: &FpEvidence, pos_thr: f64, bg_thr: f64) -> ErrType {
+    if ev.max_same_iou >= bg_thr && ev.max_same_iou <= pos_thr {
+        ErrType::Loc
+    } else if ev.max_cross_iou >= pos_thr {
+        ErrType::Cls
+    } else if ev.best_same_gt_matched {
+        ErrType::Dupe
+    } else if ev.max_cross_iou <= bg_thr {
+        ErrType::Bkg
+    } else {
+        ErrType::Both
+    }
+}
+
 impl COCOeval {
     /// Compute average precision from per-detection matched/ignored flags.
     ///
@@ -154,16 +222,6 @@ impl COCOeval {
             })
             .collect();
 
-        // --- Error type definition (local enum) ---
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum ErrType {
-            Cls,
-            Loc,
-            Both,
-            Dupe,
-            Bkg,
-        }
-
         // Per-category accumulated data for ΔAP computation
         struct CatData {
             scores: Vec<f64>,
@@ -279,24 +337,18 @@ impl COCOeval {
                         }
                     }
 
-                    // Priority order matches tidecv (BoxError > ClassError > DuplicateError > BackgroundError > OtherError):
-                    //   Loc:  same-class max IoU ∈ [bg_thr, pos_thr]; upper bound excludes Dupe
-                    //         (Dupe DTs have same-class IoU > pos_thr with an already-matched GT)
-                    //   Cls:  cross-class max IoU ≥ pos_thr (Loc didn't fire)
-                    //   Dupe: a same-class GT with IoU ≥ pos_thr is already matched by a higher TP
-                    //   Bkg:  max IoU with any GT ≤ bg_thr (same-class < bg_thr already; check cross)
-                    //   Both: fallthrough (cross-class IoU ∈ (bg_thr, pos_thr))
-                    let err = if max_same_iou >= bg_thr && max_same_iou <= pos_thr {
-                        ErrType::Loc
-                    } else if max_cross_iou >= pos_thr {
-                        ErrType::Cls
-                    } else if best_same_gt_matched {
-                        ErrType::Dupe
-                    } else if max_cross_iou <= bg_thr {
-                        ErrType::Bkg
-                    } else {
-                        ErrType::Both
-                    };
+                    // The tidecv priority order lives in `classify_fp` — see its
+                    // docs for the table. Everything above this line is evidence
+                    // gathering; the decision itself is the parity contract.
+                    let err = classify_fp(
+                        &FpEvidence {
+                            max_same_iou,
+                            max_cross_iou,
+                            best_same_gt_matched,
+                        },
+                        pos_thr,
+                        bg_thr,
+                    );
 
                     // Track which GTs are "covered" (not Miss) by Loc or Cls FP DTs.
                     // Only Loc and Cls errors can be fixed to produce a TP for their target GT;
@@ -326,14 +378,7 @@ impl COCOeval {
         // Aggregate FP error type counts
         for data in cat_data.values() {
             for err in data.fp_types.iter().flatten() {
-                let key = match err {
-                    ErrType::Cls => "Cls",
-                    ErrType::Loc => "Loc",
-                    ErrType::Both => "Both",
-                    ErrType::Dupe => "Dupe",
-                    ErrType::Bkg => "Bkg",
-                };
-                *counts.entry(key.to_string()).or_insert(0) += 1;
+                *counts.entry(err.as_str().to_string()).or_insert(0) += 1;
             }
         }
 
@@ -481,5 +526,95 @@ impl COCOeval {
             pos_thr,
             bg_thr,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POS: f64 = 0.5;
+    const BG: f64 = 0.1;
+
+    fn ev(max_same_iou: f64, max_cross_iou: f64, best_same_gt_matched: bool) -> FpEvidence {
+        FpEvidence {
+            max_same_iou,
+            max_cross_iou,
+            best_same_gt_matched,
+        }
+    }
+
+    fn classify(same: f64, cross: f64, dupe: bool) -> ErrType {
+        classify_fp(&ev(same, cross, dupe), POS, BG)
+    }
+
+    #[test]
+    fn each_error_type_is_reachable() {
+        // Loc:  same-class IoU inside [bg, pos]
+        assert_eq!(classify(0.3, 0.0, false), ErrType::Loc);
+        // Cls:  no Loc, but a cross-class GT is well overlapped
+        assert_eq!(classify(0.0, 0.9, false), ErrType::Cls);
+        // Dupe: same-class GT above pos_thr already taken by a higher-scoring TP
+        assert_eq!(classify(0.9, 0.0, true), ErrType::Dupe);
+        // Bkg:  overlaps nothing
+        assert_eq!(classify(0.0, 0.0, false), ErrType::Bkg);
+        // Both: cross-class IoU strictly inside (bg, pos)
+        assert_eq!(classify(0.0, 0.3, false), ErrType::Both);
+    }
+
+    #[test]
+    fn loc_outranks_cls_and_dupe() {
+        // A DT can satisfy Loc *and* Cls; tidecv reports Loc.
+        assert_eq!(classify(0.3, 0.9, false), ErrType::Loc);
+        // Loc also wins over a would-be Dupe.
+        assert_eq!(classify(0.3, 0.0, true), ErrType::Loc);
+    }
+
+    #[test]
+    fn cls_outranks_dupe_and_bkg() {
+        assert_eq!(classify(0.9, 0.9, true), ErrType::Cls);
+        // Cross-class overlap above pos_thr beats the "overlaps nothing" reading.
+        assert_eq!(classify(0.0, 0.5, false), ErrType::Cls);
+    }
+
+    #[test]
+    fn dupe_outranks_bkg() {
+        // Same-class IoU above pos_thr, so Loc's upper bound excludes it; the
+        // already-matched flag is then what distinguishes Dupe from Bkg.
+        assert_eq!(classify(0.9, 0.0, true), ErrType::Dupe);
+        assert_eq!(classify(0.9, 0.0, false), ErrType::Bkg);
+    }
+
+    /// The `Loc` window is closed at both ends. tidecv uses `>=` and `<=`, and
+    /// the inclusive upper bound is specifically what keeps a detection sitting
+    /// exactly on `pos_thr` out of `Dupe`.
+    #[test]
+    fn loc_window_is_inclusive_at_both_ends() {
+        assert_eq!(classify(BG, 0.0, false), ErrType::Loc);
+        assert_eq!(classify(POS, 0.0, true), ErrType::Loc);
+        // Just outside the window on either side is not Loc.
+        assert_ne!(classify(BG - 1e-9, 0.0, false), ErrType::Loc);
+        assert_ne!(classify(POS + 1e-9, 0.0, true), ErrType::Loc);
+    }
+
+    /// `Bkg`'s bound is also inclusive: cross-class IoU exactly at `bg_thr` is
+    /// background, and anything strictly above it falls through to `Both`.
+    #[test]
+    fn bkg_upper_bound_is_inclusive() {
+        assert_eq!(classify(0.0, BG, false), ErrType::Bkg);
+        assert_eq!(classify(0.0, BG + 1e-9, false), ErrType::Both);
+    }
+
+    #[test]
+    fn as_str_covers_every_variant() {
+        for (err, key) in [
+            (ErrType::Cls, "Cls"),
+            (ErrType::Loc, "Loc"),
+            (ErrType::Both, "Both"),
+            (ErrType::Dupe, "Dupe"),
+            (ErrType::Bkg, "Bkg"),
+        ] {
+            assert_eq!(err.as_str(), key);
+        }
     }
 }
