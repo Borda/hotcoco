@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The analysis layer no longer reaches into `COCOeval`'s private state. TIDE read the
+  whole-dataset `ious` similarity cache directly, and `compare`/`slice`/`report` read
+  `freq_groups`; both now go through driver-private accessors. `cell_ious(img_id,
+  cat_id)` deliberately returns **one cell rather than the map** — the 0.5 primitives
+  contract review identified that cache as the likeliest route by which retention leaks
+  into a shared contract, which would foreclose the recompute-instead-of-retain lever
+  the tracking family needs. A new `similarity_cache_stays_driver_private` conformance
+  test in `tests/architecture.rs` fails the build if anything outside the driver touches
+  the field.
+
 - Per-image matching moved out of `eval/evaluate.rs` into a new `eval/matching.rs`, and
   the 229-line `evaluate_img_static` is now four named steps over two explicit views:
   `gather_gt` (load + apply the mode-dependent ignore rules + partition

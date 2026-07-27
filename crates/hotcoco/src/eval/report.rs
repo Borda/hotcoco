@@ -81,7 +81,7 @@ impl COCOeval {
             eval,
             &self.params,
             self.eval_mode,
-            &self.freq_groups,
+            self.freq_groups(),
             &metrics,
         );
 

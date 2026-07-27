@@ -280,7 +280,7 @@ impl COCOeval {
                 .map(|(i, &id)| (id, i))
                 .collect();
 
-            let same_iou_mat = self.ious.get(&(img_id, cat_id));
+            let same_iou_mat = self.cell_ious(img_id, cat_id);
             let cross_map = cross_iou_per_img.get(&img_id);
 
             let entry = cat_data.entry(cat_id).or_insert_with(|| CatData {

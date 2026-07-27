@@ -196,3 +196,57 @@ fn greedy_matching_only_in_primitives() {
         violations.join("\n  ")
     );
 }
+
+/// The whole-dataset similarity cache stays inside the detection driver.
+///
+/// `COCOeval::ious` maps every evaluated `(image, category)` cell to its
+/// similarity matrix. That is fine for detection — but the 0.5 primitives
+/// contract review identified it as the single most likely route by which
+/// *retention* leaks into a shared contract, and retention is the one thing the
+/// primitives layer forbids: `primitives/mod.rs` states that no contract there may
+/// require whole-sequence similarity retention, so HOTA's second pass (1.2) stays
+/// free to recompute rather than hold hundreds of megabytes per sequence per
+/// thread at MOT20 scale.
+///
+/// The analysis layer only ever needs one cell, so it goes through
+/// `COCOeval::cell_ious(img_id, cat_id)`. The accessor's *shape* is the
+/// enforcement — it cannot hand out the map — and this test keeps callers from
+/// bypassing it by touching the field directly.
+///
+/// # Adding a sanctioned home
+///
+/// [`CACHE_OWNERS`] is the driver, and only the driver: the module that owns the
+/// field, the one that populates it, and the one that consumes it per cell. When
+/// `eval/` becomes `detection/` at 1.0 these paths are renamed — update them.
+/// Do not add an analysis or `primitives` file to this list; needing to is the
+/// signal that the code should call `cell_ious` instead.
+#[test]
+fn similarity_cache_stays_driver_private() {
+    /// Files permitted to touch the `ious` field directly.
+    const CACHE_OWNERS: &[&str] = &[
+        // owns the field and the `cell_ious` accessor
+        "crates/hotcoco/src/eval/mod.rs",
+        // builds the cache during `evaluate()`
+        "crates/hotcoco/src/eval/evaluate.rs",
+        // declares the read-only context that carries it into the fan-out
+        "crates/hotcoco/src/eval/types.rs",
+        // consumes exactly one cell per call, inside the fan-out
+        "crates/hotcoco/src/eval/matching.rs",
+    ];
+
+    let violations = scan(
+        |path| CACHE_OWNERS.contains(&path),
+        |line| line.contains(".ious") || line.contains("ious:"),
+    );
+
+    assert!(
+        violations.is_empty(),
+        "the whole-dataset similarity cache is driver-private; only {} may touch \
+         it.\nFound a direct field access at:\n  {}\n\n\
+         Call `COCOeval::cell_ious(img_id, cat_id)` instead — it hands out one \
+         cell and cannot leak the map. Exposing the map as a shared \"similarity \
+         cache\" type would foreclose the 1.2 recompute-instead-of-retain lever.",
+        CACHE_OWNERS.join(", "),
+        violations.join("\n  ")
+    );
+}

@@ -146,7 +146,7 @@ pub fn compare(
         &acc_a,
         &eval_a.params,
         eval_a.eval_mode,
-        &eval_a.freq_groups,
+        eval_a.freq_groups(),
         &metrics,
     );
 
@@ -155,7 +155,7 @@ pub fn compare(
         &acc_b,
         &eval_b.params,
         eval_b.eval_mode,
-        &eval_b.freq_groups,
+        eval_b.freq_groups(),
         &metrics,
     );
 
@@ -272,7 +272,7 @@ fn bootstrap_compare(
                 &acc_a,
                 &eval_a.params,
                 eval_a.eval_mode,
-                &eval_a.freq_groups,
+                eval_a.freq_groups(),
                 metrics,
             );
 
@@ -281,7 +281,7 @@ fn bootstrap_compare(
                 &acc_b,
                 &eval_b.params,
                 eval_b.eval_mode,
-                &eval_b.freq_groups,
+                eval_b.freq_groups(),
                 metrics,
             );
 

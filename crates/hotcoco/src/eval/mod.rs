@@ -118,6 +118,36 @@ impl COCOeval {
         self.stats.as_deref()
     }
 
+    /// Cached similarity matrix for one (image, category) cell, if `evaluate()`
+    /// computed one.
+    ///
+    /// # Deliberately one cell at a time
+    ///
+    /// `self.ious` is a **whole-dataset** similarity cache, and the 0.5 primitives
+    /// contract review flagged it as the single most likely route by which retention
+    /// leaks into a shared contract. If it ever became a primitive-level or
+    /// `EvalReport`-level "similarity cache" type, it would foreclose the memory lever
+    /// the tracking family depends on — HOTA's second pass must be free to *recompute*
+    /// similarity rather than retain it, because at MOT20 scale retention costs
+    /// hundreds of megabytes per sequence per thread.
+    ///
+    /// So this accessor hands out one cell, never the map. The detection driver may
+    /// cache as much as it likes; nothing outside it may learn that a whole-dataset
+    /// cache exists. **Keep this driver-private** — it must not gain a `pub` variant,
+    /// and it must not return `&HashMap<..>`. See CRATE-STRUCTURE.md item 13.
+    /// `pub(in crate::eval)`, not `pub(super)`: the visibility is the enforcement.
+    pub(in crate::eval) fn cell_ious(&self, img_id: u64, cat_id: u64) -> Option<&types::IouMatrix> {
+        self.ious.get(&(img_id, cat_id))
+    }
+
+    /// LVIS frequency-group buckets, populated during `evaluate()` in LVIS mode.
+    ///
+    /// Driver-private: the analysis layer re-aggregates over these, but they are an
+    /// implementation detail of federated evaluation rather than public surface.
+    pub(in crate::eval) fn freq_groups(&self) -> &FreqGroups {
+        &self.freq_groups
+    }
+
     /// Create a new COCOeval configured for LVIS federated evaluation.
     ///
     /// LVIS uses federated annotation — each image is only exhaustively labeled

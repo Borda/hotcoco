@@ -57,7 +57,7 @@ impl COCOeval {
             &overall_acc,
             &self.params,
             self.eval_mode,
-            &self.freq_groups,
+            self.freq_groups(),
             &metrics,
         );
 
@@ -85,7 +85,7 @@ impl COCOeval {
                 &acc,
                 &self.params,
                 self.eval_mode,
-                &self.freq_groups,
+                self.freq_groups(),
                 &metrics,
             );
 
