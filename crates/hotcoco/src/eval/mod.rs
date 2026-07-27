@@ -2,8 +2,6 @@
 //!
 //! Implements evaluate, accumulate, and summarize for bbox, segm, and keypoint evaluation.
 
-pub(crate) mod types;
-
 pub(super) mod accumulate;
 mod calibration;
 mod compare;
@@ -14,39 +12,33 @@ pub mod expand;
 mod iou;
 mod matching;
 mod metrics;
+mod mode;
 mod report;
 mod results;
 pub mod slice;
 mod summarize;
 mod tide;
 
+pub use accumulate::{AccumulatedEval, EvalShape};
 pub use calibration::{CalibrationBin, CalibrationResult};
 pub use compare::{BootstrapCI, CategoryDelta, CompareOpts, ComparisonResult, compare};
+pub use confusion::ConfusionMatrix;
 pub use diagnostics::{
     AnnotationIndex, DtStatus, ErrorProfile, GtStatus, ImageDiagnostics, ImageSummary, LabelError,
     LabelErrorType,
 };
+pub use matching::EvalImg;
+pub use mode::EvalMode;
 pub use results::EvalResults;
 pub use slice::{SliceResult, SlicedResults};
-pub use types::{AccumulatedEval, ConfusionMatrix, EvalImg, EvalShape, TideErrors};
+pub use tide::TideErrors;
 
 use std::collections::HashMap;
 
 use crate::coco::COCO;
 use crate::hierarchy::Hierarchy;
 use crate::params::{IouType, Params};
-use types::FreqGroups;
-
-/// Evaluation mode: determines matching semantics, metric sets, and output formatting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvalMode {
-    /// Standard COCO evaluation (12 bbox/segm metrics or 10 keypoint metrics).
-    Coco,
-    /// LVIS federated evaluation (13 metrics including frequency-group AP).
-    Lvis,
-    /// Open Images detection evaluation (hierarchy-aware, group-of matching).
-    OpenImages,
-}
+use mode::FreqGroups;
 
 /// COCO evaluation engine.
 ///
@@ -74,7 +66,7 @@ pub struct COCOeval {
     pub coco_dt: COCO,
     pub params: Params,
     pub(crate) eval_imgs: Vec<Option<EvalImg>>,
-    ious: HashMap<(u64, u64), types::IouMatrix>,
+    ious: HashMap<(u64, u64), matching::IouMatrix>,
     pub(crate) eval: Option<AccumulatedEval>,
     pub(crate) stats: Option<Vec<f64>>,
     /// Evaluation mode (COCO, LVIS, or OpenImages).
@@ -136,7 +128,11 @@ impl COCOeval {
     /// cache exists. **Keep this driver-private** — it must not gain a `pub` variant,
     /// and it must not return `&HashMap<..>`. See CRATE-STRUCTURE.md item 13.
     /// `pub(in crate::eval)`, not `pub(super)`: the visibility is the enforcement.
-    pub(in crate::eval) fn cell_ious(&self, img_id: u64, cat_id: u64) -> Option<&types::IouMatrix> {
+    pub(in crate::eval) fn cell_ious(
+        &self,
+        img_id: u64,
+        cat_id: u64,
+    ) -> Option<&matching::IouMatrix> {
         self.ious.get(&(img_id, cat_id))
     }
 

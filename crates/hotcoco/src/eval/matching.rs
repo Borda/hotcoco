@@ -16,11 +16,13 @@
 //! Naming note: `matching`, not `match` — the latter is a reserved word and
 //! `mod match;` does not compile without `r#` escaping.
 
-use crate::params::IouType;
+use std::collections::HashMap;
+
+use crate::coco::COCO;
+use crate::params::{IouType, Params};
 use crate::types::Annotation;
 
 use super::EvalMode;
-use super::types::{EvalImg, EvalImgContext, IouMatrix};
 
 /// Ground truths for one cell, partitioned non-ignored-first.
 ///
@@ -377,4 +379,59 @@ pub(super) fn evaluate_img(
         gt_ignore: gt.ignore_sorted,
         dt_ignore: outcome.dt_ignore,
     })
+}
+
+/// D×G IoU matrix (row-major: dt.len() rows, gt.len() columns).
+pub(in crate::eval) type IouMatrix = Vec<Vec<f64>>;
+
+/// Per-image, per-category evaluation result.
+#[derive(Debug, Clone)]
+pub struct EvalImg {
+    pub image_id: u64,
+    pub category_id: u64,
+    pub area_rng: [f64; 2],
+    pub max_det: usize,
+    /// Detection annotation IDs (sorted by score descending, truncated to max_det)
+    pub dt_ids: Vec<u64>,
+    /// Ground truth annotation IDs (sorted: non-ignored first, then ignored)
+    pub gt_ids: Vec<u64>,
+    /// Matched GT annotation id per IoU threshold: `dt_matches[t][d]` = GT id, or **0 as a
+    /// sentinel for unmatched**. Do not use a non-zero check for presence — `Annotation.id`
+    /// defaults to 0, so a real GT can have id=0. Use `dt_matched[t][d]` instead.
+    pub dt_matches: Vec<Vec<u64>>,
+    /// Matched DT annotation id per IoU threshold: `gt_matches[t][g]` = DT id, or **0 as a
+    /// sentinel for unmatched**. Same caveat as `dt_matches`. Use `gt_matched[t][g]` instead.
+    pub gt_matches: Vec<Vec<u64>>,
+    /// Whether each detection was matched at each IoU threshold. Authoritative presence check;
+    /// avoids the id=0 sentinel ambiguity in `dt_matches`.
+    pub dt_matched: Vec<Vec<bool>>,
+    /// Whether each GT was matched at each IoU threshold. Authoritative presence check;
+    /// avoids the id=0 sentinel ambiguity in `gt_matches`.
+    pub gt_matched: Vec<Vec<bool>>,
+    /// Detection scores
+    pub dt_scores: Vec<f64>,
+    /// Whether each GT is ignored
+    pub gt_ignore: Vec<bool>,
+    /// Whether each detection is ignored per IoU threshold
+    pub dt_ignore: Vec<Vec<bool>>,
+}
+
+/// Read-only context shared across all [`COCOeval::evaluate_img_static`] calls
+/// within a single [`COCOeval::evaluate`] invocation.
+///
+/// Grouping these shared references avoids passing them individually to every
+/// call and removes the `#[allow(clippy::too_many_arguments)]` suppressor.
+pub(super) struct EvalImgContext<'a> {
+    pub(super) coco_gt: &'a COCO,
+    pub(super) coco_dt: &'a COCO,
+    pub(super) params: &'a Params,
+    pub(super) ious: &'a HashMap<(u64, u64), IouMatrix>,
+    pub(super) eval_mode: super::EvalMode,
+    /// `params.iou_thrs` with pycocotools' match floor applied
+    /// ([`crate::primitives::greedy::coco_match_floor`]). Resolved once per
+    /// `evaluate()` rather than per image-category pair: this is read inside a
+    /// rayon fan-out over every (category, area range, image) tuple, so deriving
+    /// it at the call site would allocate a short `Vec` hundreds of thousands of
+    /// times per evaluation.
+    pub(super) match_floors: &'a [f64],
 }

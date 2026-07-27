@@ -7,8 +7,9 @@
 use crate::params::Params;
 
 use super::EvalMode;
+use super::accumulate::AccumulatedEval;
 use super::metrics::MetricDef;
-use super::types::{AccumulatedEval, FreqGroups};
+use super::mode::FreqGroups;
 
 /// Per-category mean AP as a free function (for use by `summarize_impl` and `slice_by`).
 pub(super) fn per_cat_ap_static(eval: &AccumulatedEval, params: &Params) -> Vec<f64> {

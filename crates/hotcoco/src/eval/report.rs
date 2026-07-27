@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use crate::params::{Params, default_iou_thrs};
 
+use super::accumulate::AccumulatedEval;
 use super::metrics::build_metric_defs;
 use super::results::{EvalParams, EvalResults};
 use super::summarize::{per_cat_ap_static, summarize_impl};
-use super::types::AccumulatedEval;
 use super::{COCOeval, EvalMode};
 
 impl COCOeval {

@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use crate::params::Params;
 
 use super::COCOeval;
-use super::types::{AccumulatedEval, EvalImg, EvalShape};
+use super::matching::EvalImg;
 
 /// Accumulate per-image eval results into precision/recall arrays.
 ///
@@ -244,5 +244,64 @@ impl COCOeval {
     /// Accumulate per-image results into precision/recall arrays.
     pub fn accumulate(&mut self) {
         self.eval = Some(accumulate_impl(&self.eval_imgs, &self.params, None));
+    }
+}
+
+/// Array dimensions of an accumulated evaluation result.
+///
+/// Precision and scores have shape `[T x R x K x A x M]`;
+/// recall has shape `[T x K x A x M]`.
+#[derive(Debug, Clone, Copy)]
+pub struct EvalShape {
+    /// Number of IoU thresholds (T).
+    pub t: usize,
+    /// Number of recall thresholds (R).
+    pub r: usize,
+    /// Number of categories (K).
+    pub k: usize,
+    /// Number of area ranges (A).
+    pub a: usize,
+    /// Number of max-detection limits (M).
+    pub m: usize,
+}
+
+impl EvalShape {
+    /// Flat index into `precision` (or `scores`) for 5-D coordinates.
+    pub fn precision_idx(&self, t: usize, r: usize, k: usize, a: usize, m: usize) -> usize {
+        ((((t * self.r + r) * self.k + k) * self.a + a) * self.m) + m
+    }
+
+    /// Flat index into `recall` for 4-D coordinates.
+    pub fn recall_idx(&self, t: usize, k: usize, a: usize, m: usize) -> usize {
+        (((t * self.k + k) * self.a + a) * self.m) + m
+    }
+}
+
+/// Accumulated evaluation results across all images.
+///
+/// Precision and scores are stored as flat 5-D arrays with shape `[T x R x K x A x M]`.
+/// Recall is a flat 4-D array with shape `[T x K x A x M]`. Values of -1.0 indicate
+/// that no data was available for that combination (e.g. a category with no GT instances).
+#[derive(Debug, Clone)]
+pub struct AccumulatedEval {
+    /// Interpolated precision at each (iou_thr, recall_thr, category, area_range, max_det).
+    pub precision: Vec<f64>,
+    /// Maximum recall at each (iou_thr, category, area_range, max_det).
+    pub recall: Vec<f64>,
+    /// Detection score at each precision threshold, same shape as `precision`.
+    pub scores: Vec<f64>,
+    /// Array dimensions — use to interpret the flat precision/recall/scores vectors.
+    pub shape: EvalShape,
+}
+
+impl AccumulatedEval {
+    /// Flat index into `precision` (or `scores`) for 5-D coordinates.
+    pub fn precision_idx(&self, t: usize, r: usize, k: usize, a: usize, m: usize) -> usize {
+        self.shape.precision_idx(t, r, k, a, m)
+    }
+
+    /// Flat index into `recall` for 4-D coordinates.
+    pub fn recall_idx(&self, t: usize, k: usize, a: usize, m: usize) -> usize {
+        self.shape.recall_idx(t, k, a, m)
     }
 }

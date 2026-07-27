@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
+use serde::Serialize;
 
 use super::COCOeval;
-use super::types::{EvalImg, TideErrors};
+use super::matching::EvalImg;
 
 /// TIDE false-positive error types, named as in tidecv.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -617,4 +618,24 @@ mod tests {
             assert_eq!(err.as_str(), key);
         }
     }
+}
+
+/// TIDE error decomposition for object detection.
+///
+/// Produced by [`super::COCOeval::tide_errors`]. Each ΔAP value measures how much
+/// average AP would improve if all errors of that type were fixed.
+#[derive(Debug, Clone, Serialize)]
+pub struct TideErrors {
+    /// ΔAP for each error type (fixing all errors of that type).
+    /// Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`, `"FP"`, `"FN"`.
+    pub delta_ap: HashMap<String, f64>,
+    /// Count of each error type across all categories and images.
+    /// Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`.
+    pub counts: HashMap<String, u64>,
+    /// Baseline AP at `pos_thr` (mean over categories with GT).
+    pub ap_base: f64,
+    /// IoU threshold for TP/FP classification.
+    pub pos_thr: f64,
+    /// Background IoU threshold for Loc/Both/Bkg discrimination.
+    pub bg_thr: f64,
 }

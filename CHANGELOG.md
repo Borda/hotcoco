@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `eval/types.rs` is dissolved. It held types for four unrelated concerns plus two
+  sibling features' public types, so "where is `EvalImg` defined?" answered "in a junk
+  drawer" rather than "in the matching stage". Each type now lives next to the stage
+  that produces it: `EvalImg`/`EvalImgContext`/`IouMatrix` → `eval/matching.rs`,
+  `AccumulatedEval`/`EvalShape` → `eval/accumulate.rs`, `ConfusionMatrix` →
+  `eval/confusion.rs`, `TideErrors` → `eval/tide.rs`, and `EvalMode` plus the LVIS
+  `FreqGroup`/`FreqGroups` buckets → a new `eval/mode.rs`. Every public path is
+  unchanged — `hotcoco::EvalImg` and `hotcoco::eval::EvalImg` both still resolve.
+
 - The analysis layer no longer reaches into `COCOeval`'s private state. TIDE read the
   whole-dataset `ious` similarity cache directly, and `compare`/`slice`/`report` read
   `freq_groups`; both now go through driver-private accessors. `cell_ious(img_id,

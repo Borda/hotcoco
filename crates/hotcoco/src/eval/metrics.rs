@@ -9,7 +9,7 @@
 use crate::params::{IouType, Params};
 
 use super::EvalMode;
-use super::types::FreqGroup;
+use super::mode::FreqGroup;
 
 /// Definition of a single summary metric (one row in the COCO output table).
 pub(super) struct MetricDef {

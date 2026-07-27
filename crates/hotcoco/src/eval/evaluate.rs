@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
-use super::types::EvalImgContext;
+use super::matching::{EvalImgContext, IouMatrix};
 use super::{COCOeval, EvalMode};
 
 impl COCOeval {
@@ -134,7 +134,7 @@ impl COCOeval {
         if self.eval_mode == EvalMode::Lvis {
             let cat_id_to_k_idx: HashMap<u64, usize> =
                 cat_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-            let mut freq_groups = super::types::FreqGroups::default();
+            let mut freq_groups = super::mode::FreqGroups::default();
             for cat in &self.coco_gt.dataset.categories {
                 if let Some(&k_idx) = cat_id_to_k_idx.get(&cat.id) {
                     match cat.frequency.as_deref() {
@@ -152,7 +152,7 @@ impl COCOeval {
 
         // Compute IoUs only for pairs where both GT and DT are non-empty.
         // Pairs with only GT or only DT produce empty IoU matrices — skip storing them.
-        let iou_results: Vec<((u64, u64), super::types::IouMatrix)> = sparse_pairs
+        let iou_results: Vec<((u64, u64), IouMatrix)> = sparse_pairs
             .par_iter()
             .filter_map(|&(img_id, cat_id)| {
                 let iou_matrix = Self::compute_iou_static(

@@ -9,7 +9,6 @@ use crate::primitives::sim;
 use crate::types::Rle;
 
 use super::COCOeval;
-use super::types::ConfusionMatrix;
 
 impl COCOeval {
     /// Compute a cross-category IoU matrix between DT and GT annotations.
@@ -294,5 +293,53 @@ impl COCOeval {
             cat_names,
             iou_thr,
         }
+    }
+}
+
+/// Per-category confusion matrix for object detection.
+///
+/// Rows are ground truth categories, columns are predicted categories.
+/// Index `num_cats` (the last row/column) represents "background" — unmatched GTs
+/// (false negatives) land in the background column, unmatched DTs (false positives)
+/// land in the background row.
+///
+/// Use [`super::COCOeval::confusion_matrix`] to compute this.
+#[derive(Debug, Clone)]
+pub struct ConfusionMatrix {
+    /// Raw counts, row-major, shape (num_cats+1) × (num_cats+1).
+    /// Index `K = num_cats` is the background row/column.
+    pub matrix: Vec<u64>,
+    pub num_cats: usize,
+    /// Category IDs corresponding to rows/cols 0..num_cats-1.
+    pub cat_ids: Vec<u64>,
+    /// Category names corresponding to rows/cols 0..num_cats-1.
+    pub cat_names: Vec<String>,
+    pub iou_thr: f64,
+}
+
+impl ConfusionMatrix {
+    /// Get the count at row `gt_idx`, column `pred_idx`.
+    pub fn get(&self, gt_idx: usize, pred_idx: usize) -> u64 {
+        let k = self.num_cats + 1;
+        self.matrix[gt_idx * k + pred_idx]
+    }
+
+    /// Row-normalized matrix as flat `Vec<f64>` (same shape as `matrix`).
+    ///
+    /// Each row is divided by its sum so rows sum to 1.0.
+    /// Zero rows remain all-zero.
+    pub fn normalized(&self) -> Vec<f64> {
+        let k = self.num_cats + 1;
+        let mut norm = vec![0.0f64; k * k];
+        for row in 0..k {
+            let row_sum: u64 = (0..k).map(|col| self.matrix[row * k + col]).sum();
+            if row_sum > 0 {
+                let denom = row_sum as f64;
+                for col in 0..k {
+                    norm[row * k + col] = self.matrix[row * k + col] as f64 / denom;
+                }
+            }
+        }
+        norm
     }
 }

@@ -228,9 +228,8 @@ fn similarity_cache_stays_driver_private() {
         "crates/hotcoco/src/eval/mod.rs",
         // builds the cache during `evaluate()`
         "crates/hotcoco/src/eval/evaluate.rs",
-        // declares the read-only context that carries it into the fan-out
-        "crates/hotcoco/src/eval/types.rs",
-        // consumes exactly one cell per call, inside the fan-out
+        // declares the read-only context that carries it into the fan-out, and
+        // consumes exactly one cell per call inside that fan-out
         "crates/hotcoco/src/eval/matching.rs",
     ];
 
