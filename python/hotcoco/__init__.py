@@ -135,6 +135,17 @@ class LVISResults:
         return lvis_gt.load_res(results)
 
 
+import sys as _sys  # noqa: E402
+
+from . import detection  # noqa: E402, F401
+
+# `mask` is a PyO3 submodule object, which `from hotcoco import mask` finds as an
+# attribute but `import hotcoco.mask` does not — the import system looks in
+# sys.modules, and PyO3's add_submodule does not register there. Anyone migrating
+# from `import pycocotools.mask` writes the second form, so register it.
+# (`init_as_pycocotools()` already does the equivalent for `pycocotools.mask`,
+# which is why that path worked while the hotcoco one did not.)
+_sys.modules.setdefault("hotcoco.mask", mask)
 from .integrations import CocoDetection, CocoEvaluator  # noqa: E402, F401
 
 __all__ = [
@@ -148,6 +159,7 @@ __all__ = [
     "LVISeval",
     "Params",
     "compare",
+    "detection",
     "init_as_lvis",
     "init_as_pycocotools",
     "mask",

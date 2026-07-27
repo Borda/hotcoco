@@ -72,6 +72,9 @@ def test_top_level_exports_covered():
         "hotcoco",
         "integrations",
         "annotations",
+        # Family namespace: it re-exports names already stubbed at the top level
+        # and has its own detection.pyi. Covered by the tests below instead.
+        "detection",
     }
     runtime_names -= skip
 
@@ -122,3 +125,61 @@ def test_hierarchy_methods_covered():
 
     missing = runtime_members - stub_members
     assert not missing, f"Hierarchy methods missing from stubs: {sorted(missing)}"
+
+
+# ---------------------------------------------------------------------------
+# Family namespaces
+# ---------------------------------------------------------------------------
+
+
+def test_detection_namespace_importable_both_ways():
+    """`import hotcoco.detection` and `from hotcoco import detection` must agree.
+
+    PyO3's `add_submodule` makes a submodule reachable as an *attribute* without
+    registering it in `sys.modules`, so the `import x.y` form fails while
+    `from x import y` works. That bit `hotcoco.mask`; this test keeps it from
+    biting the family namespaces as panoptic, tracking, and concepts land.
+    """
+    import sys
+
+    import hotcoco.detection
+    from hotcoco import detection
+
+    assert "hotcoco.detection" in sys.modules
+    assert detection is hotcoco.detection
+
+
+def test_mask_importable_both_ways():
+    """The regression that motivated the check above."""
+    import hotcoco.mask
+    from hotcoco import mask
+
+    assert mask is hotcoco.mask
+    assert hasattr(hotcoco.mask, "iou")
+
+
+def test_detection_namespace_reexports_are_the_same_objects():
+    """The namespace is additive sugar, not a parallel implementation."""
+    import hotcoco
+    from hotcoco import detection
+
+    for name in detection.__all__:
+        assert getattr(detection, name) is getattr(hotcoco, name), f"hotcoco.detection.{name} is not hotcoco.{name}"
+
+
+def test_detection_stub_matches_runtime():
+    stub = ast.parse((STUB_PATH.parent / "detection.pyi").read_text())
+    stubbed: set[str] = set()
+    for node in ast.iter_child_nodes(stub):
+        if isinstance(node, ast.ImportFrom):
+            stubbed.update(alias.asname or alias.name for alias in node.names)
+
+    from hotcoco import detection
+
+    missing = set(detection.__all__) - stubbed
+    assert not missing, f"Names missing from detection.pyi: {sorted(missing)}"
+
+
+def test_py_typed_covers_the_package():
+    """`py.typed` is what makes any of these stubs visible to a type checker."""
+    assert (STUB_PATH.parent / "py.typed").exists()

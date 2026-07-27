@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `hotcoco.detection` — the first metric-family namespace, exposing `COCOeval`,
+  `Params`, `Hierarchy`, and `compare`. Panoptic, tracking, and concepts follow the same
+  shape, so code evaluating several families reads consistently:
+  `from hotcoco import detection, panoptic`.
+
+  **Purely additive.** `hotcoco.detection.COCOeval` *is* `hotcoco.COCOeval` — the same
+  object under the family name. Top-level names are permanent compatibility guarantees,
+  not deprecated aliases; if you are replacing `pycocotools`, keep importing from the
+  top level. The LVIS helpers stay top-level too, since they exist to mirror
+  `lvis-api`'s import paths.
+
 - `primitives::report::EvalReport` — the shape every metric family reports in, and the
   last pending item in `primitives`. Carries headline `metrics`, nested `per_class` and
   `per_group` breakdowns, renderable `curves`, and the producing `params`, so a renderer
@@ -119,6 +130,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the aggregation step.
 
 ### Fixed
+
+- `import hotcoco.mask` now works. It raised `ModuleNotFoundError` while
+  `from hotcoco import mask` succeeded, because PyO3's `add_submodule` makes a submodule
+  reachable as an attribute without registering it in `sys.modules`. Anyone migrating
+  from `import pycocotools.mask` writes the failing form — and `init_as_pycocotools()`
+  masked the problem, since it registers `pycocotools.mask` explicitly and so always
+  worked.
 
 - Detection matching now applies pycocotools' match floor. pycocotools starts each
   detection's search at `min(t, 1 - 1e-10)` rather than at `t`; hotcoco compared
