@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Per-image matching moved out of `eval/evaluate.rs` into a new `eval/matching.rs`, and
+  the 229-line `evaluate_img_static` is now four named steps over two explicit views:
+  `gather_gt` (load + apply the mode-dependent ignore rules + partition
+  non-ignored-first), `gather_dt` (load + score-descending order + `max_det` cap),
+  `reordered_iou` (build the flat matrix the matcher's contract expects), and
+  `match_cell` (invoke `greedy_match`, translate indices back to annotation ids, run
+  the Open Images group-of pass). `evaluate.rs` is now purely the outer driver —
+  parameter resolution, sparse-pair collection, and the parallel fan-out — with no
+  matching math of its own. Behavior unchanged.
+
 - `eval/summarize.rs` is split by responsibility. It was 861 lines doing five unrelated
   jobs — the metric catalog, the reduction, output formatting, pipeline orchestration,
   and `f_scores` — which made "where is AP75 defined?" and "where is it computed?" the

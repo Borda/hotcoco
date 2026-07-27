@@ -12,6 +12,7 @@ mod diagnostics;
 mod evaluate;
 pub mod expand;
 mod iou;
+mod matching;
 mod metrics;
 mod report;
 mod results;
