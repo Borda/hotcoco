@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.5.0] - 2026-07-26
+
+### Added
+
 - `COCOeval.eval` now includes the `params` and `date` keys, matching pycocotools'
   dict exactly (`params`, `counts`, `date`, `precision`, `recall`, `scores` in that
   order). `params` is the `Params` object used for evaluation; `date` uses
