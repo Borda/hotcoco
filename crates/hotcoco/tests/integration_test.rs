@@ -9,7 +9,7 @@ use hotcoco::convert::{
 };
 use hotcoco::params::IouType;
 use hotcoco::types::{Annotation, Category, Dataset, Image};
-use hotcoco::{COCO, COCOeval, Hierarchy, healthcheck};
+use hotcoco::{COCO, COCOeval, Hierarchy, quality};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -3002,7 +3002,7 @@ fn test_healthcheck_structural_errors() {
     let path = fixtures_dir().join("healthcheck_bad.json");
     let dataset: hotcoco::Dataset =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let report = healthcheck::healthcheck(&dataset);
+    let report = quality::healthcheck(&dataset);
 
     let codes: Vec<&str> = report.errors.iter().map(|f| f.code).collect();
     assert!(
@@ -3032,7 +3032,7 @@ fn test_healthcheck_clean_dataset() {
     let path = fixtures_dir().join("gt.json");
     let dataset: hotcoco::Dataset =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let report = healthcheck::healthcheck(&dataset);
+    let report = quality::healthcheck(&dataset);
 
     assert!(
         report.errors.is_empty(),
@@ -3046,7 +3046,7 @@ fn test_healthcheck_quality_warnings() {
     let path = fixtures_dir().join("healthcheck_quality.json");
     let dataset: hotcoco::Dataset =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let report = healthcheck::healthcheck(&dataset);
+    let report = quality::healthcheck(&dataset);
 
     let codes: Vec<&str> = report.warnings.iter().map(|f| f.code).collect();
     assert!(
@@ -3072,7 +3072,7 @@ fn test_healthcheck_summary() {
     let path = fixtures_dir().join("gt.json");
     let dataset: hotcoco::Dataset =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let report = healthcheck::healthcheck(&dataset);
+    let report = quality::healthcheck(&dataset);
 
     assert_eq!(report.summary.num_images, 3);
     assert_eq!(report.summary.num_annotations, 5);
@@ -3118,7 +3118,7 @@ fn test_healthcheck_compatibility() {
     )
     .unwrap();
 
-    let report = healthcheck::healthcheck_compatibility(&gt, &dt);
+    let report = quality::healthcheck_compatibility(&gt, &dt);
 
     let codes: Vec<&str> = report
         .errors
@@ -5069,7 +5069,24 @@ fn tier2_eval_module_path_still_resolves() {
     let _: Option<hotcoco::eval::SliceResult> = None;
     let _: Option<hotcoco::eval::ComparisonResult> = None;
 
+    // Modules relocated at 1.0, each kept resolving by a deprecated alias:
+    // `hierarchy` moved into the detection family (it is Open Images machinery,
+    // not a cross-family primitive), and health checks plus the statistics DTOs
+    // moved to `quality`.
+    let _: Option<hotcoco::hierarchy::Hierarchy> = None;
+    let _: Option<hotcoco::healthcheck::HealthReport> = None;
+    let _: Option<hotcoco::healthcheck::Finding> = None;
+    let _: Option<hotcoco::healthcheck::Layer> = None;
+    let _: Option<hotcoco::healthcheck::DatasetSummary> = None;
+    let _: Option<hotcoco::types::SummaryStats> = None;
+    let _: Option<hotcoco::types::CategoryStats> = None;
+    let _: Option<hotcoco::types::DatasetStats> = None;
+
     // And the crate-root paths, which are what most consumers actually use.
+    let _: Option<hotcoco::Hierarchy> = None;
+    let _: Option<hotcoco::HealthReport> = None;
+    let _: Option<hotcoco::SummaryStats> = None;
+    let _: Option<hotcoco::DatasetStats> = None;
     let _: Option<hotcoco::EvalImg> = None;
     let _: Option<hotcoco::AccumulatedEval> = None;
     let _: Option<hotcoco::EvalShape> = None;

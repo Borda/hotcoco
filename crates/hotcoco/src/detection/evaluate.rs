@@ -90,7 +90,9 @@ impl COCOeval {
         // OID: expand GT (and optionally DT) using hierarchy
         if self.eval_mode == EvalMode::OpenImages {
             let hierarchy = self.hierarchy.clone().unwrap_or_else(|| {
-                crate::hierarchy::Hierarchy::from_categories(&self.coco_gt.dataset.categories)
+                crate::detection::hierarchy::Hierarchy::from_categories(
+                    &self.coco_gt.dataset.categories,
+                )
             });
             self.coco_gt = super::expand::expand_gt(&self.coco_gt, &hierarchy);
             if self.params.expand_dt {

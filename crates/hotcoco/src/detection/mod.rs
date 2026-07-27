@@ -9,6 +9,7 @@ mod confusion;
 mod diagnostics;
 mod evaluate;
 pub mod expand;
+pub mod hierarchy;
 mod iou;
 mod matching;
 mod metrics;
@@ -36,7 +37,7 @@ pub use tide::TideErrors;
 use std::collections::HashMap;
 
 use crate::coco::COCO;
-use crate::hierarchy::Hierarchy;
+use crate::detection::hierarchy::Hierarchy;
 use crate::params::{IouType, Params};
 use mode::FreqGroups;
 

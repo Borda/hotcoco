@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   **The Python API is completely unaffected.** `hotcoco.COCOeval`, `init_as_pycocotools()`,
   and the whole `pycocotools`/LVIS drop-in surface are Tier 1 and permanent.
 
+- Two relocations, each with a deprecated compatibility alias on the same terms as
+  `eval` → `detection` (kept for 1.x, removed at 2.0):
+  - `hotcoco::hierarchy` → `hotcoco::detection::hierarchy`. The Open Images label
+    hierarchy is consumed only by the detection family's GT/DT expansion, so its
+    top-level placement wrongly implied it was a cross-family primitive.
+  - `hotcoco::healthcheck` → `hotcoco::quality::healthcheck`, joined by `COCO::stats`
+    and the `SummaryStats`/`CategoryStats`/`DatasetStats` DTOs, which moved out of
+    `hotcoco::types`. Dataset quality is its own tier, distinct from the schema
+    (`types` says what a COCO file may contain) and from the metrics engine
+    (`detection` scores predictions against one). `hotcoco::types::SummaryStats` and
+    friends still resolve via deprecated re-exports.
+
+  All crate-root re-exports — `hotcoco::Hierarchy`, `hotcoco::HealthReport`,
+  `hotcoco::SummaryStats` and the rest — are unchanged and **not** deprecated.
+
 - `eval/types.rs` is dissolved. It held types for four unrelated concerns plus two
   sibling features' public types, so "where is `EvalImg` defined?" answered "in a junk
   drawer" rather than "in the matching stage". Each type now lives next to the stage

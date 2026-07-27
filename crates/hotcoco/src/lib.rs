@@ -3,11 +3,10 @@ pub mod convert;
 pub mod detection;
 pub mod error;
 pub mod geometry;
-pub mod healthcheck;
-pub mod hierarchy;
 pub mod mask;
 pub mod params;
 pub mod primitives;
+pub mod quality;
 pub mod types;
 
 pub use coco::COCO;
@@ -35,10 +34,44 @@ pub use error::Error;
     note = "renamed to `hotcoco::detection`; the `eval` alias is kept for the 1.x series and removal is slated for 2.0"
 )]
 pub use detection as eval;
-pub use healthcheck::{DatasetSummary, Finding, HealthReport, Layer};
-pub use hierarchy::Hierarchy;
+
+/// Open Images label hierarchy, under its pre-1.0 path.
+///
+/// [`Hierarchy`] is Open Images machinery — it is consumed only by the detection
+/// family's GT/DT expansion — so it now lives at [`detection::hierarchy`] rather
+/// than beside the cross-family primitives, where its old top-level placement
+/// wrongly implied it was one.
+///
+/// Tier-2 compatibility: this path is kept for the 1.x series and removed at 2.0.
+/// The crate-root [`Hierarchy`] re-export is **not** deprecated and is the
+/// recommended path.
+#[deprecated(
+    since = "1.0.0",
+    note = "moved to `hotcoco::detection::hierarchy`; this alias is kept for the 1.x series and removal is slated for 2.0"
+)]
+pub mod hierarchy {
+    pub use crate::detection::hierarchy::*;
+}
+pub use detection::hierarchy::Hierarchy;
 pub use params::{AreaRange, IouType, Params};
-pub use types::{
-    Annotation, Category, CategoryStats, Dataset, DatasetStats, Image, Rle, Segmentation,
-    SummaryStats,
+pub use quality::{
+    CategoryStats, DatasetStats, DatasetSummary, Finding, HealthReport, Layer, SummaryStats,
 };
+pub use types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
+
+/// Dataset health checks, under their pre-1.0 path.
+///
+/// Health checking joined `COCO::stats` and the statistics DTOs in [`quality`] at
+/// 1.0: they are one concern — inspecting a dataset — and are distinct from both
+/// the schema ([`types`]) and the metrics engine ([`detection`]).
+///
+/// Tier-2 compatibility: kept for the 1.x series, removed at 2.0. The crate-root
+/// re-exports ([`HealthReport`], [`Finding`], [`Layer`], [`DatasetSummary`]) are
+/// **not** deprecated.
+#[deprecated(
+    since = "1.0.0",
+    note = "moved to `hotcoco::quality::healthcheck`; this alias is kept for the 1.x series and removal is slated for 2.0"
+)]
+pub mod healthcheck {
+    pub use crate::quality::healthcheck::*;
+}

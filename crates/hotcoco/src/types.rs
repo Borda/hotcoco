@@ -148,40 +148,6 @@ pub struct License {
     pub url: Option<String>,
 }
 
-/// Summary statistics (min/max/mean/median) for a numeric field.
-#[derive(Debug, Clone)]
-pub struct SummaryStats {
-    pub min: f64,
-    pub max: f64,
-    pub mean: f64,
-    pub median: f64,
-}
-
-/// Per-category dataset statistics.
-#[derive(Debug, Clone)]
-pub struct CategoryStats {
-    pub id: u64,
-    pub name: String,
-    pub ann_count: usize,
-    pub img_count: usize,
-    pub crowd_count: usize,
-}
-
-/// Dataset health-check statistics returned by [`crate::COCO::stats`].
-#[derive(Debug, Clone)]
-pub struct DatasetStats {
-    pub image_count: usize,
-    pub annotation_count: usize,
-    pub category_count: usize,
-    pub crowd_count: usize,
-    /// Per-category breakdown, sorted by `ann_count` descending.
-    pub per_category: Vec<CategoryStats>,
-    pub image_width: SummaryStats,
-    pub image_height: SummaryStats,
-    /// Summary over annotations that have an `area` value.
-    pub annotation_area: SummaryStats,
-}
-
 /// Run-length encoding for masks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rle {
@@ -203,3 +169,17 @@ impl Rle {
         Self { h, w, counts }
     }
 }
+
+/// Dataset statistics, under their pre-1.0 path.
+///
+/// These describe what was *found* in a dataset rather than what a COCO file may
+/// contain, so at 1.0 they moved to [`crate::quality`] alongside `COCO::stats`
+/// and the health checks, leaving this module as schema only.
+///
+/// Tier-2 compatibility: kept for the 1.x series, removed at 2.0. The crate-root
+/// re-exports (`hotcoco::SummaryStats` and friends) are **not** deprecated.
+#[deprecated(
+    since = "1.0.0",
+    note = "moved to `hotcoco::quality`; this alias is kept for the 1.x series and removal is slated for 2.0"
+)]
+pub use crate::quality::{CategoryStats, DatasetStats, SummaryStats};

@@ -7,10 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::mask;
-use crate::types::{
-    Annotation, Category, CategoryStats, Dataset, DatasetStats, Image, Rle, Segmentation,
-    SummaryStats,
-};
+use crate::types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
 
 /// The COCO dataset API for loading, querying, and indexing annotations.
 pub struct COCO {
@@ -24,7 +21,9 @@ pub struct COCO {
     /// img_id -> [ann_id, ...]
     img_to_anns: HashMap<u64, Vec<u64>>,
     /// cat_id -> [img_id, ...] (unique)
-    cat_to_imgs: HashMap<u64, Vec<u64>>,
+    /// `pub(crate)` so `quality::stats` can read it — `COCO::stats` lives there,
+    /// since dataset statistics are introspection output rather than schema.
+    pub(crate) cat_to_imgs: HashMap<u64, Vec<u64>>,
     /// (img_id, cat_id) -> [ann_id, ...] (sorted)
     img_cat_to_anns: HashMap<(u64, u64), Vec<u64>>,
 }
@@ -851,93 +850,14 @@ impl COCO {
         self.subset_by_img_ids(&img_ids[..count])
     }
 
-    /// Compute dataset health-check statistics.
-    pub fn stats(&self) -> DatasetStats {
-        let mut cat_ann_counts: HashMap<u64, usize> = HashMap::new();
-        let mut cat_crowd_counts: HashMap<u64, usize> = HashMap::new();
-        let mut areas: Vec<f64> = Vec::new();
-        let mut crowd_count = 0usize;
-
-        for ann in &self.dataset.annotations {
-            *cat_ann_counts.entry(ann.category_id).or_default() += 1;
-            if ann.iscrowd {
-                crowd_count += 1;
-                *cat_crowd_counts.entry(ann.category_id).or_default() += 1;
-            }
-            if let Some(area) = ann.area {
-                areas.push(area);
-            }
-        }
-
-        let (widths, heights): (Vec<f64>, Vec<f64>) = self
-            .dataset
-            .images
-            .iter()
-            .map(|img| (img.width as f64, img.height as f64))
-            .unzip();
-
-        let mut per_category: Vec<CategoryStats> = self
-            .dataset
-            .categories
-            .iter()
-            .map(|cat| CategoryStats {
-                id: cat.id,
-                name: cat.name.clone(),
-                ann_count: cat_ann_counts.get(&cat.id).copied().unwrap_or(0),
-                img_count: self.cat_to_imgs.get(&cat.id).map_or(0, std::vec::Vec::len),
-                crowd_count: cat_crowd_counts.get(&cat.id).copied().unwrap_or(0),
-            })
-            .collect();
-        per_category.sort_by_key(|b| std::cmp::Reverse(b.ann_count));
-
-        DatasetStats {
-            image_count: self.dataset.images.len(),
-            annotation_count: self.dataset.annotations.len(),
-            category_count: self.dataset.categories.len(),
-            crowd_count,
-            per_category,
-            image_width: summary_stats(widths),
-            image_height: summary_stats(heights),
-            annotation_area: summary_stats(areas),
-        }
-    }
-
     /// Run a health check on this dataset.
-    pub fn healthcheck(&self) -> crate::healthcheck::HealthReport {
-        crate::healthcheck::healthcheck(&self.dataset)
+    pub fn healthcheck(&self) -> crate::quality::HealthReport {
+        crate::quality::healthcheck(&self.dataset)
     }
 
     /// Run a health check including GT/DT compatibility.
-    pub fn healthcheck_compatibility(&self, dt: &COCO) -> crate::healthcheck::HealthReport {
-        crate::healthcheck::healthcheck_compatibility(&self.dataset, &dt.dataset)
-    }
-}
-
-fn summary_stats(mut values: Vec<f64>) -> SummaryStats {
-    if values.is_empty() {
-        return SummaryStats {
-            min: 0.0,
-            max: 0.0,
-            mean: 0.0,
-            median: 0.0,
-        };
-    }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let sorted = values;
-    let min = sorted[0];
-    let max = *sorted.last().expect("non-empty after early return");
-    let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
-    let n = sorted.len();
-    let median = if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        f64::midpoint(sorted[n / 2 - 1], sorted[n / 2])
-    };
-    SummaryStats {
-        min,
-        max,
-        mean,
-        median,
+    pub fn healthcheck_compatibility(&self, dt: &COCO) -> crate::quality::HealthReport {
+        crate::quality::healthcheck_compatibility(&self.dataset, &dt.dataset)
     }
 }
 
