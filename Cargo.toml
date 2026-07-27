@@ -14,6 +14,17 @@ readme = "README.md"
 keywords = ["coco", "object-detection", "evaluation", "computer-vision", "segmentation"]
 categories = ["computer-vision", "science"]
 
+# Internal path dependencies. These carry a version because crates.io resolves it
+# for published builds, and it does NOT inherit from [workspace.package] above —
+# so both entries must be bumped alongside it. They live here, next to the version
+# they must match, because when they sat in the member manifests they silently
+# lagged a full release behind (0.4.0 throughout 0.4.1). `hotcoco-core` is the
+# alias hotcoco-pyo3 needs to avoid colliding with the `hotcoco` Python module
+# name; a member cannot rename an inherited dependency, so it is declared here.
+[workspace.dependencies]
+hotcoco = { version = "0.4.1", path = "crates/hotcoco" }
+hotcoco-core = { version = "0.4.1", path = "crates/hotcoco", package = "hotcoco" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

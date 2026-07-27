@@ -3,7 +3,10 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      # Strictly vMAJOR.MINOR.PATCH (optionally with a prerelease/build suffix).
+      # The looser "v*" also fired on non-release tags, each of which attempted a
+      # real publish to crates.io and PyPI.
+      - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_dispatch:
 
 env:
@@ -22,7 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish hotcoco
-        run: cargo publish -p hotcoco || echo "::warning::hotcoco already published, skipping"
+        run: .github/scripts/cargo-publish.sh hotcoco
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -30,7 +33,7 @@ jobs:
         run: sleep 30
 
       - name: Publish hotcoco-cli
-        run: cargo publish -p hotcoco-cli || echo "::warning::hotcoco-cli already published, skipping"
+        run: .github/scripts/cargo-publish.sh hotcoco-cli
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

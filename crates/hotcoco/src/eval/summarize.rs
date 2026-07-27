@@ -584,7 +584,7 @@ impl COCOeval {
 
     /// Print the standard COCO evaluation summary.
     ///
-    /// Calls [`summarize_lines`] and prints each line to stdout.
+    /// Calls [`Self::summarize_lines`] and prints each line to stdout.
     pub fn summarize(&mut self) {
         for line in self.summarize_lines() {
             println!("{}", line);
@@ -699,7 +699,7 @@ impl COCOeval {
     ///
     /// Returns three metrics analogous to AP/AP50/AP75, but using max F-beta instead of
     /// mean precision. For each (IoU threshold, category), finds the recall operating point
-    /// that maximises F-beta, then averages across categories.
+    /// that maximizes F-beta, then averages across categories.
     ///
     /// `beta` controls the precision/recall trade-off:
     /// - `beta = 1.0`  → F1 (harmonic mean, equal weight)

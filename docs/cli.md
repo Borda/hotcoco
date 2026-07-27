@@ -424,7 +424,24 @@ cargo install hotcoco-cli
 coco-eval --gt annotations.json --dt detections.json --iou-type bbox
 ```
 
+Evaluation is the default action, so the flags can be passed bare as above. The
+same run can be written explicitly with the `eval` subcommand — useful in scripts
+where the intent should be obvious:
+
+```bash
+coco-eval eval --gt annotations.json --dt detections.json --iou-type bbox
+```
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `eval` | Evaluate detections against ground truth (the default action) |
+| `completions <shell>` | Print a shell completion script |
+
 ### Options
+
+These apply to `eval` and to the bare form.
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -435,6 +452,9 @@ coco-eval --gt annotations.json --dt detections.json --iou-type bbox
 | `--cat-ids <ids>` | Filter to specific category IDs (comma-separated) | all categories |
 | `--no-cats` | Pool all categories (disable per-category evaluation) | off |
 | `-o / --output <path>` | Write evaluation results to a JSON file | off |
+
+Tab completion is set up with `coco-eval completions <shell>` — see
+[Shell completions](#shell-completions) below.
 
 ### Examples
 
@@ -520,14 +540,14 @@ After restarting your shell (or sourcing the config), `coco <TAB>` completes sub
 
 ### `coco-eval` (Rust)
 
-`coco-eval --completions <SHELL>` prints a completion script to stdout. Pipe it to the right location for your shell:
+`coco-eval completions <SHELL>` prints a completion script to stdout. Pipe it to the right location for your shell:
 
 === "bash"
 
     ```bash
-    coco-eval --completions bash > ~/.bash_completion.d/coco-eval
+    coco-eval completions bash > ~/.bash_completion.d/coco-eval
     # or for system-wide:
-    coco-eval --completions bash | sudo tee /etc/bash_completion.d/coco-eval
+    coco-eval completions bash | sudo tee /etc/bash_completion.d/coco-eval
     ```
 
     Then add to `~/.bashrc` if not already sourcing `~/.bash_completion.d/`:
@@ -540,7 +560,7 @@ After restarting your shell (or sourcing the config), `coco <TAB>` completes sub
 
     ```zsh
     mkdir -p ~/.zsh/completions
-    coco-eval --completions zsh > ~/.zsh/completions/_coco-eval
+    coco-eval completions zsh > ~/.zsh/completions/_coco-eval
     ```
 
     Make sure `~/.zsh/completions` is on your `fpath` in `~/.zshrc`:
@@ -553,7 +573,7 @@ After restarting your shell (or sourcing the config), `coco <TAB>` completes sub
 === "fish"
 
     ```fish
-    coco-eval --completions fish > ~/.config/fish/completions/coco-eval.fish
+    coco-eval completions fish > ~/.config/fish/completions/coco-eval.fish
     ```
 
 Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`.

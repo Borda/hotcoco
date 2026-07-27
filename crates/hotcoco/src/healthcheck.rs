@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::primitives::sim::bbox_iou_pair;
 use crate::types::Dataset;
 use serde::Serialize;
 
@@ -204,24 +205,6 @@ fn check_structural(dataset: &Dataset, errors: &mut Vec<Finding>) {
     );
 }
 
-/// Compute IoU between two bboxes in [x, y, w, h] format.
-fn bbox_iou_pair(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    let ax2 = a[0] + a[2];
-    let ay2 = a[1] + a[3];
-    let bx2 = b[0] + b[2];
-    let by2 = b[1] + b[3];
-
-    let inter_x = (ax2.min(bx2) - a[0].max(b[0])).max(0.0);
-    let inter_y = (ay2.min(by2) - a[1].max(b[1])).max(0.0);
-    let inter = inter_x * inter_y;
-
-    let area_a = a[2] * a[3];
-    let area_b = b[2] * b[3];
-    let union = area_a + area_b - inter;
-
-    if union <= 0.0 { 0.0 } else { inter / union }
-}
-
 fn check_quality(dataset: &Dataset, warnings: &mut Vec<Finding>) {
     // Build image dimension lookup
     let img_dims: HashMap<u64, (u32, u32)> = dataset
@@ -333,7 +316,7 @@ fn check_quality(dataset: &Dataset, warnings: &mut Vec<Finding>) {
         }
         for i in 0..anns.len() {
             for j in (i + 1)..anns.len() {
-                if bbox_iou_pair(&anns[i].bbox, &anns[j].bbox) > 0.95 {
+                if bbox_iou_pair(anns[i].bbox, anns[j].bbox, false) > 0.95 {
                     near_dup_ids.insert(anns[i].id);
                     near_dup_ids.insert(anns[j].id);
                 }

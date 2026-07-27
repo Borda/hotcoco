@@ -45,9 +45,34 @@ jobs:
       - name: Tests
         run: cargo test -p hotcoco -p hotcoco-cli
 
-  python:
-    name: Python smoke test
+  python-lint:
+    name: Python lint
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Pinned so a new ruff release cannot turn a green PR red on its own.
+      # Keep in step with the `ruff` pin in pyproject.toml's [dev] extra; these
+      # are the same checks as `just py-fmt-check` and `just py-lint`.
+      - name: Ruff format check
+        run: uvx ruff@0.15.6 format --check python/ scripts/
+
+      - name: Ruff lint
+        run: uvx ruff@0.15.6 check python/ scripts/
+
+  python:
+    name: Python smoke test (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor declared by requires-python and by the abi3-py39
+        # wheel, which is a single wheel served to every Python >= 3.9. Testing
+        # the floor catches syntax that only parses on newer interpreters (e.g.
+        # PEP 604 `X | Y` unions in evaluated annotations).
+        python-version: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +83,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Create virtualenv and install dependencies
         run: |

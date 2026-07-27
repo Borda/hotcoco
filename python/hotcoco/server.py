@@ -1,4 +1,5 @@
 """FastAPI server for the COCO dataset browser."""
+
 from __future__ import annotations
 
 import asyncio
@@ -49,7 +50,9 @@ def _build_cat_tree(cats: list[dict]) -> list[dict]:
     return result
 
 
-def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco=None, coco_eval=None, slices=None) -> FastAPI:
+def create_app(
+    coco, image_dir: str | None = None, batch_size: int = 12, dt_coco=None, coco_eval=None, slices=None
+) -> FastAPI:
     """Create and return a FastAPI app for browsing a COCO dataset."""
     resolved_dir = image_dir if image_dir is not None else getattr(coco, "image_dir", None)
     if resolved_dir is None:
@@ -173,9 +176,15 @@ def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco
             elif eval_filter == "has_fn":
                 img_ids = [i for i in img_ids if img_summary.get(i, {}).get("fn", 0) > 0]
             elif eval_filter == "has_errors":
-                img_ids = [i for i in img_ids if img_summary.get(i, {}).get("fp", 0) + img_summary.get(i, {}).get("fn", 0) > 0]
+                img_ids = [
+                    i for i in img_ids if img_summary.get(i, {}).get("fp", 0) + img_summary.get(i, {}).get("fn", 0) > 0
+                ]
             elif eval_filter == "perfect":
-                img_ids = [i for i in img_ids if img_summary.get(i, {}).get("fp", 0) == 0 and img_summary.get(i, {}).get("fn", 0) == 0]
+                img_ids = [
+                    i
+                    for i in img_ids
+                    if img_summary.get(i, {}).get("fp", 0) == 0 and img_summary.get(i, {}).get("fn", 0) == 0
+                ]
 
         # Sort (applied before shuffle; shuffle overrides if active)
         if has_eval and sort and sort != "default":
@@ -205,7 +214,9 @@ def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco
         next_id = img_ids[idx + 1] if idx < len(img_ids) - 1 else None
         return {"prev_id": prev_id, "next_id": next_id}
 
-    def _build_query(categories, shuffle_seed, min_score, sort=None, eval_filter=None, iou_thr=None, slice_name=None) -> str:
+    def _build_query(
+        categories, shuffle_seed, min_score, sort=None, eval_filter=None, iou_thr=None, slice_name=None
+    ) -> str:
         parts = []
         if categories:
             parts.append(f"categories={categories}")
@@ -265,7 +276,9 @@ def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco
         iou_thr: float = Query(0.5, ge=0.5, le=0.95),
         slice: str | None = Query(None),
     ):
-        img_ids, _ = _resolve_img_ids(categories, shuffle_seed, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice)
+        img_ids, _ = _resolve_img_ids(
+            categories, shuffle_seed, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice
+        )
 
         total = len(img_ids)
         start = (page - 1) * batch_size
@@ -273,7 +286,9 @@ def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco
         has_next = start + batch_size < total
         showing = min(start + batch_size, total)
 
-        filter_query = _build_query(categories, shuffle_seed, min_score, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice)
+        filter_query = _build_query(
+            categories, shuffle_seed, min_score, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice
+        )
 
         # Get per-image eval summaries for gallery badges
         img_summaries = None
@@ -313,17 +328,20 @@ def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco
             )
         img_info = imgs[0]
 
-        img_ids, id_to_pos = _resolve_img_ids(categories, shuffle_seed, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice)
+        img_ids, id_to_pos = _resolve_img_ids(
+            categories, shuffle_seed, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice
+        )
         nav = _get_nav(img_ids, id_to_pos, image_id)
 
-        nav_query = _build_query(categories, shuffle_seed, min_score, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice)
+        nav_query = _build_query(
+            categories, shuffle_seed, min_score, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice
+        )
         nav_data = {"prev_id": nav["prev_id"], "next_id": nav["next_id"], "query": nav_query}
 
         eval_index = _get_eval_index(iou_thr) if has_eval else None
 
         annotation_data = _browse.prepare_annotation_data(
-            coco, image_id, cat_colors, dt_coco=dt_coco, score_thr=min_score, img_info=img_info,
-            eval_index=eval_index,
+            coco, image_id, cat_colors, dt_coco=dt_coco, score_thr=min_score, img_info=img_info, eval_index=eval_index
         )
 
         template = env.get_template("partials/detail.html")
@@ -347,8 +365,7 @@ def create_app(coco, image_dir: str | None = None, batch_size: int = 12, dt_coco
             return Response(content=thumbnail_cache[cache_key], media_type="image/png")
 
         img = _browse.render_thumbnail(
-            coco, image_id, resolved_dir,
-            cat_colors=cat_colors, dt_coco=dt_coco, score_thr=min_score,
+            coco, image_id, resolved_dir, cat_colors=cat_colors, dt_coco=dt_coco, score_thr=min_score
         )
         buf = io.BytesIO()
         img.save(buf, format="PNG")
@@ -402,6 +419,7 @@ def run_server(app: FastAPI, port: int = 7860, open_browser: bool = True):
         # Open browser after a short delay to let the server start
         def _open():
             import time
+
             time.sleep(0.5)
             webbrowser.open(f"http://127.0.0.1:{port}")
 

@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # numpy is imported lazily inside functions so plotting stays optional;
+    # this branch exists only so annotations referring to `np` can be resolved.
+    import numpy as np
 
 _MPL_ERROR = "matplotlib is required for plotting. Install with: pip install hotcoco[plot]"
 
@@ -84,9 +90,13 @@ def _place_title_and_subtitle(ax, title: str, subtitle: str) -> None:
 
     fig.suptitle(title, fontsize=title_size, fontweight=700, y=0.98)
     fig.text(
-        0.5, subtitle_y, subtitle,
-        ha="center", va="top",
-        fontsize=sub_size, fontweight=400,
+        0.5,
+        subtitle_y,
+        subtitle,
+        ha="center",
+        va="top",
+        fontsize=sub_size,
+        fontweight=400,
         color=_mpl.rcParams.get("axes.labelcolor", "#666"),
     )
 

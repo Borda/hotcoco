@@ -15,4 +15,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "[3/3] cargo test -p hotcoco -p hotcoco-cli"
 cargo test -p hotcoco -p hotcoco-cli
 
+# Python checks run only when Python files are staged, so Rust-only commits stay
+# fast. They must never skip silently when they are relevant — that is how the
+# tree drifted to 48 ruff errors while `just py-lint` existed but gated nothing.
+PY_STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.pyi?$' || true)
+if [ -n "$PY_STAGED" ]; then
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "Python files are staged but 'uv' was not found on PATH." >&2
+        echo "Run 'just setup' first (see CLAUDE.md), or unstage the Python files." >&2
+        exit 1
+    fi
+
+    echo "[4/5] uv run ruff format --check python/ scripts/"
+    uv run ruff format --check python/ scripts/
+
+    echo "[5/5] uv run ruff check python/ scripts/"
+    uv run ruff check python/ scripts/
+fi
+
 echo "All pre-commit checks passed."

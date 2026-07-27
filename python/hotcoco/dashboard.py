@@ -20,8 +20,16 @@ _EVAL_FP = "#ef4444"
 _EVAL_FN = "#3b82f6"
 
 _COLORWAY = [
-    "#5E81AC", "#C47A52", "#5A9E78", "#D4A03E", "#9673A6",
-    "#3D9B96", "#C46070", "#7B8C42", "#6E6EAA", "#B5694A",
+    "#5E81AC",
+    "#C47A52",
+    "#5A9E78",
+    "#D4A03E",
+    "#9673A6",
+    "#3D9B96",
+    "#C46070",
+    "#7B8C42",
+    "#6E6EAA",
+    "#B5694A",
 ]
 
 _FONT_BODY = "DM Sans, -apple-system, BlinkMacSystemFont, sans-serif"
@@ -77,6 +85,7 @@ def _to_html(fig, div_id, *, post_script=None):
 
 # ── KPI tiles ────────────────────────────────────────────────────────
 
+
 def kpi_tiles(coco_eval) -> list[dict]:
     """Extract headline metrics for KPI tile display.
 
@@ -85,7 +94,6 @@ def kpi_tiles(coco_eval) -> list[dict]:
     AR10 for keypoints) as the 4 most useful headlines.
     """
     metrics = coco_eval.get_results()
-    keys = coco_eval.metric_keys()
 
     # Pick the 4 most informative headline metrics
     preferred = ["AP", "AP50", "AP75", "AR100", "AR10", "AR1"]
@@ -96,6 +104,7 @@ def kpi_tiles(coco_eval) -> list[dict]:
 
 # ── PR Curves ────────────────────────────────────────────────────────
 
+
 def chart_pr_curves(coco_eval) -> str:
     """IoU-sweep PR curves with hover showing threshold values."""
     import plotly.graph_objects as go
@@ -104,13 +113,15 @@ def chart_pr_curves(coco_eval) -> str:
     a_idx = data.area_idx("all")
     m_idx = data.max_det_idx(None)
 
-    fig = go.Figure(layout=_dark_layout(
-        title=None,
-        xaxis=dict(title="Recall", range=[0, 1], gridcolor=_BORDER_SUBTLE),
-        yaxis=dict(title="Precision", range=[0, 1], gridcolor=_BORDER_SUBTLE),
-        height=440,
-        legend=dict(font=dict(size=11)),
-    ))
+    fig = go.Figure(
+        layout=_dark_layout(
+            title=None,
+            xaxis=dict(title="Recall", range=[0, 1], gridcolor=_BORDER_SUBTLE),
+            yaxis=dict(title="Precision", range=[0, 1], gridcolor=_BORDER_SUBTLE),
+            height=440,
+            legend=dict(font=dict(size=11)),
+        )
+    )
 
     for t_idx, iou_thr in enumerate(data.iou_thresholds):
         prec_raw = data.precision[t_idx, :, :, a_idx, m_idx]  # (R, K)
@@ -118,23 +129,25 @@ def chart_pr_curves(coco_eval) -> str:
         prec_masked = np.where(prec_raw < 0, np.nan, prec_raw)
         prec_mean = np.nanmean(prec_masked, axis=1)
 
-        fig.add_trace(go.Scatter(
-            x=data.recall_pts.tolist(),
-            y=prec_mean.tolist(),
-            mode="lines",
-            name=f"IoU={iou_thr:.2f}",
-            line=dict(width=2.5 if t_idx == 0 else 1.5),
-            hovertemplate="Recall: %{x:.3f}<br>Precision: %{y:.3f}<extra>IoU=%{fullData.name}</extra>",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=data.recall_pts.tolist(),
+                y=prec_mean.tolist(),
+                mode="lines",
+                name=f"IoU={iou_thr:.2f}",
+                line=dict(width=2.5 if t_idx == 0 else 1.5),
+                hovertemplate="Recall: %{x:.3f}<br>Precision: %{y:.3f}<extra>IoU=%{fullData.name}</extra>",
+            )
+        )
 
     # Add diagonal reference
-    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
-                  line=dict(color=_TEXT_TERTIARY, width=1, dash="dot"))
+    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color=_TEXT_TERTIARY, width=1, dash="dot"))
 
     return _to_html(fig, "pr-curves")
 
 
 # ── Per-Category AP ──────────────────────────────────────────────────
+
 
 def chart_per_category_ap(coco_eval) -> str:
     """Per-category AP as a native HTML leaderboard with expand/collapse."""
@@ -156,16 +169,16 @@ def chart_per_category_ap(coco_eval) -> str:
         pct = (ap / max_ap * 100) if max_ap > 0 else 0
         esc_name = escape(name)
         above_mean = "above" if ap >= mean_ap else "below"
-        hidden = ' hidden' if rank > collapsed_n and total > collapsed_n else ''
+        hidden = " hidden" if rank > collapsed_n and total > collapsed_n else ""
         rows.append(
             f'<a class="cat-row{hidden}" href="/?categories={esc_name}" data-rank="{rank}">'
             f'<span class="cat-rank">{rank}</span>'
             f'<span class="cat-name">{esc_name}</span>'
             f'<span class="cat-bar-wrap">'
             f'<span class="cat-bar {above_mean}" style="width:{pct:.1f}%"></span>'
-            f'</span>'
+            f"</span>"
             f'<span class="cat-ap">{ap:.3f}</span>'
-            f'</a>'
+            f"</a>"
         )
 
     toggle_html = ""
@@ -173,57 +186,52 @@ def chart_per_category_ap(coco_eval) -> str:
         toggle_html = (
             f'<button class="cat-toggle" id="cat-ap-toggle" onclick="toggleCatAP()">'
             f'<span class="cat-toggle-text">Show all {total} categories</span>'
-            f'<span class="cat-toggle-icon">\u25BE</span>'
-            f'</button>'
+            f'<span class="cat-toggle-icon">\u25be</span>'
+            f"</button>"
         )
 
     mean_line = (
         f'<div class="cat-mean">'
         f'<span class="cat-mean-label">Mean AP</span>'
         f'<span class="cat-mean-value">{mean_ap:.3f}</span>'
-        f'</div>'
+        f"</div>"
     )
 
     script = (
-        '<script>'
-        'function toggleCatAP(){'
+        "<script>"
+        "function toggleCatAP(){"
         '  var rows=document.querySelectorAll(".cat-row.hidden");'
         '  var btn=document.getElementById("cat-ap-toggle");'
         '  var txt=btn.querySelector(".cat-toggle-text");'
         '  var icon=btn.querySelector(".cat-toggle-icon");'
-        '  if(rows.length>0){'
+        "  if(rows.length>0){"
         '    document.querySelectorAll(".cat-row").forEach(function(r){r.classList.remove("hidden")});'
         f'    txt.textContent="Show top {collapsed_n}";'
-        '    icon.textContent="\u25B4";'
-        '  }else{'
-        f'    document.querySelectorAll(".cat-row").forEach(function(r,i){{if(i>={collapsed_n})r.classList.add("hidden")}});'
+        '    icon.textContent="\u25b4";'
+        "  }else{"
+        f'    document.querySelectorAll(".cat-row")'
+        f'.forEach(function(r,i){{if(i>={collapsed_n})r.classList.add("hidden")}});'
         f'    txt.textContent="Show all {total} categories";'
-        '    icon.textContent="\u25BE";'
+        '    icon.textContent="\u25be";'
         '    document.getElementById("cat-ap-list").scrollIntoView({behavior:"smooth",block:"start"});'
-        '  }'
-        '}'
-        '</script>'
+        "  }"
+        "}"
+        "</script>"
     )
 
-    return (
-        f'{mean_line}'
-        f'<div class="cat-ap-list" id="cat-ap-list">'
-        + "\n".join(rows)
-        + f'</div>'
-        + toggle_html
-        + script
-    )
+    return f'{mean_line}<div class="cat-ap-list" id="cat-ap-list">' + "\n".join(rows) + "</div>" + toggle_html + script
 
 
 # ── Confusion Matrix ─────────────────────────────────────────────────
+
 
 def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
     """Interactive confusion matrix heatmap."""
     import plotly.graph_objects as go
 
     cm = coco_eval.confusion_matrix(iou_thr=iou_thr)
-    raw_matrix = np.asarray(cm["matrix"], dtype=float)
     norm_matrix = np.asarray(cm["normalized"], dtype=float)
+    raw_matrix = np.asarray(cm["matrix"], dtype=float)
     cat_names = list(cm["cat_names"])
     K = len(cat_names)
     labels = cat_names + ["BG"]
@@ -231,6 +239,7 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
     # Auto top-N for large category sets
     top_n = 25 if K > 30 else None
     data = norm_matrix
+    counts = raw_matrix
 
     if top_n is not None and top_n < K:
         cat_block = data[:K, :K]
@@ -241,6 +250,7 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
         top_indices = np.argsort(confusion_mass)[::-1][:top_n]
         keep = sorted(top_indices.tolist()) + [len(labels) - 1]
         data = data[np.ix_(keep, keep)]
+        counts = counts[np.ix_(keep, keep)]
         labels = [labels[i] for i in keep]
 
     n = len(labels)
@@ -248,43 +258,56 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
     # Build customdata: gt_name for each cell (row label)
     customdata = [[labels[i] for _ in range(n)] for i in range(n)]
 
-    # Hover text with counts
+    # Hover text with counts — the rate alone hides whether a cell is one stray
+    # detection or a systematic confusion, so show the raw count behind it.
     hover_text = []
     for i in range(n):
         row = []
         for j in range(n):
-            val = data[i, j]
-            row.append(f"GT: {labels[i]}<br>Pred: {labels[j]}<br>Rate: {val:.3f}")
+            row.append(f"GT: {labels[i]}<br>Pred: {labels[j]}<br>Rate: {data[i, j]:.3f}<br>Count: {counts[i, j]:,.0f}")
         hover_text.append(row)
 
     # Show cell text only for small matrices
     show_text = n <= 20
-    text = [[f"{data[i][j]:.2f}" if data[i][j] > 0.01 else "" for j in range(n)] for i in range(n)] if show_text else None
+    text = (
+        [[f"{data[i][j]:.2f}" if data[i][j] > 0.01 else "" for j in range(n)] for i in range(n)] if show_text else None
+    )
 
-    fig = go.Figure(layout=_dark_layout(
-        title=None,
-        xaxis=dict(title="Predicted", tickangle=45, gridcolor=_BORDER_SUBTLE, tickfont=dict(color=_TEXT_SECONDARY, size=11)),
-        yaxis=dict(title="Ground Truth", autorange="reversed", gridcolor=_BORDER_SUBTLE, tickfont=dict(color=_TEXT_SECONDARY, size=11)),
-        height=max(550, 24 * n + 120),
-        margin=dict(l=120, r=40, t=20, b=100),
-        dragmode=False,
-    ))
+    fig = go.Figure(
+        layout=_dark_layout(
+            title=None,
+            xaxis=dict(
+                title="Predicted", tickangle=45, gridcolor=_BORDER_SUBTLE, tickfont=dict(color=_TEXT_SECONDARY, size=11)
+            ),
+            yaxis=dict(
+                title="Ground Truth",
+                autorange="reversed",
+                gridcolor=_BORDER_SUBTLE,
+                tickfont=dict(color=_TEXT_SECONDARY, size=11),
+            ),
+            height=max(550, 24 * n + 120),
+            margin=dict(l=120, r=40, t=20, b=100),
+            dragmode=False,
+        )
+    )
 
-    fig.add_trace(go.Heatmap(
-        z=data.tolist(),
-        x=labels,
-        y=labels,
-        text=text,
-        texttemplate="%{text}" if show_text else None,
-        textfont=dict(size=max(7, min(11, 200 // n))),
-        customdata=customdata,
-        hovertext=hover_text,
-        hoverinfo="text",
-        colorscale=[[0, _BG_ELEVATED], [0.5, "#6A7A90"], [1, _ACCENT]],
-        colorbar=dict(title="Rate", tickfont=dict(color=_TEXT_SECONDARY)),
-        zmin=0,
-        zmax=1,
-    ))
+    fig.add_trace(
+        go.Heatmap(
+            z=data.tolist(),
+            x=labels,
+            y=labels,
+            text=text,
+            texttemplate="%{text}" if show_text else None,
+            textfont=dict(size=max(7, min(11, 200 // n))),
+            customdata=customdata,
+            hovertext=hover_text,
+            hoverinfo="text",
+            colorscale=[[0, _BG_ELEVATED], [0.5, "#6A7A90"], [1, _ACCENT]],
+            colorbar=dict(title="Rate", tickfont=dict(color=_TEXT_SECONDARY)),
+            zmin=0,
+            zmax=1,
+        )
+    )
 
     click_script = """
     var plotDiv = document.getElementById('{plot_id}');
@@ -300,6 +323,7 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
 
 
 # ── TIDE Errors ──────────────────────────────────────────────────────
+
 
 def chart_tide_errors(coco_eval) -> str:
     """TIDE error breakdown as native HTML bars."""
@@ -329,25 +353,24 @@ def chart_tide_errors(coco_eval) -> str:
             f'<span class="tide-label" title="{desc}">{label}</span>'
             f'<span class="tide-bar-wrap">'
             f'<span class="tide-bar" style="width:{pct:.1f}%"></span>'
-            f'</span>'
+            f"</span>"
             f'<span class="tide-delta">{val:.4f}</span>'
             f'<span class="tide-count">{count:,}</span>'
-            f'</div>'
+            f"</div>"
         )
 
     return (
-        f'<div class="tide-header">'
-        f'<span class="tide-header-label">\u0394AP impact if error type were fixed</span>'
-        f'</div>'
-        + "\n".join(rows)
-        + f'<div class="tide-footer">'
+        '<div class="tide-header">'
+        '<span class="tide-header-label">\u0394AP impact if error type were fixed</span>'
+        "</div>" + "\n".join(rows) + f'<div class="tide-footer">'
         f'<span class="tide-footer-label">Baseline AP @ IoU=0.50</span>'
         f'<span class="tide-footer-value">{ap_base:.3f}</span>'
-        f'</div>'
+        f"</div>"
     )
 
 
 # ── Calibration ──────────────────────────────────────────────────────
+
 
 def chart_calibration(coco_eval) -> str:
     """Reliability diagram with ECE/MCE annotation."""
@@ -371,41 +394,52 @@ def chart_calibration(coco_eval) -> str:
             acc_ne.append(a)
             cnt_ne.append(c)
 
-    fig = go.Figure(layout=_dark_layout(
-        title=None,
-        xaxis=dict(title="Confidence", range=[0, 1], gridcolor=_BORDER_SUBTLE),
-        yaxis=dict(title="Accuracy", range=[0, 1], gridcolor=_BORDER_SUBTLE),
-        height=420,
-    ))
+    fig = go.Figure(
+        layout=_dark_layout(
+            title=None,
+            xaxis=dict(title="Confidence", range=[0, 1], gridcolor=_BORDER_SUBTLE),
+            yaxis=dict(title="Accuracy", range=[0, 1], gridcolor=_BORDER_SUBTLE),
+            height=420,
+        )
+    )
 
     # Perfect calibration diagonal
-    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
-                  line=dict(color=_TEXT_TERTIARY, width=1, dash="dot"))
+    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color=_TEXT_TERTIARY, width=1, dash="dot"))
 
     # Accuracy bars
-    fig.add_trace(go.Bar(
-        x=mid_ne,
-        y=acc_ne,
-        width=bin_width,
-        marker=dict(color=_ACCENT, opacity=0.7),
-        name="Accuracy",
-        customdata=cnt_ne,
-        hovertemplate="Confidence: %{x:.2f}<br>Accuracy: %{y:.3f}<br>Count: %{customdata}<extra></extra>",
-    ))
+    fig.add_trace(
+        go.Bar(
+            x=mid_ne,
+            y=acc_ne,
+            width=bin_width,
+            marker=dict(color=_ACCENT, opacity=0.7),
+            name="Accuracy",
+            customdata=cnt_ne,
+            hovertemplate="Confidence: %{x:.2f}<br>Accuracy: %{y:.3f}<br>Count: %{customdata}<extra></extra>",
+        )
+    )
 
     # ECE/MCE annotation
     fig.add_annotation(
-        x=0.95, y=0.05, xref="paper", yref="paper",
+        x=0.95,
+        y=0.05,
+        xref="paper",
+        yref="paper",
         text=f"ECE = {ece:.4f}<br>MCE = {mce:.4f}",
-        showarrow=False, align="right",
+        showarrow=False,
+        align="right",
         font=dict(size=12, family=_FONT_MONO, color=_TEXT_PRIMARY),
-        bgcolor=_BG_SURFACE, bordercolor=_BORDER_SUBTLE, borderwidth=1, borderpad=6,
+        bgcolor=_BG_SURFACE,
+        bordercolor=_BORDER_SUBTLE,
+        borderwidth=1,
+        borderpad=6,
     )
 
     return _to_html(fig, "calibration")
 
 
 # ── F1 Distribution ──────────────────────────────────────────────────
+
 
 def chart_f1_distribution(coco_eval, iou_thr=0.5) -> str:
     """Histogram of per-image F1 scores, colored by error profile."""
@@ -418,10 +452,10 @@ def chart_f1_distribution(coco_eval, iou_thr=0.5) -> str:
 
     # Desaturated versions of eval status colors for chart readability
     profile_colors = {
-        "perfect": "#2d8a4e",    # muted green
-        "fp_heavy": "#c0392b",   # muted red
-        "fn_heavy": "#2e6da4",   # muted blue
-        "mixed": "#7c6f94",      # muted purple
+        "perfect": "#2d8a4e",  # muted green
+        "fp_heavy": "#c0392b",  # muted red
+        "fn_heavy": "#2e6da4",  # muted blue
+        "mixed": "#7c6f94",  # muted purple
     }
 
     # Group F1 scores by error profile
@@ -430,31 +464,36 @@ def chart_f1_distribution(coco_eval, iou_thr=0.5) -> str:
         profile = s.get("error_profile", "mixed")
         by_profile.setdefault(profile, []).append(s.get("f1", 0.0))
 
-    fig = go.Figure(layout=_dark_layout(
-        title=None,
-        xaxis=dict(title="F1 Score", range=[0, 1.05], gridcolor=_BORDER_SUBTLE),
-        yaxis=dict(title="Image Count", gridcolor=_BORDER_SUBTLE),
-        barmode="stack",
-        height=360,
-        legend=dict(font=dict(size=11)),
-    ))
+    fig = go.Figure(
+        layout=_dark_layout(
+            title=None,
+            xaxis=dict(title="F1 Score", range=[0, 1.05], gridcolor=_BORDER_SUBTLE),
+            yaxis=dict(title="Image Count", gridcolor=_BORDER_SUBTLE),
+            barmode="stack",
+            height=360,
+            legend=dict(font=dict(size=11)),
+        )
+    )
 
     for profile in ["perfect", "fp_heavy", "fn_heavy", "mixed"]:
         scores = by_profile.get(profile, [])
         if not scores:
             continue
-        fig.add_trace(go.Histogram(
-            x=scores,
-            nbinsx=20,
-            name=profile.replace("_", " ").title(),
-            marker=dict(color=profile_colors.get(profile, _TEXT_TERTIARY)),
-            hovertemplate="F1: %{x:.2f}<br>Count: %{y}<extra>%{fullData.name}</extra>",
-        ))
+        fig.add_trace(
+            go.Histogram(
+                x=scores,
+                nbinsx=20,
+                name=profile.replace("_", " ").title(),
+                marker=dict(color=profile_colors.get(profile, _TEXT_TERTIARY)),
+                hovertemplate="F1: %{x:.2f}<br>Count: %{y}<extra>%{fullData.name}</extra>",
+            )
+        )
 
     return _to_html(fig, "f1-dist")
 
 
 # ── Label Errors Table ───────────────────────────────────────────────
+
 
 def label_errors_table(coco_eval, iou_thr=0.5, top_n=20) -> list[dict]:
     """Top suspected label errors for HTML table rendering."""
@@ -464,6 +503,7 @@ def label_errors_table(coco_eval, iou_thr=0.5, top_n=20) -> list[dict]:
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────
+
 
 def build_dashboard(coco_eval, slices=None) -> dict:
     """Compute all dashboard data at once. Returns dict for template rendering."""

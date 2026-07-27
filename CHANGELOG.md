@@ -9,13 +9,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `COCOeval.eval` now includes the `params` and `date` keys, matching pycocotools'
+  dict exactly (`params`, `counts`, `date`, `precision`, `recall`, `scores` in that
+  order). `params` is the `Params` object used for evaluation; `date` uses
+  pycocotools' `'%Y-%m-%d %H:%M:%S'` format. Closes a Tier-1 drop-in gap vs
+  pycocotools. The numeric arrays are unchanged, so all metrics still match.
+- `primitives::sim` now owns every similarity kernel: the `bbox_iou`, `mask_iou`, and
+  `obb_iou` matrix kernels moved here from `mask`/`geometry`, joining `oks_matrix`.
+  A new scalar `bbox_iou_pair` is the single definition of single-pair bbox IoU.
+  `hotcoco::mask::iou`, `hotcoco::mask::bbox_iou`, and `hotcoco::geometry::obb_iou`
+  still resolve — they are now re-exports, so the `pycocotools.mask` drop-in surface
+  is unchanged.
+- `primitives::counts::average_precision` — the mechanical AP core (sort → classify →
+  cumsum → interpolate → mean), now shared by TIDE and per-image diagnostics.
+- `SimKind` gained `From<IouType>`, so detection dispatches on the geometry axis.
+- `coco-eval` gained subcommands: `coco-eval eval …` and `coco-eval completions <shell>`.
+  The bare form (`coco-eval --gt … --dt …`) is unchanged and still supported.
+- Architecture conformance tests (`crates/hotcoco/tests/architecture.rs`) that fail the
+  build if the IoU formula, the parallelism threshold, or greedy matching is duplicated
+  outside `primitives/`.
+- `[tool.pyright]` config for the Python package, scoped to `python/` (excluding the
+  untyped `scripts/` and vendored `external/`) at `basic` strictness with
+  `pythonVersion = "3.9"` to match ruff's `target-version`. It resolves the compiled
+  `hotcoco` extension through `.venv`, so it type-checks call sites against the
+  hand-written `__init__.pyi` — catching the signature drift that
+  `scripts/test_stubs.py` cannot see, since that test checks name coverage only.
+- Python lint is now enforced instead of merely available. The pre-commit hook runs
+  `ruff format --check` and `ruff check` whenever Python files are staged (and fails
+  loudly if `uv` is missing rather than skipping), and CI gained a `python-lint` job.
+  `just py-lint` and `just py-fmt-check` had existed for a while but gated nothing,
+  which is how the tree accumulated 48 ruff errors.
+- `just setup` now installs the `rust-analyzer` rustup component. Because the toolchain
+  is pinned and the component was never installed for the pinned version, editors and
+  LSP clients had no Rust code intelligence in this repo — silently, because
+  `~/.cargo/bin/rust-analyzer` is a rustup proxy: `which` resolved it while every spawn
+  failed with "Unknown binary". It is deliberately *not* listed in `rust-toolchain.toml`,
+  since CI installs that file's components and the setup action's `components:` input
+  only adds and cannot subtract — listing it there would make all five CI jobs download
+  an editor backend they never use. Re-run `just setup` after a channel bump; switching
+  channels drops any component not in the toolchain file.
+
 ### Changed
 
 - Upgraded `pyo3` and `numpy` from 0.28 to 0.29, which clears the RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (missing `Sync` bound on `PyCFunction::new_closure`) security advisories. The corresponding `deny.toml` ignores have been removed. No public Python API changes; the binding sources compiled unchanged against the 0.29 API.
+- The confusion matrix now uses the shared `primitives::greedy::greedy_match` instead of
+  its own greedy loop, so every matcher in the crate shares one tie-breaking rule.
+  Verified byte-identical on val2017 across 160 threshold/max-det/min-score
+  configurations, including at the match boundary.
+- `primitives::greedy` documents the pycocotools threshold-epsilon clamp
+  (`min(t, 1 - 1e-10)`) as **caller-owned**. It is inert below `t = 1.0` and no caller
+  applies it today, so behavior is unchanged; the difference at `t = 1.0` is now
+  written down rather than implicit.
+- The release workflow only triggers on true version tags (`v[0-9]+.[0-9]+.[0-9]+*`),
+  and `cargo publish` failures now fail the release instead of being downgraded to a
+  warning — only an already-published version is tolerated.
+- The Python tree is now clean under `just py-lint` and `just py-fmt-check`, which had
+  drifted to 48 ruff errors across 13 unformatted files because neither the pre-commit
+  hook nor CI runs them. Beyond formatting, this removed five unused imports, three dead
+  local variables, and one unresolvable annotation (`plot/core.py` annotated a return as
+  `"np.ndarray"` while importing numpy only inside the function body — now declared
+  under `TYPE_CHECKING`, so the annotation resolves without making numpy a hard import).
+- The dashboard confusion matrix shows the raw count alongside the normalized rate in
+  its hover, completing what the code already intended — the raw matrix was being read
+  and discarded under a comment reading "Hover text with counts". A rate alone cannot
+  distinguish one stray detection from a systematic confusion.
+- `ruff` is pinned to `>=0.15,<0.16` instead of `>=0.4`. Lint results are now a gate
+  (pre-commit and CI), so an unconstrained ruff could fail a PR that changed no code.
 
 ### Fixed
 
+- `shapely` was never declared as a dependency, so `scripts/fuzz_obb_parity.py` — the
+  OBB IoU fuzz harness the `/parity` skill offers on request — failed at collection with
+  `ModuleNotFoundError` for anyone whose venv did not happen to have it. It is now in the
+  `dev` extra, and all 9 OBB parity tests pass.
+- `import hotcoco` raised `TypeError: unsupported operand type(s) for |` on Python 3.9,
+  the oldest version declared by `requires-python` and served by the single `abi3-py39`
+  wheel. `python/hotcoco/__init__.py` and `python/hotcoco/_style.py` used PEP 604
+  `X | None` unions in annotations that Python evaluates at runtime (function
+  signatures, and an annotated attribute assignment), which requires 3.10. Both files
+  now carry `from __future__ import annotations`, so the annotations are never
+  evaluated. Reproduced and verified fixed on CPython 3.9.6.
+- CI now runs the Python smoke test on a `["3.9", "3.12"]` matrix instead of 3.12 only.
+  The declared support floor had never been exercised, which is why the import failure
+  above shipped.
 - Bumped `crossbeam-epoch` (→0.9.20), `rand` (→0.9.5), and `quick-xml` (→0.41) to clear RUSTSEC-2026-0204, -0097, -0194, and -0195 security advisories.
+- `coco-eval --completions <shell>` works standalone. It previously required `--gt` and
+  `--dt`, which clap validated before the completions branch ran — so the flag could
+  never generate a completion script on its own.
+- `MIN_PARALLEL_WORK`, the threshold at which IoU kernels switch to rayon, was defined
+  twice with different values (1024 in `mask`, 1000 in `geometry`) under a comment
+  claiming they matched. There is now one constant.
+- The internal path-dependency pins in `hotcoco-cli` and `hotcoco-pyo3` had lagged at
+  `0.4.0` since the 0.4.1 release. crates.io resolves these for published builds, so a
+  stale pin publishes against an older API than was tested. They now live in
+  `[workspace.dependencies]` next to `[workspace.package] version`, and the members
+  inherit them — so the mismatch is visible in one file instead of hidden in two.
+- `primitives::assign::lsap` reported an infeasible cost matrix (a row with no finite
+  entry) as a bare index-out-of-bounds panic in release builds, because the check was a
+  `debug_assert!`. It now asserts with a message naming the cause, as scipy does.
+- Six README links pointed at documentation pages that do not exist and returned 404:
+  TIDE errors, confusion matrix, F-scores, and logging metrics are sections of
+  `guide/evaluation/`; format conversion is a section of `guide/datasets/`; the PyTorch
+  integrations page is at `api/integrations/`.
+- The Rust install snippet in `docs/getting-started/installation.md` still suggested
+  `hotcoco = "0.3"`.
+- The Objects365 sentence in `README.md` gave `39×` and `14×` in parentheses two lines
+  after stating that parenthesized speedups are versus pycocotools, though the `14×` is
+  versus faster-coco-eval. Both figures are unchanged; the baselines are now named.
 
 ## [0.4.1] - 2026-07-23
 

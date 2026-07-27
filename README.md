@@ -25,7 +25,7 @@ Benchmarked on COCO val2017 (5,000 images, 36,781 synthetic detections), Apple M
 
 Speedups in parentheses are vs pycocotools. Results verified against pycocotools on COCO val2017 with a 10,000+ case parity test suite — your AP scores won't change.
 
-At scale (Objects365 val — 80k images, 365 categories, 1.2M detections), hotcoco completes in **18s** vs 721s for pycocotools (**39×**) and 251s for faster-coco-eval (**14×**) — while using half the memory. See the [full benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
+At scale (Objects365 val — 80k images, 365 categories, 1.2M detections), hotcoco completes in **18s** vs 721s for pycocotools and 251s for faster-coco-eval — **39×** and **14×** faster respectively — while using half the memory. See the [full benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
 
 ## Get started
 
@@ -60,15 +60,15 @@ ev.run()
 - **Confidence calibration** — ECE/MCE metrics and reliability diagrams measure whether your model's confidence scores are meaningful. See [calibration](https://derekallman.github.io/hotcoco/guide/evaluation/#confidence-calibration).
 - **Model comparison** — `hotcoco.compare(eval_a, eval_b)` with per-metric deltas, per-category AP breakdown, and bootstrap confidence intervals for statistical significance. See [model comparison](https://derekallman.github.io/hotcoco/guide/evaluation/#model-comparison).
 - **Per-image diagnostics & label errors** — per-image F1/AP scores, automatic detection of wrong labels and missing annotations in your ground truth. See [diagnostics](https://derekallman.github.io/hotcoco/guide/evaluation/#per-image-diagnostics-label-error-detection).
-- **TIDE error analysis** — breaks down every FP and FN into six error types so you know *why* your model falls short, not just by how much. See [TIDE errors](https://derekallman.github.io/hotcoco/guide/tide/).
-- **Confusion matrix** — cross-category matching with per-class breakdowns. See [confusion matrix](https://derekallman.github.io/hotcoco/guide/confusion-matrix/).
-- **F-scores** — F-beta averaging over precision/recall curves, analogous to mAP. See [F-scores](https://derekallman.github.io/hotcoco/guide/f-scores/).
+- **TIDE error analysis** — breaks down every FP and FN into six error types so you know *why* your model falls short, not just by how much. See [TIDE errors](https://derekallman.github.io/hotcoco/guide/evaluation/#tide-error-analysis).
+- **Confusion matrix** — cross-category matching with per-class breakdowns. See [confusion matrix](https://derekallman.github.io/hotcoco/guide/evaluation/#confusion-matrix).
+- **F-scores** — F-beta averaging over precision/recall curves, analogous to mAP. See [F-scores](https://derekallman.github.io/hotcoco/guide/evaluation/#f-scores).
 - **Plotting** — publication-quality PR curves, per-category AP, confusion matrices, and TIDE error breakdowns. Four built-in themes (`cold-brew`, `warm-slate`, `scientific-blue`, `ember`) with `paper_mode` for LaTeX/PowerPoint embedding. `report()` generates a single-page PDF summary. `pip install hotcoco[plot]`. See [plotting](https://derekallman.github.io/hotcoco/guide/plotting/).
 - **Sliced evaluation** — re-accumulate metrics for named image subsets (indoor/outdoor, day/night) without recomputing IoU. See [sliced evaluation](https://derekallman.github.io/hotcoco/guide/evaluation/#sliced-evaluation).
 - **Dataset healthcheck** — 4-layer validation (structural, quality, distribution, GT/DT compatibility) catches duplicate IDs, degenerate bboxes, category imbalance, and more. See [healthcheck](https://derekallman.github.io/hotcoco/guide/datasets/#healthcheck).
-- **Format conversion** — COCO ↔ YOLO, COCO ↔ Pascal VOC, and COCO ↔ CVAT from Python or the CLI; COCO ↔ DOTA from Python. See [format conversion](https://derekallman.github.io/hotcoco/guide/conversion/).
-- **PyTorch integrations** — `CocoDetection` and `CocoEvaluator` drop-in replacements for torchvision's detection classes; no torchvision or pycocotools dependency required. See [PyTorch integration](https://derekallman.github.io/hotcoco/integrations/).
-- **Experiment tracker integration** — `get_results(prefix="val/bbox", per_class=True)` returns a flat dict ready for W&B, MLflow, or any logger. See [logging metrics](https://derekallman.github.io/hotcoco/guide/logging/).
+- **Format conversion** — COCO ↔ YOLO, COCO ↔ Pascal VOC, and COCO ↔ CVAT from Python or the CLI; COCO ↔ DOTA from Python. See [format conversion](https://derekallman.github.io/hotcoco/guide/datasets/#convert).
+- **PyTorch integrations** — `CocoDetection` and `CocoEvaluator` drop-in replacements for torchvision's detection classes; no torchvision or pycocotools dependency required. See [PyTorch integration](https://derekallman.github.io/hotcoco/api/integrations/).
+- **Experiment tracker integration** — `get_results(prefix="val/bbox", per_class=True)` returns a flat dict ready for W&B, MLflow, or any logger. See [logging metrics](https://derekallman.github.io/hotcoco/guide/evaluation/#logging-metrics).
 - **Dataset browser** — `coco.browse()` / `coco explore` opens a local browser with category filter, annotation overlays (bbox/segm/keypoints), hover-to-highlight, zoom/pan, and detection comparison. Pass `eval=` to enable an interactive eval dashboard with PR curves, confusion matrix, TIDE errors, calibration, and per-image F1. `pip install hotcoco[browse]`. See [Dataset Browser](https://derekallman.github.io/hotcoco/guide/browse/).
 - **Python CLI** (`coco`) — included with `pip install hotcoco`; `eval`, `healthcheck`, `stats`, `filter`, `merge`, `split`, `sample`, `convert`, `compare`, and `explore` subcommands. See [CLI reference](https://derekallman.github.io/hotcoco/cli/).
 - **Rust CLI** (`coco-eval`) — lightweight eval-only binary; `cargo install hotcoco-cli`. See [CLI reference](https://derekallman.github.io/hotcoco/cli/).

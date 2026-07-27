@@ -12,8 +12,6 @@ Usage:
 
 import json
 import math
-import os
-import sys
 import tempfile
 from pathlib import Path
 
@@ -87,7 +85,6 @@ def hotcoco_eval_obb(obb_gt, obb_dt, score=1.0):
 
     # Use large OBBs to ensure they're in the "large" area range (>9216 px²)
     gt_area = obb_gt[2] * obb_gt[3]
-    dt_area = obb_dt[2] * obb_dt[3]
 
     gt_data = {
         "images": [{"id": 1, "width": 4096, "height": 4096, "file_name": "test.png"}],
@@ -105,14 +102,7 @@ def hotcoco_eval_obb(obb_gt, obb_dt, score=1.0):
         "categories": [{"id": 1, "name": "obj"}],
     }
 
-    dt_data = [
-        {
-            "image_id": 1,
-            "category_id": 1,
-            "obb": list(obb_dt),
-            "score": score,
-        }
-    ]
+    dt_data = [{"image_id": 1, "category_id": 1, "obb": list(obb_dt), "score": score}]
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(gt_data, f)
@@ -147,9 +137,7 @@ def obb_strategy(draw, min_size=10.0, max_size=500.0):
     cy = draw(st.floats(min_value=-500, max_value=500, allow_nan=False, allow_infinity=False))
     w = draw(st.floats(min_value=min_size, max_value=max_size, allow_nan=False, allow_infinity=False))
     h = draw(st.floats(min_value=min_size, max_value=max_size, allow_nan=False, allow_infinity=False))
-    angle = draw(
-        st.floats(min_value=-math.pi, max_value=math.pi, allow_nan=False, allow_infinity=False)
-    )
+    angle = draw(st.floats(min_value=-math.pi, max_value=math.pi, allow_nan=False, allow_infinity=False))
     return (cx, cy, w, h, angle)
 
 
@@ -159,11 +147,7 @@ def obb_strategy(draw, min_size=10.0, max_size=500.0):
 
 
 @given(obb_a=obb_strategy(), obb_b=obb_strategy())
-@settings(
-    max_examples=200,
-    deadline=30000,
-    suppress_health_check=[HealthCheck.too_slow],
-)
+@settings(max_examples=200, deadline=30000, suppress_health_check=[HealthCheck.too_slow])
 def test_obb_eval_consistency_with_shapely(obb_a, obb_b):
     """Verify hotcoco OBB eval behavior is consistent with Shapely IoU.
 
@@ -184,13 +168,11 @@ def test_obb_eval_consistency_with_shapely(obb_a, obb_b):
 
     if iou >= 0.52:
         assert ap50 == 1.0, (
-            f"Shapely IoU = {iou:.6f} >= 0.52, but hotcoco AP@50 = {ap50:.4f}. "
-            f"OBBs: GT={obb_a}, DT={obb_b}"
+            f"Shapely IoU = {iou:.6f} >= 0.52, but hotcoco AP@50 = {ap50:.4f}. OBBs: GT={obb_a}, DT={obb_b}"
         )
     elif iou < 0.48:
         assert ap50 <= 0.0, (
-            f"Shapely IoU = {iou:.6f} < 0.48, but hotcoco AP@50 = {ap50:.4f}. "
-            f"OBBs: GT={obb_a}, DT={obb_b}"
+            f"Shapely IoU = {iou:.6f} < 0.48, but hotcoco AP@50 = {ap50:.4f}. OBBs: GT={obb_a}, DT={obb_b}"
         )
 
 
@@ -213,9 +195,7 @@ def test_obb_eval_consistency_with_shapely(obb_a, obb_b):
 def test_obb_iou_known_values(obb_a, obb_b, expected_iou):
     """Known geometric cases: Shapely must agree with expected values."""
     shapely_iou = shapely_obb_iou(obb_a, obb_b)
-    assert abs(shapely_iou - expected_iou) < 1e-6, (
-        f"Shapely IoU {shapely_iou:.8f} != expected {expected_iou:.8f}"
-    )
+    assert abs(shapely_iou - expected_iou) < 1e-6, f"Shapely IoU {shapely_iou:.8f} != expected {expected_iou:.8f}"
 
 
 @pytest.mark.parametrize(

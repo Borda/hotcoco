@@ -1497,7 +1497,7 @@ Examples
 
     #[getter(eval)]
     fn get_eval(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        accumulated_eval_to_py(py, self.inner.accumulated())
+        accumulated_eval_to_py(py, self.inner.accumulated(), &self.inner.params)
     }
 
     #[doc = "Compute a per-category confusion matrix across all images.
@@ -1960,13 +1960,40 @@ fn eval_img_to_py(py: Python<'_>, e: &hotcoco_core::EvalImg) -> PyResult<Py<PyAn
 fn accumulated_eval_to_py(
     py: Python<'_>,
     eval: Option<&hotcoco_core::AccumulatedEval>,
+    params: &hotcoco_core::Params,
 ) -> PyResult<Py<PyAny>> {
     match eval {
         None => Ok(py.None()),
         Some(e) => {
             let dict = PyDict::new(py);
+
+            // Key order mirrors pycocotools' COCOeval.eval dict for drop-in fidelity:
+            // params, counts, date, precision, recall, scores.
+
+            // `params`: the Params object actually used, matching pycocotools which
+            // stores `self.params` here (not a serialized copy).
+            let py_params = Py::new(
+                py,
+                PyParams {
+                    inner: params.clone(),
+                },
+            )?;
+            dict.set_item("params", py_params)?;
+
             let counts = vec![e.shape.t, e.shape.r, e.shape.k, e.shape.a, e.shape.m];
             dict.set_item("counts", counts)?;
+
+            // `date`: byte-for-byte the pycocotools format
+            // (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')). Non-deterministic
+            // by construction, so the golden-fixture harness excludes it from comparison.
+            let now = py
+                .import("datetime")?
+                .getattr("datetime")?
+                .call_method0("now")?;
+            let date_str: String = now
+                .call_method1("strftime", ("%Y-%m-%d %H:%M:%S",))?
+                .extract()?;
+            dict.set_item("date", date_str)?;
 
             // precision: flat Vec<f64> → numpy array, then reshape to (T, R, K, A, M)
             let precision = PyArray1::from_vec(py, e.precision.clone());

@@ -105,57 +105,38 @@ pub struct ImageDiagnostics {
     pub iou_thr: f64,
 }
 
-/// Bbox IoU between two `[x, y, w, h]` boxes.
-fn bbox_iou(a: [f64; 4], b: [f64; 4]) -> f64 {
-    let x_overlap = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
-    let y_overlap = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
-    if x_overlap <= 0.0 || y_overlap <= 0.0 {
-        return 0.0;
-    }
-    let intersection = x_overlap * y_overlap;
-    let union = a[2] * a[3] + b[2] * b[3] - intersection;
-    if union <= 0.0 {
-        0.0
-    } else {
-        intersection / union
-    }
+/// Bbox IoU between two `[x, y, w, h]` boxes — the shared scalar kernel.
+///
+/// Diagnostics compares detections against plain (non-crowd) ground truth, so
+/// the crowd flag is pinned off here rather than repeated at each call site.
+/// Named distinctly from [`crate::primitives::sim::bbox_iou`], which is the D×G
+/// matrix kernel.
+fn bbox_iou_plain(a: [f64; 4], b: [f64; 4]) -> f64 {
+    crate::primitives::sim::bbox_iou_pair(a, b, false)
 }
 
 /// Compute AP from detections for a single image given the GT count.
 ///
 /// Reuses the standard COCO 101-point interpolation with monotone precision correction
-/// via [`super::accumulate::precision_recall_curve`].
+/// via [`crate::primitives::counts::average_precision`].
 ///
 /// `detections` is `(score, is_tp)` sorted by score descending.
 /// `n_gt` is the total number of non-ignored GT annotations for this image.
+///
+/// An image with no ground truth scores `1.0` when nothing was predicted: this is
+/// a per-image *quality* score, where a correctly-empty image is perfect. (TIDE's
+/// corpus AP deliberately uses the opposite convention for `n_gt == 0` — see the
+/// [`counts`](crate::primitives::counts) module note.)
 fn compute_image_ap(detections: &[(f64, bool)], n_gt: u32) -> f64 {
     if n_gt == 0 {
         return if detections.is_empty() { 1.0 } else { 0.0 };
     }
 
-    // Build cumulative TP/FP arrays
-    let n = detections.len();
-    let mut tp_cum = Vec::with_capacity(n);
-    let mut fp_cum = Vec::with_capacity(n);
-    let mut tp = 0.0f64;
-    let mut fp = 0.0f64;
-    for &(_score, is_tp) in detections {
-        if is_tp {
-            tp += 1.0;
-        } else {
-            fp += 1.0;
-        }
-        tp_cum.push(tp);
-        fp_cum.push(fp);
-    }
-
+    let scores: Vec<f64> = detections.iter().map(|&(score, _)| score).collect();
+    let matched: Vec<bool> = detections.iter().map(|&(_, is_tp)| is_tp).collect();
     let rec_thrs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
-    let (_final_recall, points) =
-        super::accumulate::precision_recall_curve(&tp_cum, &fp_cum, n_gt as usize, &rec_thrs);
 
-    // AP = mean precision at the 101 recall thresholds (unreached thresholds contribute 0)
-    let sum: f64 = points.iter().map(|&(_, prec, _)| prec).sum();
-    sum / rec_thrs.len() as f64
+    crate::primitives::counts::average_precision(&scores, &matched, None, n_gt as usize, &rec_thrs)
 }
 
 impl COCOeval {
@@ -390,7 +371,7 @@ impl COCOeval {
                         if fg.cat_id == dt_cat {
                             continue; // same category — not a label error
                         }
-                        let iou = bbox_iou(dt_bbox, fg.bbox);
+                        let iou = bbox_iou_plain(dt_bbox, fg.bbox);
                         if iou > best_fn_iou {
                             best_fn_iou = iou;
                             best_fn_gt = Some((fg.gt_id, fg.cat_id));
@@ -417,7 +398,7 @@ impl COCOeval {
                 // Check for missing_annotation: no nearby GT at all
                 let max_iou_any_gt = all_gts.map_or(0.0, |gts| {
                     gts.iter()
-                        .map(|&gt_bbox| bbox_iou(dt_bbox, gt_bbox))
+                        .map(|&gt_bbox| bbox_iou_plain(dt_bbox, gt_bbox))
                         .fold(0.0f64, f64::max)
                 });
 
@@ -661,13 +642,13 @@ mod tests {
     #[test]
     fn test_bbox_iou_exact_overlap() {
         let a = [10.0, 10.0, 20.0, 20.0];
-        assert!((bbox_iou(a, a) - 1.0).abs() < 1e-9);
+        assert!((bbox_iou_plain(a, a) - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_bbox_iou_no_overlap() {
         let a = [0.0, 0.0, 10.0, 10.0];
         let b = [50.0, 50.0, 10.0, 10.0];
-        assert_eq!(bbox_iou(a, b), 0.0);
+        assert_eq!(bbox_iou_plain(a, b), 0.0);
     }
 }

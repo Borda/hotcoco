@@ -7,6 +7,8 @@ Two independent gates control output behavior:
 All styled status output goes to stderr, keeping stdout clean for --json and piping.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import threading

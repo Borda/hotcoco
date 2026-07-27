@@ -1,7 +1,6 @@
 use crate::coco::COCO;
-use crate::geometry;
-use crate::mask;
-use crate::params::{IouType, Params};
+use crate::params::Params;
+use crate::primitives::sim::{self, SimKind};
 use crate::types::Rle;
 
 use super::{COCOeval, EvalMode};
@@ -23,17 +22,19 @@ impl COCOeval {
             return Vec::new();
         }
 
-        match params.iou_type {
-            IouType::Segm => {
+        // Dispatch on the geometry axis, not the eval-config one: `SimKind` is
+        // what selects a kernel, and every family (detection here, tracking and
+        // panoptic later) branches on the same four values. The helpers below do
+        // marshaling only — reshaping annotations into the kernel's input types.
+        match SimKind::from(params.iou_type) {
+            SimKind::Mask => {
                 Self::compute_segm_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
-            IouType::Bbox => {
+            SimKind::Bbox => {
                 Self::compute_bbox_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
-            IouType::Keypoints => {
-                Self::compute_oks_static(coco_gt, coco_dt, params, dt_anns, gt_anns)
-            }
-            IouType::Obb => {
+            SimKind::Oks => Self::compute_oks_static(coco_gt, coco_dt, params, dt_anns, gt_anns),
+            SimKind::Obb => {
                 Self::compute_obb_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
         }
@@ -53,7 +54,7 @@ impl COCOeval {
         }
     }
 
-    /// Compute segmentation mask IoU by converting annotations to RLE and calling `mask::iou`.
+    /// Compute segmentation mask IoU by converting annotations to RLE and calling `sim::mask_iou`.
     pub(super) fn compute_segm_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -82,10 +83,10 @@ impl COCOeval {
             })
             .unzip();
 
-        mask::iou(&dt_rles, &gt_rles, &iscrowd)
+        sim::mask_iou(&dt_rles, &gt_rles, &iscrowd)
     }
 
-    /// Compute bounding box IoU by extracting bbox arrays and calling `mask::bbox_iou`.
+    /// Compute bounding box IoU by extracting bbox arrays and calling `sim::bbox_iou`.
     pub(super) fn compute_bbox_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -111,7 +112,7 @@ impl COCOeval {
             })
             .unzip();
 
-        mask::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
+        sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
     }
 
     /// Compute OKS (Object Keypoint Similarity) between detection and GT keypoints.
@@ -127,15 +128,11 @@ impl COCOeval {
         dt_ids: &[u64],
         gt_ids: &[u64],
     ) -> Vec<Vec<f64>> {
-        let sigmas = &params.kpt_oks_sigmas;
-        let num_kpts = sigmas.len();
-        // vars = (sigmas * 2)**2 = 4 * sigma^2  (matching pycocotools)
-        let vars: Vec<f64> = sigmas.iter().map(|s| (2.0 * s).powi(2)).collect();
-
-        let d = dt_ids.len();
-        let g = gt_ids.len();
-        let mut result = vec![vec![0.0f64; g]; d];
-
+        // The OKS math lives in the shared `primitives::sim::oks_matrix` kernel
+        // (COCO-decoupled, matrix-shaped). Here we only marshal the annotations
+        // into the kernel's flat-slice form. A missing `keypoints` field maps to
+        // an empty slice, which the kernel skips — matching the previous
+        // `None => continue` behavior that left that row/column zero.
         let gt_anns: Vec<_> = gt_ids
             .iter()
             .filter_map(|&id| coco_gt.get_ann(id))
@@ -145,72 +142,23 @@ impl COCOeval {
             .filter_map(|&id| coco_dt.get_ann(id))
             .collect();
 
-        for (j, gt_ann) in gt_anns.iter().enumerate() {
-            let gt_kpts = match &gt_ann.keypoints {
-                Some(k) => k,
-                None => continue,
-            };
-            let gt_area = gt_ann.area.unwrap_or(0.0) + f64::EPSILON;
-            let gt_bbox = gt_ann.bbox.unwrap_or([0.0; 4]);
+        let gt: Vec<crate::primitives::sim::GtPose<'_>> = gt_anns
+            .iter()
+            .map(|a| crate::primitives::sim::GtPose {
+                keypoints: a.keypoints.as_deref().unwrap_or(&[]),
+                area: a.area.unwrap_or(0.0),
+                bbox: a.bbox.unwrap_or([0.0; 4]),
+            })
+            .collect();
+        let dt_keypoints: Vec<&[f64]> = dt_anns
+            .iter()
+            .map(|a| a.keypoints.as_deref().unwrap_or(&[]))
+            .collect();
 
-            // Count visible GT keypoints
-            let k1: usize = (0..num_kpts)
-                .filter(|&ki| gt_kpts.get(ki * 3 + 2).copied().unwrap_or(0.0) > 0.0)
-                .count();
-
-            // Compute ignore region bounds (double the GT bbox)
-            let x0 = gt_bbox[0] - gt_bbox[2];
-            let x1 = gt_bbox[0] + gt_bbox[2] * 2.0;
-            let y0 = gt_bbox[1] - gt_bbox[3];
-            let y1 = gt_bbox[1] + gt_bbox[3] * 2.0;
-
-            for (i, dt_ann) in dt_anns.iter().enumerate() {
-                let dt_kpts = match &dt_ann.keypoints {
-                    Some(k) => k,
-                    None => continue,
-                };
-
-                // Compute OKS in a single pass — sum exp(-e) over visible keypoints
-                // (or all keypoints when k1 == 0) without intermediate allocations.
-                let mut oks_sum = 0.0_f64;
-                let mut oks_count = 0_usize;
-
-                for (ki, &var_k) in vars.iter().enumerate().take(num_kpts) {
-                    // When k1 > 0, only include visible GT keypoints
-                    let visible = gt_kpts.get(ki * 3 + 2).copied().unwrap_or(0.0) > 0.0;
-                    if k1 > 0 && !visible {
-                        continue;
-                    }
-
-                    let gx = gt_kpts.get(ki * 3).copied().unwrap_or(0.0);
-                    let gy = gt_kpts.get(ki * 3 + 1).copied().unwrap_or(0.0);
-                    let xd = dt_kpts.get(ki * 3).copied().unwrap_or(0.0);
-                    let yd = dt_kpts.get(ki * 3 + 1).copied().unwrap_or(0.0);
-
-                    let (dx, dy) = if k1 > 0 {
-                        (xd - gx, yd - gy)
-                    } else {
-                        // No visible GT keypoints: measure distance to bbox boundary
-                        let dx = 0.0_f64.max(x0 - xd) + 0.0_f64.max(xd - x1);
-                        let dy = 0.0_f64.max(y0 - yd) + 0.0_f64.max(yd - y1);
-                        (dx, dy)
-                    };
-
-                    let e = (dx * dx + dy * dy) / var_k / gt_area / 2.0;
-                    oks_sum += (-e).exp();
-                    oks_count += 1;
-                }
-
-                if oks_count > 0 {
-                    result[i][j] = oks_sum / oks_count as f64;
-                }
-            }
-        }
-
-        result
+        crate::primitives::sim::oks_matrix(&dt_keypoints, &gt, &params.kpt_oks_sigmas)
     }
 
-    /// Compute oriented bounding box IoU by extracting OBB arrays and calling `geometry::obb_iou`.
+    /// Compute oriented bounding box IoU by extracting OBB arrays and calling `sim::obb_iou`.
     pub(super) fn compute_obb_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -235,6 +183,6 @@ impl COCOeval {
             })
             .unzip();
 
-        geometry::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
+        sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
     }
 }

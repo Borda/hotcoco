@@ -8,8 +8,13 @@ use super::types::{EvalImg, TideErrors};
 impl COCOeval {
     /// Compute average precision from per-detection matched/ignored flags.
     ///
-    /// Uses the same 101-point interpolation as [`accumulate`](COCOeval::accumulate).
-    /// Returns `0.0` when `num_gt == 0` or there are no detections.
+    /// Uses the same 101-point interpolation as [`accumulate`](COCOeval::accumulate),
+    /// via [`crate::primitives::counts::average_precision`].
+    ///
+    /// Returns `0.0` when `num_gt == 0`: TIDE's ΔAP compares corpus-level APs, so
+    /// a category with no ground truth contributes a vacuous `0.0`. (Per-image
+    /// diagnostics deliberately uses the opposite convention — see the
+    /// [`counts`](crate::primitives::counts) module note.)
     pub(super) fn compute_ap_from_matched(
         scores: &[f64],
         matched: &[bool],
@@ -17,40 +22,13 @@ impl COCOeval {
         num_gt: usize,
         rec_thrs: &[f64],
     ) -> f64 {
-        if num_gt == 0 {
-            return 0.0;
-        }
-        let nd = scores.len();
-        if nd == 0 {
-            return 0.0;
-        }
-
-        let mut inds: Vec<usize> = (0..nd).collect();
-        inds.sort_by(|&a, &b| {
-            scores[b]
-                .partial_cmp(&scores[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut tp = vec![0.0f64; nd];
-        let mut fp = vec![0.0f64; nd];
-        for (out_idx, &src_idx) in inds.iter().enumerate() {
-            if !ignored[src_idx] {
-                if matched[src_idx] {
-                    tp[out_idx] = 1.0;
-                } else {
-                    fp[out_idx] = 1.0;
-                }
-            }
-        }
-
-        for d in 1..nd {
-            tp[d] += tp[d - 1];
-            fp[d] += fp[d - 1];
-        }
-
-        let (_, curve) = super::accumulate::precision_recall_curve(&tp, &fp, num_gt, rec_thrs);
-        curve.iter().map(|(_, pr, _)| pr).sum::<f64>() / rec_thrs.len() as f64
+        crate::primitives::counts::average_precision(
+            scores,
+            matched,
+            Some(ignored),
+            num_gt,
+            rec_thrs,
+        )
     }
 
     /// Decompose detection errors into TIDE error types.

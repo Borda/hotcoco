@@ -38,7 +38,13 @@ dev = [
     "lvis>=0.5.3",
     "psutil",
     "pytest",
-    "ruff>=0.4",
+    # Narrow range so local, pre-commit, and CI agree on lint results. A ruff
+    # minor bump can add or change rules, which would otherwise turn a green PR
+    # red without a code change. Bump this and the pin in ci.yml together.
+    "ruff>=0.15,<0.16",
+    # Reference implementation for the OBB IoU fuzz harness
+    # (scripts/fuzz_obb_parity.py), which could not run without it.
+    "shapely>=2.0",
 ]
 torch = [
     "torch>=1.9",
@@ -87,6 +93,20 @@ split-on-trailing-comma = false
 [tool.ruff.format]
 quote-style = "double"
 skip-magic-trailing-comma = true
+
+[tool.pyright]
+# Scoped to the shipped package only. `scripts/` is untyped research/bench code
+# and `external/` is vendored — checking either produces noise, not signal.
+include = ["python"]
+exclude = ["external", "scripts", ".venv", "target", "**/__pycache__"]
+pythonVersion = "3.9"
+typeCheckingMode = "basic"
+# `hotcoco` is a compiled PyO3 extension; pyright resolves it through the venv
+# that `just build` installs into, and types it from the hand-written
+# python/hotcoco/__init__.pyi stub. This is what catches stub/API signature
+# drift that scripts/test_stubs.py can't see.
+venvPath = "."
+venv = ".venv"
 
 [tool.uv]
 package = false

@@ -9,8 +9,16 @@ from .core import _import_mpl, _resolve_font_family
 _THEMES: dict[str, dict] = {
     "cold-brew": {
         "series": [
-            "#5E81AC", "#C47A52", "#5A9E78", "#D4A03E", "#9673A6",
-            "#3D9B96", "#C46070", "#7B8C42", "#6E6EAA", "#B5694A",
+            "#5E81AC",
+            "#C47A52",
+            "#5A9E78",
+            "#D4A03E",
+            "#9673A6",
+            "#3D9B96",
+            "#C46070",
+            "#7B8C42",
+            "#6E6EAA",
+            "#B5694A",
         ],
         "chrome": {"text": "#28231F", "label": "#4A3F38", "tick": "#7A6E64", "grid": "#E8E2DA", "spine": "#D4CCC2"},
         "background": "#FAF7F4",

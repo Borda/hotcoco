@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anstream::stderr;
 use anstyle::{AnsiColor, Color, Style};
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use hotcoco::params::IouType;
 use hotcoco::{COCO, COCOeval};
@@ -37,18 +37,49 @@ fn spinner(message: &str) -> ProgressBar {
 }
 
 #[derive(Parser)]
-#[command(name = "coco-eval")]
+#[command(name = "coco-eval", version)]
 #[command(
     about = "COCO evaluation tool — compute AP/AR metrics for object detection, segmentation, and keypoints"
 )]
+// `subcommand_negates_reqs` is what lets the eval args be *required* while still
+// allowing `coco-eval completions <shell>` to parse with no dataset: naming a
+// subcommand drops the top-level requirements. Without it the requiredness has to
+// be re-implemented by hand, which loses the `required` markers in `--help` and
+// the per-scope usage line in errors.
+#[command(subcommand_negates_reqs = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    // Detection-eval arguments, also accepted bare (without the `eval`
+    // subcommand). Deliberately not a doc comment: clap promotes a flattened
+    // struct's doc comment into the top-level `about`, replacing the binary's own
+    // description.
+    #[command(flatten)]
+    eval: EvalArgs,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Evaluate detections against ground truth (the default action)
+    Eval(EvalArgs),
+
+    /// Print a shell completion script
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+}
+
+#[derive(clap::Args)]
+struct EvalArgs {
     /// Path to ground truth annotations JSON file
-    #[arg(long)]
-    gt: PathBuf,
+    #[arg(long, required_unless_present = "completions")]
+    gt: Option<PathBuf>,
 
     /// Path to detection results JSON file
-    #[arg(long)]
-    dt: PathBuf,
+    #[arg(long, required_unless_present = "completions")]
+    dt: Option<PathBuf>,
 
     /// IoU type: bbox, segm, or keypoints
     #[arg(long, default_value = "bbox")]
@@ -70,30 +101,57 @@ struct Cli {
     #[arg(long, short)]
     output: Option<PathBuf>,
 
-    /// Print shell completion script and exit
+    /// Print shell completion script and exit (superseded by `coco-eval completions`).
+    ///
+    /// Lives here, not on `Cli`, so the id resolves for `required_unless_present`
+    /// in both the bare and `eval` scopes.
     #[arg(long, value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
+}
+
+/// Write a completion script for `shell` to stdout.
+fn print_completions(shell: Shell) {
+    generate(
+        shell,
+        &mut Cli::command(),
+        "coco-eval",
+        &mut std::io::stdout(),
+    );
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    if let Some(shell) = cli.completions {
-        generate(
-            shell,
-            &mut Cli::command(),
-            "coco-eval",
-            &mut std::io::stdout(),
-        );
+    match cli.command {
+        Some(Command::Completions { shell }) => {
+            print_completions(shell);
+            Ok(())
+        }
+        Some(Command::Eval(args)) => run_eval(args),
+        // No subcommand: the historic bare form.
+        None => run_eval(cli.eval),
+    }
+}
+
+fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // The pre-subcommand spelling of `coco-eval completions <shell>`.
+    if let Some(shell) = args.completions {
+        print_completions(shell);
         return Ok(());
     }
 
-    let gt_name = cli.gt.file_name().unwrap_or_default().to_string_lossy();
-    let dt_name = cli.dt.file_name().unwrap_or_default().to_string_lossy();
+    // clap guarantees these are present unless `--completions` was passed, which
+    // returned above.
+    let (Some(gt_path), Some(dt_path)) = (args.gt.as_ref(), args.dt.as_ref()) else {
+        unreachable!("clap enforces --gt/--dt via required_unless_present")
+    };
+
+    let gt_name = gt_path.file_name().unwrap_or_default().to_string_lossy();
+    let dt_name = dt_path.file_name().unwrap_or_default().to_string_lossy();
 
     let pb = spinner(&format!("Loading ground truth {gt_name}..."));
     let start = Instant::now();
-    let coco_gt = COCO::new(&cli.gt)?;
+    let coco_gt = COCO::new(gt_path)?;
     pb.finish_and_clear();
     status(
         "Loaded",
@@ -103,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pb = spinner(&format!("Loading detections {dt_name}..."));
     let start = Instant::now();
-    let coco_dt = coco_gt.load_res(&cli.dt)?;
+    let coco_dt = coco_gt.load_res(dt_path)?;
     pb.finish_and_clear();
     status(
         "Loaded",
@@ -111,24 +169,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         start.elapsed(),
     );
 
-    let mut coco_eval = COCOeval::new(coco_gt, coco_dt, cli.iou_type);
+    let mut coco_eval = COCOeval::new(coco_gt, coco_dt, args.iou_type);
 
-    if let Some(img_ids) = cli.img_ids {
+    if let Some(img_ids) = args.img_ids {
         coco_eval.params.img_ids = img_ids;
     }
-    if let Some(cat_ids) = cli.cat_ids {
+    if let Some(cat_ids) = args.cat_ids {
         coco_eval.params.cat_ids = cat_ids;
     }
-    if cli.no_cats {
+    if args.no_cats {
         coco_eval.params.use_cats = false;
     }
 
-    let pb = spinner(&format!("Evaluating {}...", cli.iou_type));
+    let pb = spinner(&format!("Evaluating {}...", args.iou_type));
     let start = Instant::now();
     coco_eval.evaluate();
     coco_eval.accumulate();
     pb.finish_and_clear();
-    status("Evaluated", &format!("{}", cli.iou_type), start.elapsed());
+    status("Evaluated", &format!("{}", args.iou_type), start.elapsed());
 
     let _ = writeln!(stderr());
     for line in coco_eval.summarize_lines() {
@@ -141,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("stats: [{}]", stats_strs.join(", "));
     }
 
-    if let Some(ref output_path) = cli.output {
+    if let Some(ref output_path) = args.output {
         let start = Instant::now();
         let results = coco_eval
             .results(true)
