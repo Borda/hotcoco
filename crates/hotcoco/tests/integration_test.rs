@@ -3570,7 +3570,7 @@ fn test_gt_expansion_basic() {
     pm.insert(1, 2); // Dog -> Animal
     let hierarchy = Hierarchy::from_parent_map(pm);
 
-    let expanded = hotcoco::eval::expand::expand_gt(&coco, &hierarchy);
+    let expanded = hotcoco::detection::expand::expand_gt(&coco, &hierarchy);
 
     // Should have 2 annotations: original Dog + expanded Animal
     assert_eq!(
@@ -3669,7 +3669,7 @@ fn test_gt_expansion_idempotent() {
     pm.insert(1, 2); // Dog -> Animal
     let hierarchy = Hierarchy::from_parent_map(pm);
 
-    let expanded = hotcoco::eval::expand::expand_gt(&coco, &hierarchy);
+    let expanded = hotcoco::detection::expand::expand_gt(&coco, &hierarchy);
 
     // Should still have exactly 2 annotations — no duplicates
     assert_eq!(
@@ -5029,4 +5029,52 @@ fn test_match_floor_is_inert_below_one() {
         assert_eq!(coco_match_floor(t), t, "clamp must not fire at t={t}");
     }
     assert_eq!(coco_match_floor(1.0), 1.0 - 1e-10);
+}
+
+// ---------------------------------------------------------------------------
+// Tier-2 compatibility: the pre-1.0 `eval` module path
+// ---------------------------------------------------------------------------
+
+/// `hotcoco::eval::*` must keep resolving for the whole 1.x series.
+///
+/// The module is now `hotcoco::detection`; `eval` is a deprecated alias, removal
+/// slated for 2.0. Downstream Rust code written against 0.x must still compile,
+/// so this test exercises the alias deliberately — the `allow(deprecated)` is the
+/// point of the test, not an oversight.
+///
+/// It is a *compile-time* check above all: if the alias or any re-export stops
+/// resolving, this file stops building. `cargo-semver-checks` (`just semver`)
+/// covers the same ground mechanically against the published release; this
+/// catches it without needing the network.
+#[test]
+#[allow(deprecated)]
+fn tier2_eval_module_path_still_resolves() {
+    // Submodules reachable through the alias.
+    let gt_path = fixtures_dir().join("gt.json");
+    let coco = COCO::new(&gt_path).expect("Failed to load GT");
+    let hierarchy = Hierarchy::from_categories(&coco.dataset.categories);
+    let _expanded = hotcoco::eval::expand::expand_gt(&coco, &hierarchy);
+
+    // Types re-exported through the alias, including every one that used to live
+    // in the dissolved `eval/types.rs`. Naming the type is the assertion — these
+    // bindings exist to fail compilation if a path stops resolving.
+    let _: Option<hotcoco::eval::EvalImg> = None;
+    let _: Option<hotcoco::eval::AccumulatedEval> = None;
+    let _: Option<hotcoco::eval::EvalShape> = None;
+    let _: Option<hotcoco::eval::ConfusionMatrix> = None;
+    let _: Option<hotcoco::eval::TideErrors> = None;
+    let _: Option<hotcoco::eval::EvalMode> = None;
+    let _: Option<hotcoco::eval::EvalResults> = None;
+    let _: Option<hotcoco::eval::COCOeval> = None;
+    let _: Option<hotcoco::eval::SliceResult> = None;
+    let _: Option<hotcoco::eval::ComparisonResult> = None;
+
+    // And the crate-root paths, which are what most consumers actually use.
+    let _: Option<hotcoco::EvalImg> = None;
+    let _: Option<hotcoco::AccumulatedEval> = None;
+    let _: Option<hotcoco::EvalShape> = None;
+    let _: Option<hotcoco::ConfusionMatrix> = None;
+    let _: Option<hotcoco::TideErrors> = None;
+    let _: Option<hotcoco::EvalMode> = None;
+    let _: Option<hotcoco::COCOeval> = None;
 }

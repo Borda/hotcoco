@@ -9,11 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `just semver` — checks the public Rust API against the last published release via
+  `cargo-semver-checks`. The 1.0 reorganisation moves nearly every type between modules
+  while promising the crate-root paths keep resolving, and this is the mechanical proof
+  of that rather than re-reading `lib.rs` by hand.
+
 - `primitives::greedy::coco_match_floor` — the canonical spelling of pycocotools'
   `min(t, 1 - 1e-10)` match floor, so the detection lineage has one definition of the
   clamp instead of a literal repeated at each call site.
 
 ### Changed
+
+- **The Rust `eval` module is now `detection`.** `eval` was its name while detection was
+  the only metric family in the crate; it is now one family beside the panoptic,
+  tracking, and concepts families that follow. `hotcoco::eval::*` keeps resolving
+  through a deprecated alias for the whole 1.x series, with removal slated for 2.0, so
+  existing Rust code compiles unchanged (with a deprecation warning). Every crate-root
+  path — `hotcoco::COCOeval`, `hotcoco::EvalImg` and the rest — is untouched and not
+  deprecated.
+
+  **The Python API is completely unaffected.** `hotcoco.COCOeval`, `init_as_pycocotools()`,
+  and the whole `pycocotools`/LVIS drop-in surface are Tier 1 and permanent.
 
 - `eval/types.rs` is dissolved. It held types for four unrelated concerns plus two
   sibling features' public types, so "where is `EvalImg` defined?" answered "in a junk

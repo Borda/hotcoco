@@ -444,7 +444,7 @@ impl COCOeval {
 mod tests {
     use super::*;
     use crate::coco::COCO;
-    use crate::eval::COCOeval;
+    use crate::detection::COCOeval;
     use crate::params::IouType;
     use crate::types::{Annotation, Dataset};
 

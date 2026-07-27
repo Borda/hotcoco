@@ -59,6 +59,14 @@ lint:
 audit:
     cargo deny check
 
+# Public Rust API check against the last published release.
+# The 1.0 rewrite moves nearly every type between modules while promising the
+# crate-root paths keep resolving; this is the mechanical proof of that, rather
+# than re-reading lib.rs by hand.
+# Requires cargo-semver-checks: `cargo install cargo-semver-checks --locked`.
+semver baseline="0.5.0":
+    cargo semver-checks check-release -p hotcoco --baseline-version {{baseline}}
+
 # Format all Rust code
 fmt:
     cargo fmt --all

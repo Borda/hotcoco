@@ -127,8 +127,8 @@ impl COCOeval {
     /// cache as much as it likes; nothing outside it may learn that a whole-dataset
     /// cache exists. **Keep this driver-private** — it must not gain a `pub` variant,
     /// and it must not return `&HashMap<..>`. See CRATE-STRUCTURE.md item 13.
-    /// `pub(in crate::eval)`, not `pub(super)`: the visibility is the enforcement.
-    pub(in crate::eval) fn cell_ious(
+    /// `pub(in crate::detection)`, not `pub(super)`: the visibility is the enforcement.
+    pub(in crate::detection) fn cell_ious(
         &self,
         img_id: u64,
         cat_id: u64,
@@ -140,7 +140,7 @@ impl COCOeval {
     ///
     /// Driver-private: the analysis layer re-aggregates over these, but they are an
     /// implementation detail of federated evaluation rather than public surface.
-    pub(in crate::eval) fn freq_groups(&self) -> &FreqGroups {
+    pub(in crate::detection) fn freq_groups(&self) -> &FreqGroups {
         &self.freq_groups
     }
 

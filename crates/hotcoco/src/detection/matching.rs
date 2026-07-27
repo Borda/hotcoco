@@ -382,7 +382,7 @@ pub(super) fn evaluate_img(
 }
 
 /// D×G IoU matrix (row-major: dt.len() rows, gt.len() columns).
-pub(in crate::eval) type IouMatrix = Vec<Vec<f64>>;
+pub(in crate::detection) type IouMatrix = Vec<Vec<f64>>;
 
 /// Per-image, per-category evaluation result.
 #[derive(Debug, Clone)]
