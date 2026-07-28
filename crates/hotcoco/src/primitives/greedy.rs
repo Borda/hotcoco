@@ -52,9 +52,27 @@
 //! | TIDE (`pos_thr`/`bg_thr`) | no | parity contract is *tidecv*, not pycocotools — clamping would diverge from that reference |
 //! | confusion matrix, per-image diagnostics, calibration | no | hotcoco-native analysis with a user-chosen threshold; COCO's fudge factor is not implied |
 //!
-//! Identical geometry yields exactly `1.0` (`inter / (a + a - inter) == a / a`),
-//! so unclamped callers still match exact duplicates at `t == 1.0`; the clamp only
-//! additionally admits *near*-identical pairs.
+//! Identical geometry yields `1.0` to within a few ulp — but **not** exactly
+//! `1.0`. The intersection width is computed as `(x + w) - x`, which does not
+//! round-trip to `w` in binary floating point: `[94.13, 88.47, 21.53, 46.14]`
+//! against itself gives `0.9999999999999993`. pycocotools computes it the same
+//! way, so this is the reference's arithmetic rather than a defect here.
+//!
+//! The consequence is the reverse of what this note used to claim. For boxes at
+//! least a pixel on a side the drift is bounded around `1e-13`, so a *clamped*
+//! caller still matches exact duplicates at `t == 1.0` — three orders of
+//! magnitude clear of the `1 - 1e-10` floor. An **unclamped** caller comparing
+//! against a raw `1.0` may not. That makes the clamp a reason to apply the floor
+//! at `t == 1.0`, not evidence it is unnecessary.
+//!
+//! The floor is not a universal rescue: for sub-pixel geometry (a side ~1e-5
+//! against a coordinate ~1e2) the subtraction keeps almost none of the extent's
+//! significand and the drift reaches ~1.5e-9, below the floor. No detection
+//! dataset contains boxes that small and no standard sweep reaches `t == 1.0`,
+//! so this bounds the guarantee rather than breaking anything in practice.
+//!
+//! Both regimes are pinned by `sim::tests::bbox_iou_algebraic_properties` and
+//! `sim::tests::self_iou_degrades_for_subpixel_boxes`.
 
 /// pycocotools' match floor for an IoU threshold: `min(t, 1 - 1e-10)`.
 ///
@@ -169,6 +187,176 @@ pub fn greedy_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    /// Every property the matcher's contract guarantees, over random inputs.
+    ///
+    /// Each detection family reaches its numbers through this function, so a
+    /// violation here is a wrong metric everywhere at once — and the fixtures
+    /// above are all 2x1 and 2x2. Randomising the shape, the crowd flags, the
+    /// phase-2 mask and the threshold list is what exercises the interactions
+    /// between them.
+    ///
+    /// The IoU grid deliberately mixes continuous values with a coarse
+    /// quantised set: exact ties are where the `>=` update rule (later GT index
+    /// wins) is observable, and they essentially never occur under pure
+    /// continuous sampling.
+    #[test]
+    fn greedy_match_contract_random() {
+        let mut rng = StdRng::seed_from_u64(0x6DEED1);
+
+        for case in 0..5000 {
+            let d = rng.random_range(1..=6);
+            let g = rng.random_range(1..=6);
+            let num_ni = rng.random_range(0..=g);
+
+            let quantised = rng.random_bool(0.5);
+            let iou_flat: Vec<f64> = (0..d * g)
+                .map(|_| {
+                    if quantised {
+                        // 0.0, 0.25, 0.5, 0.75, 1.0 — collides constantly.
+                        rng.random_range(0..=4) as f64 / 4.0
+                    } else {
+                        rng.random_range(0.0..=1.0)
+                    }
+                })
+                .collect();
+
+            let rematchable: Vec<bool> = (0..g).map(|_| rng.random_bool(0.25)).collect();
+            let phase2: Vec<bool> = (0..g).map(|_| rng.random_bool(0.75)).collect();
+
+            let mut thrs: Vec<f64> = (0..rng.random_range(1..=4))
+                .map(|_| rng.random_range(0.0..=1.0))
+                .collect();
+            thrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let m = greedy_match(&iou_flat, d, g, num_ni, &rematchable, &phase2, &thrs);
+            let ctx = format!("case {case}: d={d} g={g} num_ni={num_ni} thrs={thrs:?}");
+
+            assert_eq!(m.dt_gt.len(), thrs.len(), "{ctx}");
+            assert_eq!(m.gt_matched.len(), thrs.len(), "{ctx}");
+
+            for (ti, &thr) in thrs.iter().enumerate() {
+                assert_eq!(m.dt_gt[ti].len(), d, "{ctx}");
+                assert_eq!(m.gt_matched[ti].len(), g, "{ctx}");
+
+                let mut claimed = vec![0usize; g];
+                for di in 0..d {
+                    let Some(gi) = m.dt_gt[ti][di] else { continue };
+
+                    assert!(gi < g, "{ctx}: gt index {gi} out of range");
+
+                    // A recorded match must clear the bar it was matched at.
+                    assert!(
+                        iou_flat[di * g + gi] >= thr,
+                        "{ctx}: dt {di} matched gt {gi} at IoU {} < {thr}",
+                        iou_flat[di * g + gi]
+                    );
+
+                    // Phase 2 is the only route to an ignored GT, and it honours
+                    // the eligibility mask.
+                    if gi >= num_ni {
+                        assert!(
+                            phase2[gi],
+                            "{ctx}: dt {di} matched phase-2-ineligible gt {gi}"
+                        );
+                    }
+
+                    claimed[gi] += 1;
+                }
+
+                // Injectivity: a GT is claimed once, unless it is rematchable —
+                // crowd regions, which absorb any number of detections.
+                for gi in 0..g {
+                    if claimed[gi] > 1 {
+                        assert!(
+                            rematchable[gi],
+                            "{ctx}: gt {gi} claimed {} times but is not rematchable",
+                            claimed[gi]
+                        );
+                    }
+                    // The two outputs are one fact in two shapes. `detection`'s
+                    // confusion adapter reads both halves specifically to avoid a
+                    // second source of truth, which makes this a contract.
+                    assert_eq!(
+                        m.gt_matched[ti][gi],
+                        claimed[gi] > 0,
+                        "{ctx}: gt_matched[{gi}] disagrees with dt_gt"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Raising the IoU threshold cannot increase the number of **true-positive
+    /// eligible** matches — those to non-ignored ground truths. This is what
+    /// underwrites AP@0.5 >= AP@0.75 downstream.
+    ///
+    /// The obvious stronger claim — that the *total* match count is monotone —
+    /// is **false**, and the counterexample is instructive rather than exotic.
+    /// Phase 1 is preferred over phase 2, so raising the threshold can evict a
+    /// detection out of phase 1 and into phase 2, freeing the non-ignored GT it
+    /// was holding for a later detection. With `num_gt_not_ignored = 1` and
+    ///
+    /// ```text
+    ///        G0     G1     G2          thresholds 0.42 and 0.70
+    ///   D0  0.50   0.75   0.25         phase2 eligible: G1, G2
+    ///   D1  0.75   0.50   0.50
+    ///   D2  0.00   0.25   0.75
+    /// ```
+    ///
+    /// the low threshold matches 2 (D0->G0 blocks D1, which takes G2 and blocks
+    /// D2) while the high threshold matches 3 (D0 cannot reach G0, so it takes
+    /// G1, leaving G0 for D1 and G2 for D2). Both give **one** TP-eligible match,
+    /// which is why the property has to be stated over that subset.
+    ///
+    /// Established empirically over 200k random cases rather than proved; the
+    /// loop here is smaller so the suite stays fast.
+    #[test]
+    fn tp_eligible_matches_are_monotone_in_threshold() {
+        let mut rng = StdRng::seed_from_u64(0xA11CE);
+
+        for case in 0..20000 {
+            let d = rng.random_range(1..=5);
+            let g = rng.random_range(1..=5);
+            let num_ni = rng.random_range(0..=g);
+            let quantised = rng.random_bool(0.5);
+            let iou: Vec<f64> = (0..d * g)
+                .map(|_| {
+                    if quantised {
+                        rng.random_range(0..=4) as f64 / 4.0
+                    } else {
+                        rng.random_range(0.0..=1.0)
+                    }
+                })
+                .collect();
+            let rematchable: Vec<bool> = (0..g).map(|_| rng.random_bool(0.2)).collect();
+            let phase2: Vec<bool> = (0..g).map(|_| rng.random_bool(0.8)).collect();
+
+            let mut thrs: Vec<f64> = (0..2).map(|_| rng.random_range(0.0..=1.0)).collect();
+            thrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let m = greedy_match(&iou, d, g, num_ni, &rematchable, &phase2, &thrs);
+            let tp_at = |ti: usize| {
+                m.dt_gt[ti]
+                    .iter()
+                    .flatten()
+                    .filter(|&&gi| gi < num_ni)
+                    .count()
+            };
+
+            assert!(
+                tp_at(1) <= tp_at(0),
+                "case {case}: raising the threshold {:?} -> {:?} grew TP-eligible \
+                 matches {} -> {} (d={d} g={g} num_ni={num_ni}) iou={iou:?}",
+                thrs[0],
+                thrs[1],
+                tp_at(0),
+                tp_at(1),
+            );
+        }
+    }
 
     // No crowd, all GTs eligible for phase 2.
     fn simple(iou_flat: &[f64], d: usize, g: usize, num_ni: usize, thrs: &[f64]) -> GreedyMatches {

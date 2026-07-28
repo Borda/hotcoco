@@ -70,24 +70,40 @@ def _metric_names_for(iou_type):
     return empty.metric_keys()
 
 
-def assert_metrics_match(py_stats, rs_stats, iou_type):
-    """Assert all metrics match within tolerance."""
+def assert_metrics_match(py_stats, rs_stats, iou_type, min_numeric=0):
+    """Assert all metrics match within tolerance.
+
+    Returns the number of metrics compared numerically — i.e. excluding those
+    where both sides are the -1.0 "not computed for this configuration" sentinel.
+    Agreeing that a metric is undefined is a real assertion (a hotcoco value of
+    0.5 against pycocotools' -1.0 fails here), but it exercises no arithmetic, so
+    a test whose every metric is a sentinel has verified very little. Pass
+    ``min_numeric`` to require that a test actually reached the numeric paths.
+    """
     metric_names = _metric_names_for(iou_type)
     expected_len = len(metric_names)
     assert len(py_stats) == expected_len, f"pycocotools returned {len(py_stats)}, expected {expected_len}"
     assert len(rs_stats) == expected_len, f"hotcoco returned {len(rs_stats)}, expected {expected_len}"
 
     mismatches = []
+    numeric = 0
     for i in range(expected_len):
         py_val, rs_val = py_stats[i], rs_stats[i]
         if py_val == -1.0 and rs_val == -1.0:
             continue
+        numeric += 1
         diff = abs(py_val - rs_val)
         if diff > TOLERANCE:
             mismatches.append(f"  [{i}] {metric_names[i]}: py={py_val:.15f} rs={rs_val:.15f} diff={diff:.2e}")
 
     if mismatches:
         raise AssertionError(f"\n{iou_type} metric mismatch (tol={TOLERANCE}):\n" + "\n".join(mismatches))
+
+    assert numeric >= min_numeric, (
+        f"{iou_type}: only {numeric} of {expected_len} metrics were compared numerically "
+        f"(the rest were -1.0 on both sides); this test asked for at least {min_numeric}"
+    )
+    return numeric
 
 
 def _make_minimal_gt(iou_type, images=None, categories=None, annotations=None):
@@ -185,13 +201,20 @@ def _cat(id: int, name: str, supercategory: str | None = None) -> dict:
 
 
 def test_empty_gt():
-    """No GT annotations, some detections → all metrics -1.0."""
+    """No GT annotations, some detections → all metrics -1.0.
+
+    Every metric here is the sentinel on both sides, so this asserts agreement
+    about undefinedness and nothing numeric. That is the whole point of the case,
+    but the expectation has to be pinned on *hotcoco* — the original checked
+    ``py_stats``, which tests pycocotools against itself.
+    """
     for iou_type in ["bbox", "segm"]:
         gt = _make_minimal_gt(iou_type)
         dts = [_make_bbox_det(score=0.5)]
         py_stats, rs_stats = run_both(gt, dts, iou_type)
         assert_metrics_match(py_stats, rs_stats, iou_type)
-        assert all(s == -1.0 for s in py_stats[:6]), f"Expected -1.0 AP metrics, got {py_stats[:6]}"
+        assert all(s == -1.0 for s in rs_stats[:6]), f"hotcoco: expected -1.0 AP metrics, got {rs_stats[:6]}"
+        assert all(s == -1.0 for s in py_stats[:6]), f"pycocotools: expected -1.0 AP metrics, got {py_stats[:6]}"
 
 
 def test_all_crowd():
@@ -204,6 +227,11 @@ def test_all_crowd():
     dts = [_make_bbox_det(bbox=[10, 10, 100, 100], score=0.9), _make_bbox_det(bbox=[200, 200, 50, 50], score=0.5)]
     py_stats, rs_stats = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
+    # Crowd GTs are ignored *and* rematchable: the detections they absorb are
+    # neither TPs nor FPs, and no non-crowd GT remains to measure recall against.
+    # Every metric is therefore undefined rather than zero — pin that on hotcoco,
+    # since agreement alone would also hold if both sides were wrong the same way.
+    assert all(s == -1.0 for s in rs_stats), f"hotcoco: all-crowd GT should give all -1.0, got {rs_stats}"
 
 
 def test_identical_boxes():

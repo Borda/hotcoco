@@ -15,6 +15,112 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+// ---------------------------------------------------------------------------
+// Inline dataset builders
+//
+// A bare `Annotation` literal is thirteen lines, so a two-GT/three-detection
+// scenario runs past a hundred and the geometry — the only part that decides
+// what the test exercises — ends up buried in field boilerplate. That is not
+// hypothetical: `test_oid_group_of_multi_match` sat at IoU 0.16 against a
+// threshold of 0.5 for a whole release, never reaching the code path it was
+// written for, because 6400/40000 is invisible inside that much noise.
+//
+// Keep each box on one line so the geometry is readable at a glance, and state
+// the IoU in a comment wherever a test depends on clearing a threshold.
+// ---------------------------------------------------------------------------
+
+/// Ground-truth annotation. Chain `.group_of()` / `.crowd()` / `.in_cat()` as needed.
+fn ann(id: u64, bbox: [f64; 4]) -> Annotation {
+    Annotation {
+        id,
+        image_id: 1,
+        category_id: 1,
+        bbox: Some(bbox),
+        area: Some(bbox[2] * bbox[3]),
+        iscrowd: false,
+        segmentation: None,
+        keypoints: None,
+        num_keypoints: None,
+        score: None,
+        obb: None,
+        is_group_of: None,
+    }
+}
+
+/// Detection annotation — an [`ann`] carrying a score.
+fn det(id: u64, bbox: [f64; 4], score: f64) -> Annotation {
+    Annotation {
+        score: Some(score),
+        ..ann(id, bbox)
+    }
+}
+
+/// Modifiers for the builders above. Add variants (`crowd`, `in_cat`, `in_img`)
+/// as tests need them — `-D warnings` rejects any that sit unused.
+trait AnnExt {
+    fn group_of(self) -> Self;
+}
+
+impl AnnExt for Annotation {
+    fn group_of(mut self) -> Self {
+        self.is_group_of = Some(true);
+        self
+    }
+}
+
+fn img(id: u64) -> Image {
+    Image {
+        id,
+        file_name: format!("img{id}.jpg"),
+        height: 640,
+        width: 640,
+        license: None,
+        coco_url: None,
+        flickr_url: None,
+        date_captured: None,
+        neg_category_ids: vec![],
+        not_exhaustive_category_ids: vec![],
+    }
+}
+
+fn cat(id: u64, name: &str) -> Category {
+    Category {
+        id,
+        name: name.into(),
+        supercategory: None,
+        skeleton: None,
+        keypoints: None,
+        frequency: None,
+    }
+}
+
+/// Assemble a dataset from the pieces above.
+fn dataset(images: Vec<Image>, categories: Vec<Category>, annotations: Vec<Annotation>) -> Dataset {
+    Dataset {
+        info: None,
+        images,
+        annotations,
+        categories,
+        licenses: vec![],
+    }
+}
+
+/// Axis-aligned IoU, for asserting the precondition a scenario depends on.
+///
+/// Tests that turn on a detection clearing an IoU threshold should assert that it
+/// does, rather than trusting the reader to multiply. Independent of
+/// `primitives::sim` on purpose — an oracle that shares code with its subject
+/// checks nothing.
+fn iou_of(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let (ax2, ay2) = (a[0] + a[2], a[1] + a[3]);
+    let (bx2, by2) = (b[0] + b[2], b[1] + b[3]);
+    let iw = (ax2.min(bx2) - a[0].max(b[0])).max(0.0);
+    let ih = (ay2.min(by2) - a[1].max(b[1])).max(0.0);
+    let inter = iw * ih;
+    let union = a[2] * a[3] + b[2] * b[3] - inter;
+    if union > 0.0 { inter / union } else { 0.0 }
+}
+
 #[test]
 fn test_load_gt() {
     let gt_path = fixtures_dir().join("gt.json");
@@ -150,8 +256,42 @@ fn test_summarize_prints() {
     let mut coco_eval = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     coco_eval.evaluate();
     coco_eval.accumulate();
-    // This should print 12 lines without panicking
-    coco_eval.summarize();
+
+    // `summarize_lines` is what `summarize()` prints; asserting on the strings
+    // means this covers the formatting contract instead of only "did not panic",
+    // which is all it did before.
+    let lines = coco_eval.summarize_lines();
+    assert_eq!(
+        lines.len(),
+        12,
+        "bbox summary is 12 lines, got:\n{}",
+        lines.join("\n")
+    );
+
+    for line in &lines {
+        assert!(
+            line.starts_with(" Average Precision") || line.starts_with(" Average Recall"),
+            "unexpected summary line: {line:?}"
+        );
+        assert!(
+            line.contains("IoU=") && line.contains("area=") && line.contains("maxDets="),
+            "summary line is missing its parameter annotation: {line:?}"
+        );
+        // Every line ends in a formatted metric — `-1.000` for "not computed",
+        // otherwise a value in [0, 1]. A NaN or an unformatted float shows up here.
+        let value = line
+            .rsplit('=')
+            .next()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("summary line has no parseable value: {line:?}"));
+        assert!(
+            value == -1.0 || (0.0..=1.0).contains(&value),
+            "summary value {value} is neither the -1.0 sentinel nor in [0, 1]: {line:?}"
+        );
+    }
+
+    // stats() is populated as a side effect and must agree with what was printed.
+    assert_eq!(coco_eval.stats().expect("summarize sets stats").len(), 12);
 }
 
 /// Regression test for the iscrowd-vs-gt_ignore matching bug.
@@ -818,38 +958,49 @@ fn test_sample_n() {
 /// Running `data/bench_parity.py` against val2017 further confirms parity with pycocotools
 /// (bbox ≤1e-4, segm ≤2e-4, keypoints exact).
 #[test]
-fn test_evaluate_sparse_matches_dense() {
-    let gt_path = fixtures_dir().join("edge_gt.json");
-    let dt_path = fixtures_dir().join("edge_dt.json");
-    let coco_gt = COCO::new(&gt_path).expect("Failed to load edge GT");
-    let coco_dt = coco_gt.load_res(&dt_path).expect("Failed to load edge DT");
+fn empty_image_category_pairs_do_not_change_metrics() {
+    // The premise the sparse evaluation path rests on: `collect_sparse_pairs`
+    // drives evaluation from the annotation index, skipping every (image,
+    // category) pair with neither ground truth nor a detection. That is only
+    // sound if such pairs contribute nothing — so pad the dataset with them and
+    // require the metrics to come out bit-identical.
+    //
+    // This test used to be `test_evaluate_sparse_matches_dense`, which claimed to
+    // compare the sparse path against "the previously-verified dense
+    // implementation". There is no dense implementation — it was removed — so the
+    // body simply re-asserted `test_edge_cases`' twelve constants against the same
+    // fixture, and no second computation ever ran.
+    let coco_gt = COCO::new(&fixtures_dir().join("edge_gt.json")).expect("Failed to load edge GT");
+    let coco_dt = coco_gt
+        .load_res(&fixtures_dir().join("edge_dt.json"))
+        .expect("Failed to load edge DT");
+    let baseline = run_bbox_eval(coco_gt, coco_dt);
 
-    let stats = run_bbox_eval(coco_gt, coco_dt);
-    assert_eq!(stats.len(), 12, "summarize() should return 12 metrics");
+    // Same data, plus images that carry no annotations at all and a category that
+    // appears in no annotation — pure empty pairs, nothing else changed.
+    let mut gt = COCO::new(&fixtures_dir().join("edge_gt.json"))
+        .expect("Failed to load edge GT")
+        .dataset
+        .clone();
+    let next_img_id = gt.images.iter().map(|i| i.id).max().unwrap_or(0) + 1;
+    for k in 0..5 {
+        gt.images.push(img(next_img_id + k));
+    }
+    let next_cat_id = gt.categories.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+    gt.categories.push(cat(next_cat_id, "never_annotated"));
 
-    // Same expected values as test_edge_cases — verifies the sparse path produces
-    // bit-identical results to the previously-verified dense implementation.
-    #[rustfmt::skip]
-    let expected: &[f64] = &[
-        0.712871,  // AP @[ IoU=0.50:0.95 | area=   all | maxDets=100 ]
-        0.712871,  // AP @[ IoU=0.50      | area=   all | maxDets=100 ]
-        0.712871,  // AP @[ IoU=0.75      | area=   all | maxDets=100 ]
-        0.663366,  // AP @[ IoU=0.50:0.95 | area= small | maxDets=100 ]
-        1.000000,  // AP @[ IoU=0.50:0.95 | area=medium | maxDets=100 ]
-        1.000000,  // AP @[ IoU=0.50:0.95 | area= large | maxDets=100 ]
-        0.428571,  // AR @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ]
-        0.714286,  // AR @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ]
-        0.714286,  // AR @[ IoU=0.50:0.95 | area=   all | maxDets=100 ]
-        0.666667,  // AR @[ IoU=0.50:0.95 | area= small | maxDets=100 ]
-        1.000000,  // AR @[ IoU=0.50:0.95 | area=medium | maxDets=100 ]
-        1.000000,  // AR @[ IoU=0.50:0.95 | area= large | maxDets=100 ]
-    ];
+    let padded_gt = COCO::from_dataset(gt);
+    let padded_dt = padded_gt
+        .load_res(&fixtures_dir().join("edge_dt.json"))
+        .expect("Failed to load edge DT against padded GT");
+    let padded = run_bbox_eval(padded_gt, padded_dt);
 
-    let tol = 1e-4;
-    for (i, (&got, &exp)) in stats.iter().zip(expected.iter()).enumerate() {
-        assert!(
-            (got - exp).abs() < tol,
-            "stats[{i}] mismatch (sparse path): got {got:.6}, expected {exp:.6}"
+    assert_eq!(baseline.len(), padded.len());
+    for (i, (&base, &pad)) in baseline.iter().zip(padded.iter()).enumerate() {
+        assert_eq!(
+            base, pad,
+            "stats[{i}] changed when empty (image, category) pairs were added: \
+             {base} -> {pad}"
         );
     }
 }
@@ -3155,13 +3306,49 @@ fn test_accumulate_unchanged_after_refactor() {
     ev.evaluate();
     ev.accumulate();
 
+    // The name promises numeric stability across a refactor, so pin the numbers.
+    // Asserting only the array shape and "some value is non-negative" would pass
+    // with every metric wrong, which is what it did before.
+    //
+    // These twelve come from **pycocotools** on this same fixture, not from a
+    // recording of hotcoco's own output — a snapshot would pin whatever the code
+    // happened to do on the day it was written, including a bug. Regenerate with:
+    //
+    //   uv run python -c "from pycocotools.coco import COCO; \
+    //     from pycocotools.cocoeval import COCOeval; \
+    //     gt=COCO('crates/hotcoco/tests/fixtures/gt.json'); \
+    //     dt=gt.loadRes('crates/hotcoco/tests/fixtures/dt.json'); \
+    //     e=COCOeval(gt,dt,'bbox'); e.evaluate(); e.accumulate(); e.summarize()"
+    ev.summarize();
+    let stats = ev.stats().expect("summarize sets stats");
+
+    #[rustfmt::skip]
+    let expected: &[f64] = &[
+        0.908416,  // AP  @[ IoU=0.50:0.95 | area=   all | maxDets=100 ]
+        1.000000,  // AP  @[ IoU=0.50      | area=   all | maxDets=100 ]
+        1.000000,  // AP  @[ IoU=0.75      | area=   all | maxDets=100 ]
+        0.925743,  // AP  @[ IoU=0.50:0.95 | area= small | maxDets=100 ]
+        0.900000,  // AP  @[ IoU=0.50:0.95 | area=medium | maxDets=100 ]
+       -1.000000,  // AP  @[ IoU=0.50:0.95 | area= large | maxDets=100 ]
+        0.791667,  // AR  @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ]
+        0.908333,  // AR  @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ]
+        0.908333,  // AR  @[ IoU=0.50:0.95 | area=   all | maxDets=100 ]
+        0.925000,  // AR  @[ IoU=0.50:0.95 | area= small | maxDets=100 ]
+        0.900000,  // AR  @[ IoU=0.50:0.95 | area=medium | maxDets=100 ]
+       -1.000000,  // AR  @[ IoU=0.50:0.95 | area= large | maxDets=100 ]
+    ];
+
+    assert_eq!(stats.len(), expected.len());
+    for (i, (&got, &exp)) in stats.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - exp).abs() < 1e-6,
+            "stats[{i}]: got {got:.6}, expected {exp:.6}"
+        );
+    }
+
     let eval = ev.accumulated().unwrap();
     assert_eq!(eval.shape.t, 10);
     assert_eq!(eval.shape.k, 2);
-    let valid_count = eval.precision.iter().filter(|&&v| v >= 0.0).count();
-    assert!(valid_count > 0, "should have valid precision values");
-    let valid_recall = eval.recall.iter().filter(|&&v| v >= 0.0).count();
-    assert!(valid_recall > 0, "should have valid recall values");
 }
 
 #[test]
@@ -3681,113 +3868,43 @@ fn test_gt_expansion_idempotent() {
 
 #[test]
 fn test_oid_group_of_multi_match() {
-    // One non-group GT + one group-of GT, three DTs overlapping the group-of GT.
-    // All DTs should be TPs (one matches non-group, others match group-of).
-    let gt_dataset = Dataset {
-        info: None,
-        images: vec![Image {
-            id: 1,
-            file_name: "img1.jpg".into(),
-            height: 640,
-            width: 640,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
-        }],
-        annotations: vec![
-            Annotation {
-                id: 1,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([300.0, 300.0, 100.0, 100.0]),
-                area: Some(10000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None, // NOT group-of — provides recall denominator
-            },
-            Annotation {
-                id: 2,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([0.0, 0.0, 200.0, 200.0]),
-                area: Some(40000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: Some(true), // Group-of GT
-            },
-        ],
-        categories: vec![Category {
-            id: 1,
-            name: "person".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
-        }],
-        licenses: vec![],
-    };
+    // One non-group GT + one group-of GT. DT1 matches the non-group GT; DT2 and
+    // DT3 clear IoU 0.5 against the group-of box (1.00 and 0.9025) and are
+    // absorbed by it, which makes them *ignored* — neither TP nor FP.
+    //
+    // The geometry matters and is asserted below. This test previously used
+    // 80x80 detections against the 200x200 group-of box, an IoU of 0.16, so the
+    // group-of pass it was written to cover never ran; it passed on VOC
+    // interpolation instead. Assert the mechanism, not just the AP it moves.
+    const ORDINARY_GT: [f64; 4] = [300.0, 300.0, 100.0, 100.0];
+    const GROUP_OF_GT: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
+    const ABSORBED_A: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
+    const ABSORBED_B: [f64; 4] = [10.0, 10.0, 190.0, 190.0];
 
-    let dt_dataset = Dataset {
-        info: None,
-        images: gt_dataset.images.clone(),
-        annotations: vec![
-            Annotation {
-                id: 1,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([300.0, 300.0, 100.0, 100.0]),
-                area: Some(10000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: Some(0.9),
-                obb: None,
-                is_group_of: None,
-            },
-            Annotation {
-                id: 2,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([10.0, 10.0, 80.0, 80.0]),
-                area: Some(6400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: Some(0.8),
-                obb: None,
-                is_group_of: None,
-            },
-            Annotation {
-                id: 3,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([50.0, 50.0, 80.0, 80.0]),
-                area: Some(6400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: Some(0.7),
-                obb: None,
-                is_group_of: None,
-            },
+    // The precondition the whole test rests on: both detections must actually
+    // clear OID's 0.5 threshold against the group-of box. Asserted, not trusted.
+    assert!(iou_of(ABSORBED_A, GROUP_OF_GT) >= 0.5);
+    assert!(iou_of(ABSORBED_B, GROUP_OF_GT) >= 0.5);
+    assert!(iou_of(ORDINARY_GT, GROUP_OF_GT) < 0.5);
+
+    let cats = vec![cat(1, "person")];
+    let gt_dataset = dataset(
+        vec![img(1)],
+        cats.clone(),
+        vec![
+            ann(1, ORDINARY_GT),            // provides the recall denominator
+            ann(2, GROUP_OF_GT).group_of(), // ignored: no FN penalty, not in num_gt
         ],
-        categories: gt_dataset.categories.clone(),
-        licenses: vec![],
-    };
+    );
+    let dt_dataset = dataset(
+        vec![img(1)],
+        cats,
+        vec![
+            det(1, ORDINARY_GT, 0.9), // matches the ordinary GT -> TP
+            det(2, ABSORBED_A, 0.8),  // IoU 1.0000 with the group-of box -> absorbed
+            det(3, ABSORBED_B, 0.7),  // IoU 0.9025 with the group-of box -> absorbed
+        ],
+    );
 
     let coco_gt = COCO::from_dataset(gt_dataset);
     let coco_dt = COCO::from_dataset(dt_dataset);
@@ -3797,13 +3914,49 @@ fn test_oid_group_of_multi_match() {
     ev.summarize();
 
     let stats = ev.stats().unwrap();
-    // DT1 matches non-group GT. DT2+DT3 match group-of GT (multi-match).
-    // All 3 DTs are TPs. Recall denominator = 1 (only non-group GT). AP should be 1.0.
     assert!(
         stats[0] > 0.99,
         "AP should be ~1.0 with group-of multi-match, got {:.4}",
         stats[0]
     );
+
+    // The mechanism: both group-of detections were reached and absorbed. OID runs
+    // a single IoU threshold, so t_idx is 0.
+    let absorbed: Vec<u64> = ev
+        .eval_imgs()
+        .iter()
+        .flatten()
+        .flat_map(|e| {
+            e.dt_ids
+                .iter()
+                .enumerate()
+                .filter(|&(d, _)| e.dt_ignore[0][d])
+                .map(|(_, &id)| id)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        absorbed.len(),
+        2,
+        "DT2 and DT3 should be absorbed by the group-of box and ignored, got {absorbed:?}"
+    );
+
+    // The invariant the absorbed detections would break if they were credited as
+    // TPs: group-of GTs carry no false-negative penalty, so they never enter
+    // `num_gt`, and crediting them scored a numerator against a denominator that
+    // never grew. This measured 4.0 before the fix.
+    let acc = ev.accumulated().expect("accumulate() was called");
+    let a_idx = ev.params.all_area_idx();
+    let m_idx = acc.shape.m - 1;
+    for t in 0..acc.shape.t {
+        for k in 0..acc.shape.k {
+            let r = acc.recall[acc.shape.recall_idx(t, k, a_idx, m_idx)];
+            assert!(
+                r <= 1.0,
+                "recall must not exceed 1.0 (t={t}, k={k}), got {r}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -4274,6 +4427,45 @@ fn test_calibration_invalid_iou_threshold() {
     assert!(
         result.is_err(),
         "should fail with non-standard IoU threshold"
+    );
+}
+
+/// Unnormalized scores are rejected rather than silently producing an ECE above 1.
+///
+/// Binning saturates an out-of-range score into an end bin while keeping its raw
+/// magnitude in that bin's mean, so a model exporting logits would otherwise get a
+/// plausible-looking number that means nothing. See
+/// `metrics::calibration::tests::out_of_range_scores_escape_their_bin` for the
+/// mechanism this guards.
+#[test]
+fn test_calibration_rejects_unnormalized_scores() {
+    let cats = vec![cat(1, "person")];
+    let gt = dataset(
+        vec![img(1)],
+        cats.clone(),
+        vec![ann(1, [10.0, 10.0, 50.0, 50.0])],
+    );
+    // A logit, not a probability.
+    let dt = dataset(
+        vec![img(1)],
+        cats,
+        vec![det(1, [10.0, 10.0, 50.0, 50.0], 7.4)],
+    );
+
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt),
+        COCO::from_dataset(dt),
+        IouType::Bbox,
+    );
+    ev.evaluate();
+
+    let err = ev
+        .calibration(10, 0.5)
+        .expect_err("a score of 7.4 is not a confidence and must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("7.4") && msg.contains("[0, 1]"),
+        "error should name the offending score and the required range, got: {msg}"
     );
 }
 
@@ -5250,5 +5442,335 @@ fn test_report_requires_summarize() {
     assert!(
         ev.report().is_err(),
         "report() before summarize() must error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end invariants
+//
+// Properties that must hold for any dataset, checkable without a reference
+// implementation. This is the only kind of check available on the surfaces
+// `report()` marks `Provenance::Extension` — Open Images and oriented boxes have
+// no reference to compare against, which is exactly why a wrong number there
+// survived until an invariant was written down. `recall <= 1.0` is not a
+// hypothetical: Open Images returned 4.0.
+// ---------------------------------------------------------------------------
+
+/// Run every fixture pair we have through an evaluation and assert the
+/// dataset-independent properties of the result.
+fn assert_eval_invariants(ev: &COCOeval, label: &str) {
+    let acc = ev
+        .accumulated()
+        .unwrap_or_else(|| panic!("{label}: accumulate() must have been called"));
+    let a_idx = ev.params.all_area_idx();
+
+    for t in 0..acc.shape.t {
+        for k in 0..acc.shape.k {
+            for a in 0..acc.shape.a {
+                for m in 0..acc.shape.m {
+                    let r = acc.recall[acc.shape.recall_idx(t, k, a, m)];
+                    // -1.0 is "not computed for this configuration" and is not a
+                    // low score. Compare against it exactly: a `>= 0.0` guard
+                    // would let a genuine sign bug hide behind the sentinel.
+                    assert!(
+                        r == -1.0 || (0.0..=1.0).contains(&r),
+                        "{label}: recall {r} outside [0,1] at (t={t}, k={k}, a={a}, m={m})"
+                    );
+                }
+            }
+        }
+    }
+
+    for (i, &p) in acc.precision.iter().enumerate() {
+        assert!(
+            p == -1.0 || (0.0..=1.0).contains(&p),
+            "{label}: precision {p} outside [0,1] at flat index {i}"
+        );
+    }
+
+    // Max-detections caps are nested: a larger cap keeps a superset of each
+    // image's detections while `num_gt` is unchanged, so recall cannot fall.
+    // (Stated over the "all" area range, where every fixture has ground truth.)
+    for t in 0..acc.shape.t {
+        for k in 0..acc.shape.k {
+            let at = |m: usize| acc.recall[acc.shape.recall_idx(t, k, a_idx, m)];
+            for m in 1..acc.shape.m {
+                let (prev, cur) = (at(m - 1), at(m));
+                if prev == -1.0 || cur == -1.0 {
+                    continue;
+                }
+                assert!(
+                    cur >= prev - 1e-12,
+                    "{label}: recall fell from {prev} to {cur} when raising maxDets \
+                     (t={t}, k={k}, m={} -> {m})",
+                    m - 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn eval_invariants_hold_across_fixtures() {
+    for (gt_name, dt_name) in [
+        ("gt.json", "dt.json"),
+        ("edge_gt.json", "edge_dt.json"),
+        ("zero_gt.json", "zero_dt.json"),
+    ] {
+        let gt = COCO::new(&fixtures_dir().join(gt_name)).unwrap();
+        let dt = gt.load_res(&fixtures_dir().join(dt_name)).unwrap();
+        let mut ev = COCOeval::new(gt, dt, IouType::Bbox);
+        ev.evaluate();
+        ev.accumulate();
+        ev.summarize();
+
+        assert_eval_invariants(&ev, gt_name);
+
+        // Summary metrics obey the same domain as the cells they average.
+        for (i, &v) in ev.stats().unwrap().iter().enumerate() {
+            assert!(
+                v == -1.0 || (0.0..=1.0).contains(&v),
+                "{gt_name}: stats[{i}] = {v} outside [0,1] and not the -1.0 sentinel"
+            );
+        }
+    }
+}
+
+#[test]
+fn eval_invariants_hold_for_open_images() {
+    // Open Images has no reference implementation, so invariants are the only
+    // check that reaches it. This is the configuration that returned recall 4.0.
+    const ORDINARY_GT: [f64; 4] = [300.0, 300.0, 100.0, 100.0];
+    const GROUP_OF_GT: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
+
+    let cats = vec![cat(1, "person")];
+    let gt = dataset(
+        vec![img(1)],
+        cats.clone(),
+        vec![ann(1, ORDINARY_GT), ann(2, GROUP_OF_GT).group_of()],
+    );
+    let dt = dataset(
+        vec![img(1)],
+        cats,
+        vec![
+            det(1, ORDINARY_GT, 0.9),
+            det(2, [0.0, 0.0, 200.0, 200.0], 0.85),
+            det(3, [10.0, 10.0, 190.0, 190.0], 0.8),
+            det(4, [5.0, 5.0, 195.0, 195.0], 0.75),
+        ],
+    );
+
+    let mut ev = COCOeval::new_oid(COCO::from_dataset(gt), COCO::from_dataset(dt), None);
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+
+    assert_eval_invariants(&ev, "open images group-of");
+}
+
+// ---------------------------------------------------------------------------
+// Comparability predicate
+//
+// `reference_deviations()` is the single fact behind both the summarize()
+// warnings and `Provenance`. Only its OBB branch had a test; the rest were
+// unverified, which is exactly the shape of defect this repo keeps producing —
+// a guard that looks green and checks nothing. One test per branch, each
+// asserting that a run which *should* be downgraded actually is.
+// ---------------------------------------------------------------------------
+
+fn bbox_eval_for_provenance() -> COCOeval {
+    let gt = COCO::new(&fixtures_dir().join("gt.json")).unwrap();
+    let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
+    COCOeval::new(gt, dt, IouType::Bbox)
+}
+
+/// Run to completion and report whether `report()` calls the result comparable.
+fn provenance_of(mut ev: COCOeval) -> String {
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+    let report = ev.report().expect("report() succeeds");
+    serde_json::to_value(report.provenance)
+        .expect("provenance serializes")
+        .as_str()
+        .expect("provenance is a string")
+        .to_string()
+}
+
+#[test]
+fn default_params_are_parity_verified() {
+    // The control. Without this, every assertion below could pass because
+    // `report()` downgrades unconditionally.
+    assert_eq!(provenance_of(bbox_eval_for_provenance()), "parity_verified");
+}
+
+#[test]
+fn custom_iou_thrs_downgrade_to_extension() {
+    let mut ev = bbox_eval_for_provenance();
+    ev.params.iou_thrs = vec![0.5, 0.75];
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+#[test]
+fn custom_max_dets_downgrade_to_extension() {
+    let mut ev = bbox_eval_for_provenance();
+    ev.params.max_dets = vec![1, 10, 50];
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+#[test]
+fn custom_area_range_labels_downgrade_to_extension() {
+    let mut ev = bbox_eval_for_provenance();
+    for (i, ar) in ev.params.area_ranges.iter_mut().enumerate() {
+        ar.label = format!("bucket{i}");
+    }
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+/// The gap the audit found: the Python `areaRng` setter preserves labels, so a
+/// user redefining "small" changed APs/APm/APl while the label-only check saw
+/// nothing and the run still claimed parity.
+#[test]
+fn custom_area_range_bounds_downgrade_even_with_default_labels() {
+    let mut ev = bbox_eval_for_provenance();
+    let labels_before: Vec<String> = ev
+        .params
+        .area_ranges
+        .iter()
+        .map(|ar| ar.label.clone())
+        .collect();
+
+    for ar in &mut ev.params.area_ranges {
+        if ar.label == "small" {
+            ar.range = [0.0, 100.0];
+        }
+    }
+
+    let labels_after: Vec<String> = ev
+        .params
+        .area_ranges
+        .iter()
+        .map(|ar| ar.label.clone())
+        .collect();
+    assert_eq!(
+        labels_before, labels_after,
+        "the point of this test is that labels are unchanged"
+    );
+
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+#[test]
+fn custom_rec_thrs_downgrade_to_extension() {
+    let mut ev = bbox_eval_for_provenance();
+    // The 11-point VOC grid instead of COCO's 101 points.
+    ev.params.rec_thrs = (0..=10).map(|i| f64::from(i) / 10.0).collect();
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+#[test]
+fn class_agnostic_pooling_downgrades_to_extension() {
+    let mut ev = bbox_eval_for_provenance();
+    ev.params.use_cats = false;
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+#[test]
+fn custom_kpt_oks_sigmas_downgrade_to_extension() {
+    let gt = COCO::new(&fixtures_dir().join("kpt_gt.json"))
+        .or_else(|_| COCO::new(&fixtures_dir().join("gt.json")))
+        .unwrap();
+    let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
+    let mut ev = COCOeval::new(gt, dt, IouType::Keypoints);
+    ev.params.kpt_oks_sigmas = vec![0.05; ev.params.kpt_oks_sigmas.len()];
+    assert_eq!(provenance_of(ev), "extension");
+}
+
+#[test]
+fn open_images_downgrades_to_extension() {
+    let gt = COCO::new(&fixtures_dir().join("gt.json")).unwrap();
+    let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
+    assert_eq!(provenance_of(COCOeval::new_oid(gt, dt, None)), "extension");
+}
+
+/// Evaluation must be independent of the rayon thread count, bitwise.
+///
+/// It is today — verified across 1/2/4/8 threads on val2017 — because no float
+/// accumulation runs in parallel: every `par_iter` either collects by index or
+/// reduces `u64` counters, and the `f64` sums in `summarize` and `counts` walk a
+/// deterministically-ordered slice. But that holds by discipline, not by a guard,
+/// and `tests/architecture.rs` does not forbid a future `par_iter().sum::<f64>()`.
+/// Float addition is not associative, so such a reduction would make AP depend on
+/// how rayon happened to split the work.
+#[test]
+fn evaluation_is_independent_of_thread_count() {
+    fn eval_on(threads: usize) -> Vec<f64> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool");
+        pool.install(|| {
+            let gt = COCO::new(&fixtures_dir().join("edge_gt.json")).unwrap();
+            let dt = gt.load_res(&fixtures_dir().join("edge_dt.json")).unwrap();
+            run_bbox_eval(gt, dt)
+        })
+    }
+
+    let single = eval_on(1);
+    for threads in [2usize, 3, 4, 8] {
+        let many = eval_on(threads);
+        assert_eq!(single.len(), many.len());
+        for (i, (&a, &b)) in single.iter().zip(many.iter()).enumerate() {
+            // Bitwise, not approximate: the claim is determinism, and a tolerance
+            // would pass for exactly the parallel float reduction this forbids.
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "stats[{i}] differs between 1 thread ({a}) and {threads} threads ({b})"
+            );
+        }
+    }
+}
+
+/// A NaN detection score is rejected rather than silently corrupting the ranking.
+///
+/// Every ranking path sorts with `partial_cmp(..).unwrap_or(Equal)`, a comparator
+/// that is not transitive once NaN is present: the sort does not panic, it
+/// produces an arbitrary order, and AP becomes a function of the sort
+/// implementation rather than of the detections.
+///
+/// Only reachable programmatically. Loading from a *file* never gets here —
+/// `sanitize_non_finite` rewrites bare `NaN` to `null` first, which is the
+/// pycocotools-compatible behaviour and is covered by
+/// `test_load_gt_tolerates_non_finite_floats`.
+#[test]
+fn nan_detection_score_is_rejected() {
+    let cats = vec![cat(1, "person")];
+    let gt = dataset(
+        vec![img(1)],
+        cats.clone(),
+        vec![ann(1, [10.0, 10.0, 50.0, 50.0])],
+    );
+    let coco_gt = COCO::from_dataset(gt);
+
+    let mut bad = det(1, [10.0, 10.0, 50.0, 50.0], 0.9);
+    bad.score = Some(f64::NAN);
+
+    // `COCO` is not Debug, so match on the Result rather than using expect_err.
+    let msg = match coco_gt.load_res_anns(vec![bad]) {
+        Ok(_) => panic!("a NaN score must be rejected"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("NaN score"),
+        "error should name the problem, got: {msg}"
+    );
+
+    // A finite score on the same path still works.
+    assert!(
+        coco_gt
+            .load_res_anns(vec![det(1, [10.0, 10.0, 50.0, 50.0], 0.9)])
+            .is_ok(),
+        "finite scores must still load"
     );
 }

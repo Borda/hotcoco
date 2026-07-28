@@ -127,6 +127,113 @@ pub fn calibration_error(bins: &[CalibrationBin]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    /// The binning contract, over scores that honour the documented `[0, 1]`
+    /// precondition.
+    ///
+    /// Every existing quantitative test in this module puts all its mass in a
+    /// single bin, so the occupancy weighting in [`calibration_error`] is only
+    /// exercised here — a bug that ignored `count / total` would reproduce every
+    /// hand-computed fixture above and fail only at uneven occupancy.
+    #[test]
+    fn calibration_binning_contract() {
+        let mut rng = StdRng::seed_from_u64(0xCA11B);
+
+        for case in 0..5000 {
+            let n_bins = rng.random_range(1..=20);
+            let n = rng.random_range(0..=60);
+
+            // Skew the draw so occupancy is lopsided rather than uniform.
+            let heavy_low = rng.random_bool(0.5);
+            let scores: Vec<f64> = (0..n)
+                .map(|_| {
+                    if heavy_low && rng.random_bool(0.9) {
+                        rng.random_range(0.0..=0.1)
+                    } else {
+                        rng.random_range(0.0..=1.0)
+                    }
+                })
+                .collect();
+            let matched: Vec<bool> = (0..n).map(|_| rng.random_bool(0.5)).collect();
+
+            let bins = calibration_curve(&scores, &matched, n_bins);
+            let ctx = format!("case {case}: n_bins={n_bins} n={n}");
+
+            assert_eq!(bins.len(), n_bins, "{ctx}");
+            assert_eq!(
+                bins.iter().map(|b| b.count).sum::<usize>(),
+                n,
+                "{ctx}: bin counts do not partition the predictions"
+            );
+
+            for (i, b) in bins.iter().enumerate() {
+                if b.count == 0 {
+                    continue;
+                }
+                // A bin's mean confidence lies inside the bin. This is what fails
+                // if a score is bucketed into the wrong interval.
+                assert!(
+                    b.avg_confidence >= b.bin_lower - 1e-12
+                        && b.avg_confidence <= b.bin_upper + 1e-12,
+                    "{ctx}: bin {i} mean confidence {} outside [{}, {}]",
+                    b.avg_confidence,
+                    b.bin_lower,
+                    b.bin_upper
+                );
+                assert!(
+                    (0.0..=1.0).contains(&b.avg_accuracy),
+                    "{ctx}: bin {i} accuracy {} outside [0,1]",
+                    b.avg_accuracy
+                );
+            }
+
+            let (ece, mce) = calibration_error(&bins);
+            assert!((0.0..=1.0).contains(&ece), "{ctx}: ECE {ece} outside [0,1]");
+            assert!((0.0..=1.0).contains(&mce), "{ctx}: MCE {mce} outside [0,1]");
+            // ECE is a weighted mean of the per-bin gaps; MCE is their maximum.
+            assert!(mce >= ece - 1e-12, "{ctx}: MCE {mce} below ECE {ece}");
+        }
+    }
+
+    /// Scores outside `[0, 1]` are bucketed into the end bins and carry their raw
+    /// value into the bin mean, so `avg_confidence` escapes its own interval and
+    /// the resulting ECE can exceed 1.
+    ///
+    /// `calibration_curve` clamps the bin *index* but never the *score*
+    /// (`(score * n_bins) as usize` saturates at 0 for negatives and is capped at
+    /// `n_bins - 1` above). `[0, 1]` is a documented precondition, and detection's
+    /// adapter passes `score.unwrap_or(0.0)` straight from user JSON — so a model
+    /// exporting logits gets a silently meaningless number rather than an error.
+    ///
+    /// Pinned as known behaviour, not endorsed: see the input-validation item in
+    /// `docs/plans/AUDIT-2026-07.md`. Whether to clamp, reject, or keep documenting
+    /// it is a live decision; this test exists so the choice is a choice.
+    #[test]
+    fn out_of_range_scores_escape_their_bin() {
+        let bins = calibration_curve(&[5.0, -3.0], &[true, false], 10);
+
+        let last = bins.last().expect("10 bins");
+        assert_eq!(last.count, 1, "a score of 5.0 saturates into the last bin");
+        assert!(
+            last.avg_confidence > last.bin_upper,
+            "expected {} to escape the bin upper bound {}",
+            last.avg_confidence,
+            last.bin_upper
+        );
+
+        assert_eq!(bins[0].count, 1, "a negative score saturates into bin 0");
+        assert!(
+            bins[0].avg_confidence < bins[0].bin_lower,
+            "expected {} to fall below the bin lower bound {}",
+            bins[0].avg_confidence,
+            bins[0].bin_lower
+        );
+
+        let (ece, _) = calibration_error(&bins);
+        assert!(ece > 1.0, "expected a meaningless ECE above 1.0, got {ece}");
+    }
 
     #[test]
     fn bins_partition_every_prediction() {

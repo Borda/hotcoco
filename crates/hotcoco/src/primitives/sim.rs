@@ -394,6 +394,143 @@ pub fn oks_matrix(dt_keypoints: &[&[f64]], gt: &[GtPose<'_>], sigmas: &[f64]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    /// A box with realistic detection extents: at least one pixel on a side.
+    ///
+    /// Sub-pixel boxes are excluded deliberately — see
+    /// [`self_iou_degrades_for_subpixel_boxes`], which covers them and documents
+    /// the different guarantee that applies there.
+    fn rand_box(rng: &mut StdRng) -> [f64; 4] {
+        [
+            rng.random_range(0.0..1000.0),
+            rng.random_range(0.0..1000.0),
+            rng.random_range(1.0..200.0),
+            rng.random_range(1.0..200.0),
+        ]
+    }
+
+    /// The algebraic properties every caller assumes of the bbox kernel.
+    ///
+    /// Symmetry is scoped to non-crowd columns on purpose: a crowd column is
+    /// deliberately intersection-over-*area* (see [`iou_from_areas`]), which is
+    /// asymmetric by construction. `oks_matrix` is asymmetric unconditionally and
+    /// is excluded for the same reason — a symmetry property here would be
+    /// asserting something the design explicitly rejects.
+    #[test]
+    fn bbox_iou_algebraic_properties() {
+        let mut rng = StdRng::seed_from_u64(0x1005);
+
+        for case in 0..20000 {
+            let a = rand_box(&mut rng);
+            let b = rand_box(&mut rng);
+
+            let ab = bbox_iou_pair(a, b, false);
+            let ba = bbox_iou_pair(b, a, false);
+
+            // Not `<= 1.0`: the intersection is computed from differences of
+            // coordinates, so a near-identical pair can round marginally above
+            // the union. See the self-IoU note below for the mechanism.
+            assert!(
+                (0.0..=1.0 + 1e-12).contains(&ab),
+                "case {case}: IoU {ab} outside [0,1] for {a:?} vs {b:?}"
+            );
+            assert!(
+                (ab - ba).abs() < 1e-12,
+                "case {case}: asymmetric, {ab} vs {ba} for {a:?} vs {b:?}"
+            );
+
+            // Self-IoU is 1.0 to within a few ulp, but *not* exactly 1.0. The
+            // intersection width is `(x + w) - x`, which does not round-trip to
+            // `w`: [94.13, 88.47, 21.53, 46.14] against itself gives
+            // 0.9999999999999993. pycocotools computes it the same way, so this
+            // is the reference's arithmetic, not a defect to correct here.
+            //
+            // For boxes at least a pixel on a side the deviation is bounded
+            // around 1e-13, which clears `coco_match_floor(1.0)` by three orders
+            // of magnitude — that is what lets a clamped caller match exact
+            // duplicates at `t == 1.0`.
+            let self_iou = bbox_iou_pair(a, a, false);
+            assert!(
+                (self_iou - 1.0).abs() < 1e-12,
+                "case {case}: self-IoU {self_iou} not within 1e-12 of 1.0 for {a:?}"
+            );
+            assert!(
+                self_iou >= crate::primitives::greedy::coco_match_floor(1.0),
+                "case {case}: self-IoU {self_iou} falls below the match floor for {a:?}"
+            );
+        }
+    }
+
+    /// Sub-pixel boxes lose enough precision that a self-match at `t == 1.0`
+    /// fails *even with* [`coco_match_floor`] applied.
+    ///
+    /// Pinned so the limit is a known quantity rather than a surprise. The
+    /// intersection extent is `(y + h) - y`; when `h` is ~1e-5 against a
+    /// coordinate ~1e2 the subtraction keeps almost none of `h`'s significand, and
+    /// the self-IoU drifts by up to ~1.5e-9 — past the `1 - 1e-10` floor.
+    ///
+    /// No detection dataset has boxes this small (COCO's smallest annotations are
+    /// ~1 pixel), and the affected threshold is exactly 1.0, which no standard
+    /// metric sweep reaches. It matters only for a caller passing hand-built
+    /// degenerate geometry at `t == 1.0`.
+    ///
+    /// [`coco_match_floor`]: crate::primitives::greedy::coco_match_floor
+    #[test]
+    fn self_iou_degrades_for_subpixel_boxes() {
+        let thin = [
+            225.205_188_785_783_66,
+            691.079_072_122_579_8,
+            11.209,
+            2.431e-05,
+        ];
+        let self_iou = bbox_iou_pair(thin, thin, false);
+
+        assert!(
+            (self_iou - 1.0).abs() > 1e-10,
+            "expected measurable drift for a sub-pixel box, got {self_iou}"
+        );
+        assert!(
+            self_iou < crate::primitives::greedy::coco_match_floor(1.0),
+            "expected the drift to fall below the match floor, got {self_iou}"
+        );
+        // Still far too close to 1.0 to affect any real threshold.
+        assert!((self_iou - 1.0).abs() < 1e-8);
+    }
+
+    /// `rows()` switches to rayon at `MIN_PARALLEL_WORK`; both branches must agree.
+    ///
+    /// Straddles the threshold rather than testing one side of it, because the
+    /// bug this guards against is a kernel that is only correct in the branch the
+    /// small fixtures happen to take.
+    #[test]
+    fn bbox_iou_parallel_and_sequential_agree() {
+        let mut rng = StdRng::seed_from_u64(0x9E37_79B9);
+
+        // (d, g) pairs on both sides of MIN_PARALLEL_WORK == 1024.
+        for &(d, g) in &[(4, 4), (32, 31), (32, 32), (33, 32), (64, 40)] {
+            let dt: Vec<[f64; 4]> = (0..d).map(|_| rand_box(&mut rng)).collect();
+            let gt: Vec<[f64; 4]> = (0..g).map(|_| rand_box(&mut rng)).collect();
+            let iscrowd: Vec<bool> = (0..g).map(|_| rng.random_bool(0.2)).collect();
+
+            let matrix = bbox_iou(&dt, &gt, &iscrowd);
+
+            assert_eq!(matrix.len(), d);
+            for (di, row) in matrix.iter().enumerate() {
+                assert_eq!(row.len(), g);
+                for (gi, &got) in row.iter().enumerate() {
+                    let want = bbox_iou_pair(dt[di], gt[gi], iscrowd[gi]);
+                    assert_eq!(
+                        got,
+                        want,
+                        "d={d} g={g} (d*g={}) cell [{di}][{gi}] disagrees with the pair kernel",
+                        d * g
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_roundtrips_and_aliases() {

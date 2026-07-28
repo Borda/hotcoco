@@ -165,6 +165,132 @@ pub fn max_f_beta(precisions: &[f64], recalls: &[f64], beta: f64) -> Option<f64>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    /// The shape guarantees `precision_recall_curve` makes to its callers.
+    ///
+    /// `report()`'s PR curves and [`max_f_beta`] both read this output directly,
+    /// and both assume it is a well-formed curve rather than an arbitrary bag of
+    /// points. VOC interpolation makes precision non-increasing in `r_idx`, and
+    /// the two-pointer scan advances monotonically, so `detection_ptr` is
+    /// non-decreasing and every emitted threshold is genuinely reached.
+    #[test]
+    fn precision_recall_curve_is_well_formed() {
+        let mut rng = StdRng::seed_from_u64(0xC0_1174);
+        let rec_thrs = crate::params::default_rec_thrs();
+
+        for case in 0..5000 {
+            let nd = rng.random_range(1..=40);
+            let num_gt = rng.random_range(1..=25);
+
+            // Cumulative TP/FP over score-descending detections: each step adds
+            // one to exactly one of them, or to neither when ignored.
+            let (mut tp_cum, mut fp_cum) = (Vec::with_capacity(nd), Vec::with_capacity(nd));
+            let (mut tp, mut fp) = (0.0f64, 0.0f64);
+            for _ in 0..nd {
+                match rng.random_range(0..3) {
+                    0 => tp += 1.0,
+                    1 => fp += 1.0,
+                    _ => {} // ignored: contributes to neither
+                }
+                tp_cum.push(tp);
+                fp_cum.push(fp);
+            }
+
+            let (final_recall, curve) = precision_recall_curve(&tp_cum, &fp_cum, num_gt, &rec_thrs);
+            let ctx = format!("case {case}: nd={nd} num_gt={num_gt}");
+
+            // The recall a curve reports is the recall its last detection achieves.
+            assert!(
+                (final_recall - tp_cum[nd - 1] / num_gt as f64).abs() < 1e-12,
+                "{ctx}: final_recall {final_recall} disagrees with tp_cum/num_gt"
+            );
+
+            let mut prev_r_idx: Option<usize> = None;
+            let mut prev_precision = f64::INFINITY;
+            let mut prev_ptr = 0usize;
+
+            for &(r_idx, precision, ptr) in &curve {
+                assert!(r_idx < rec_thrs.len(), "{ctx}: r_idx {r_idx} out of range");
+                assert!(ptr < nd, "{ctx}: detection_ptr {ptr} out of range");
+                assert!(
+                    (0.0..=1.0).contains(&precision),
+                    "{ctx}: precision {precision} outside [0,1]"
+                );
+
+                if let Some(prev) = prev_r_idx {
+                    assert!(r_idx > prev, "{ctx}: r_idx went {prev} -> {r_idx}");
+                    assert!(
+                        precision <= prev_precision + 1e-12,
+                        "{ctx}: precision rose {prev_precision} -> {precision} at r_idx {r_idx}"
+                    );
+                    assert!(
+                        ptr >= prev_ptr,
+                        "{ctx}: detection_ptr went backwards {prev_ptr} -> {ptr}"
+                    );
+                }
+
+                // An emitted threshold must actually be reached by that detection.
+                assert!(
+                    tp_cum[ptr] / num_gt as f64 >= rec_thrs[r_idx] - 1e-12,
+                    "{ctx}: r_idx {r_idx} emitted at ptr {ptr} which does not reach it"
+                );
+
+                prev_r_idx = Some(r_idx);
+                prev_precision = precision;
+                prev_ptr = ptr;
+            }
+
+            // Thresholds are emitted exactly while they remain reachable, so the
+            // curve is a prefix of the grid.
+            let reachable = rec_thrs.iter().filter(|&&t| final_recall >= t).count();
+            assert_eq!(
+                curve.len(),
+                reachable,
+                "{ctx}: emitted {} points for {reachable} reachable thresholds \
+                 (final_recall {final_recall})",
+                curve.len()
+            );
+        }
+    }
+
+    /// `f_beta` is a weighted harmonic mean, so it is bounded by its inputs and
+    /// collapses to them when they agree.
+    #[test]
+    fn f_beta_algebraic_properties() {
+        let mut rng = StdRng::seed_from_u64(0xFBE7A);
+
+        for case in 0..20000 {
+            let p: f64 = rng.random_range(0.0..=1.0);
+            let r: f64 = rng.random_range(0.0..=1.0);
+            let beta: f64 = rng.random_range(0.1..=5.0);
+
+            let f = f_beta(p, r, beta);
+            let ctx = format!("case {case}: p={p} r={r} beta={beta}");
+
+            assert!((0.0..=1.0).contains(&f), "{ctx}: f_beta {f} outside [0,1]");
+            // A mean cannot exceed its largest input nor fall below its smallest.
+            assert!(f <= p.max(r) + 1e-12, "{ctx}: f_beta {f} above max(p,r)");
+            assert!(f >= p.min(r) - 1e-12, "{ctx}: f_beta {f} below min(p,r)");
+
+            // Equal inputs collapse to that value for every beta — the weighting
+            // has nothing left to trade off.
+            let equal = f_beta(p, p, beta);
+            assert!(
+                (equal - p).abs() < 1e-12,
+                "{ctx}: f_beta(p, p, beta) = {equal}, expected {p}"
+            );
+
+            // max_f_beta is a maximum over the curve, so it dominates every point.
+            if let Some(best) = max_f_beta(&[p], &[r], beta) {
+                assert!(
+                    (best - f).abs() < 1e-12,
+                    "{ctx}: max over one point != that point"
+                );
+            }
+        }
+    }
 
     #[test]
     fn f_beta_at_one_is_the_harmonic_mean() {

@@ -127,6 +127,107 @@ pub fn row_normalize(matrix: &[u64], num_classes: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    /// The marginals — every other test here asserts individual cells, and a cell
+    /// test cannot see a record that was dropped, double-counted, or landed in the
+    /// wrong lane.
+    ///
+    /// Two facts follow from the construction: every in-range record increments
+    /// exactly one cell, and which cell is fixed by the `(gt, dt)` pair. So the
+    /// grand total is the number of in-range records, each row sums to the ground
+    /// truths of that class, and each column to the predictions of that class. A
+    /// flipped rematchable flag upstream, or a length drift between the two label
+    /// arrays, shows up here and nowhere else.
+    #[test]
+    fn confusion_marginals_account_for_every_record() {
+        let mut rng = StdRng::seed_from_u64(0xC0F5);
+
+        for case in 0..5000 {
+            let num_classes = rng.random_range(1..=6);
+            let n = rng.random_range(0..=40);
+            let side = num_classes + 1;
+
+            // Deliberately draw labels past `num_classes` sometimes: out-of-range
+            // records are documented as skipped, so they must not land anywhere.
+            let label = |rng: &mut StdRng| -> Option<usize> {
+                match rng.random_range(0..4) {
+                    0 => None,
+                    1 => Some(rng.random_range(num_classes..num_classes + 3)),
+                    _ => Some(rng.random_range(0..num_classes)),
+                }
+            };
+            let gt: Vec<Option<usize>> = (0..n).map(|_| label(&mut rng)).collect();
+            let dt: Vec<Option<usize>> = (0..n).map(|_| label(&mut rng)).collect();
+
+            let m = confusion_matrix(&gt, &dt, num_classes);
+            let ctx = format!("case {case}: num_classes={num_classes} n={n}");
+            assert_eq!(m.len(), side * side, "{ctx}");
+
+            let in_range = |l: &Option<usize>| l.is_none_or(|v| v < num_classes);
+            let counted = gt
+                .iter()
+                .zip(&dt)
+                .filter(|(g, d)| {
+                    // `(None, None)` is documented as "nothing happened".
+                    !(g.is_none() && d.is_none()) && in_range(g) && in_range(d)
+                })
+                .count() as u64;
+
+            assert_eq!(
+                m.iter().sum::<u64>(),
+                counted,
+                "{ctx}: grand total disagrees with the number of in-range records"
+            );
+
+            for g in 0..side {
+                let row: u64 = m[g * side..(g + 1) * side].iter().sum();
+                let want = gt
+                    .iter()
+                    .zip(&dt)
+                    .filter(|(gl, dl)| {
+                        in_range(gl)
+                            && in_range(dl)
+                            && match gl {
+                                Some(v) => *v == g,
+                                // Unmatched predictions land in the background row.
+                                None => g == num_classes && dl.is_some(),
+                            }
+                    })
+                    .count() as u64;
+                assert_eq!(row, want, "{ctx}: row {g} sum {row} != {want}");
+            }
+
+            for d in 0..side {
+                let col: u64 = (0..side).map(|g| m[g * side + d]).sum();
+                let want = gt
+                    .iter()
+                    .zip(&dt)
+                    .filter(|(gl, dl)| {
+                        in_range(gl)
+                            && in_range(dl)
+                            && match dl {
+                                Some(v) => *v == d,
+                                // Undetected ground truths land in the background column.
+                                None => d == num_classes && gl.is_some(),
+                            }
+                    })
+                    .count() as u64;
+                assert_eq!(col, want, "{ctx}: column {d} sum {col} != {want}");
+            }
+
+            // Batching must equal one whole call — this is what lets callers
+            // parallelize over images and reduce afterwards.
+            if n >= 2 {
+                let split = rng.random_range(1..n);
+                let mut batched = vec![0u64; side * side];
+                accumulate_confusion(&mut batched, &gt[..split], &dt[..split], num_classes);
+                accumulate_confusion(&mut batched, &gt[split..], &dt[split..], num_classes);
+                assert_eq!(batched, m, "{ctx}: batched at {split} != whole");
+            }
+        }
+    }
 
     #[test]
     fn diagonal_counts_correct_predictions() {
