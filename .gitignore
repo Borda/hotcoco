@@ -152,8 +152,13 @@ package-lock.json
 .playwright-mcp/
 .serena/
 .superpowers/
+# Working papers — plans, spikes, audits, investigation notes. Local by design:
+# they are scratch thinking with a short half-life, not documentation anyone
+# should find in the repo. `docs/plans/` is the one place they go.
 docs/superpowers/
 docs/plans/
+docs/internal/
+docs/notes/
 
 # Generated reports
 report.pdf

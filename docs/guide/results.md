@@ -187,10 +187,18 @@ report["provenance"]   # 'parity_verified'
 ```
 
 `"parity_verified"` means the numbers were checked against the reference
-implementation — bbox, segm, and keypoints match pycocotools. `"extension"` means a
-real metric that has no reference implementation to be standard against, currently
-oriented bounding boxes. Extension numbers are fine for comparing your own models
-against each other; they are not leaderboard numbers.
+implementation — bbox, segm, and keypoints match pycocotools **at reference
+parameters**. `"extension"` means a real metric or configuration with no reference implementation checked against
+it. That covers more than geometry:
+
+- oriented bounding boxes, and Open Images — no reference implementation exists
+  for either
+- any run with non-default `iou_thrs`, `rec_thrs`, `max_dets`, area-range labels
+  or bounds, `use_cats=False`, or custom `kpt_oks_sigmas` — the metric is real,
+  but nobody checked *that* configuration against a reference
+
+Extension numbers are fine for comparing your own models against each other; they
+are not leaderboard numbers.
 
 The distinction is easy to lose once results reach a chart, so it travels with the
 data and survives saving and reloading:

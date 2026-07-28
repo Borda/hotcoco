@@ -85,6 +85,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`COCOeval::results()` and the Python result dicts are now byte-stable.** They
+  used `HashMap`, so three identical runs produced three different key orders and
+  anything archived, hashed, or diffed in CI churned for no reason. `EvalResults`
+  is `BTreeMap` throughout and the PyO3 dict builders sort before inserting, since
+  Python dicts preserve insertion order. `report::EvalReport` already did this.
+
+- **`reference_deviations()` covers four more ways a run stops being comparable.**
+  It now flags non-default area-range **bounds** (not just labels), `rec_thrs`,
+  `use_cats=False`, and custom `kpt_oks_sigmas`. Each changes what the metric
+  means while leaving its name intact, and each previously reported
+  `parity_verified`.
+
+  The area-range case was the sharpest: the check compared labels only, and the
+  Python `params.areaRng` setter deliberately *preserves* labels — so the one path
+  a caller takes to redefine "small" was the one the guard could not see.
+
+  The early return for modes without a checked reference is now an exhaustive
+  `match` rather than a default-allow `!=`, so a future `EvalMode` cannot inherit
+  `parity_verified` by omission.
+
+- **`summarize()` selects the nearest IoU threshold rather than every threshold
+  within 1e-9.** A params list holding two thresholds that close silently reported
+  their average under the name of one of them.
+
+- **Open Images: detections absorbed by a group-of box are now ignored, not counted
+  as true positives.** This changes Open Images AP values.
+
+  A group-of GT carries no false-negative penalty, so it never enters the recall
+  denominator. Crediting every detection that overlapped one as a true positive grew
+  the numerator against a denominator that could not grow, and `recall` was unbounded
+  above 1.0 — measured at 4.0 on a one-image case with three detections on a single
+  group-of box. Absorbed detections now score as neither true positives nor false
+  positives, which is what the reference `OpenImagesChallengeEvaluator` does and what
+  keeps the metric coherent.
+
+  Open Images reports only AP@0.5, and AP was unaffected by the old behavior, so most
+  users will see no change in the summary line. `AccumulatedEval.recall` is public,
+  however, and was wrong for any Open Images run with a detection on a group-of box.
+
+  Found by an auditability sweep, not by a parity test — Open Images has no reference
+  implementation checked against, which is why `report()` marks it
+  `Provenance::Extension`. The one test covering this path used detections at IoU 0.16
+  against the group-of box and never reached it; it now asserts the absorption itself
+  alongside `recall <= 1.0`.
+
 - **`primitives` narrowed to the matching kernels; the metric functions moved to
   `metrics`.** `primitives` now holds `sim`, `greedy`, and `assign` — the three kernels
   that produce matches. `primitives::counts` moved to `metrics::counts`, because
@@ -208,6 +253,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `pycocotools`/LVIS drop-in surface are permanent.
 
 ### Fixed
+
+- **`load_res()` rejects NaN detection scores.** Ranking sorts with
+  `partial_cmp(..).unwrap_or(Equal)`, which is not transitive once NaN is present:
+  the sort does not panic, it produces an arbitrary order, and AP becomes a
+  function of the sort implementation. Loading from a *file* was already safe —
+  `sanitize_non_finite` rewrites bare `NaN` to `null` — so this closes the
+  programmatic path.
+
+- **`compare()` paired per-category results by position instead of category id.**
+  When two evaluators carried different category lists — different GT files, or the
+  same file filtered differently — category *i* of model A was compared against
+  whatever model B evaluated in slot *i*, and reported under A's name. `compare()`
+  validates `eval_mode` and `iou_type` but never the category lists, so nothing
+  caught it. Both sides are now keyed by category id, and the iteration covers the
+  union so a category only one side evaluated is reported rather than silently
+  dropped.
+
+  Per-category deltas also treated a category missing from one side as a swing of up
+  to 1.0 rather than as no evidence, so a category absent from B sorted to the top of
+  the "worst regressions first" table. They now use the same `metric_delta` the
+  summary metrics and bootstrap CIs use.
+
+  Invisible to the previous tests, which all compared a model to itself — the case
+  where positional and id-keyed lookup are indistinguishable.
+
+- **`COCOeval::calibration()` now rejects detection scores outside `[0, 1]`.**
+  Previously they were silently accepted and produced a meaningless result.
+
+  Binning buckets by `score * n_bins` and clamps the *index*, not the score, so an
+  out-of-range value saturates into an end bin and carries its raw magnitude into
+  that bin's mean — a model exporting raw logits got a calibration error above 1.0
+  with nothing to indicate why. `[0, 1]` was already a documented precondition;
+  it is now enforced, with an error naming the offending score, how many
+  detections are affected, and what to do about it.
+
+- **Polygon rasterization now reproduces the reference's floating-point
+  arithmetic, making segmentation parity exact.** All 12 segmentation metrics moved
+  from ~1e-5 to ~1e-14 on COCO val2017.
+
+  `maskApi.c` writes `(int)(ys+s*t+.5)`, and both clang and gcc default to
+  `-ffp-contract=fast` — so every shipped pycocotools wheel fuses `s*t+ys` into a
+  single FMA, one rounding where the unfused form has two. Rust never contracts
+  implicitly, so the plain expression was a *more accurate* computation that
+  disagreed with the reference. `mask::fr_poly` now uses `f64::mul_add`.
+
+  It bites only at a boundary — with `s = -5/6`, `t = 57`, `ys = 75` the product
+  lands a hair either side of `-47.5`, so the two forms round to 28 and 27 and the
+  polygon differs by one pixel. Two of 400 random polygons hit it. But COCO
+  ground-truth segmentations *are* polygons, so this path builds every segm GT
+  mask, and one pixel was the whole residual.
+
+- **`mask.frPyObjects` produced empty masks for bounding-box input.** It routed
+  every coordinate list to the polygon rasterizer, which returns an empty RLE below
+  three points — so a 4-element box was read as a 2-point polygon and rasterized to
+  nothing, silently. It now dispatches on entry length the way pycocotools does:
+  exactly 4 values is a box, more than 4 is a flattened polygon. Entries shorter
+  than 4 raise instead of returning a blank mask.
+
+  hotcoco accepts boxes as either a list of lists or a numpy array; pycocotools
+  requires an array and raises `TypeError` on the list form. Being more permissive
+  is safe — nothing that worked against pycocotools changes.
+
+- **`mask.iou` and `mask.bbox_iou` rejected integer `iscrowd`.** COCO JSON stores
+  `iscrowd` as `0`/`1`, so the idiomatic
+  `maskUtils.iou(dt, gt, [a["iscrowd"] for a in anns])` — and any numpy array —
+  raised `TypeError` against a `Vec<bool>` parameter. Both now accept bools, ints,
+  and numpy arrays of either, matching what the crate already does when
+  deserializing annotations. Non-numeric entries still raise, naming the type.
+
+- **New: `scripts/parity_mask.py`,** a differential test of every `hotcoco.mask`
+  operation against `pycocotools.mask` — encode, decode, round-trip, area, toBbox,
+  iou across crowd modes, merge, the string codec, and `frPyObjects` for both
+  polygons and boxes. Compared bit-for-bit, since RLE is integer run lengths and
+  masks are `uint8`. The RLE codec was previously covered only transitively through
+  segmentation AP, which never reached `merge`, `frPyObjects`, or the string codec —
+  all three of the bugs above were in that gap.
+
+- **The default IoU and recall grids now match `numpy.linspace` bit-for-bit.**
+  This shifts metric values in the last few decimal places, closer to
+  pycocotools.
+
+  pycocotools builds both grids with `np.linspace`; hotcoco built them as
+  `0.5 + 0.05 * i` and `i / 100.0`. Those disagree with numpy by one ulp at 2 of
+  the 10 IoU thresholds and 10 of the 101 recall thresholds, because numpy
+  computes a single `step` once and multiplies where the other forms round twice
+  or divide exactly.
+
+  One ulp is not harmless on the recall grid. `recall = tp / num_gt` is a ratio of
+  small integers, so it lands exactly on a grid point routinely — at
+  `num_gt = 20, tp = 7` it equalled the old `rec_thrs[35]` bit-for-bit while
+  sitting strictly below numpy's, so the two-pointer scan stopped one detection
+  early and reported a different precision there. Neither grid is more *correct*,
+  which is exactly why matching the reference is free. `params::linspace` is now
+  the single owner of both, pinned against captured numpy bit patterns.
+
+- **Property tests over `primitives` and `metrics`.** Randomised coverage of the
+  matcher contract (injectivity, output agreement, threshold clearance, phase-2
+  eligibility), bbox IoU algebra, PR-curve well-formedness, `f_beta` bounds,
+  confusion marginals, and calibration binning — roughly 80k generated cases,
+  each verified to fail against an injected violation. These check hotcoco
+  against its own stated contracts rather than against a reference, which is the
+  only kind of check available on Open Images and oriented boxes, where no
+  reference exists. The Open Images recall bug above was found this way.
+
+- **Corrected the `primitives::greedy` note on exact-duplicate matching.** It
+  claimed identical geometry yields exactly `1.0`, and concluded that unclamped
+  callers therefore still match duplicates at `t == 1.0`. The intersection extent
+  is computed as `(x + w) - x`, which does not round-trip to `w` in binary
+  floating point, so a box against itself gives `0.9999999999999993`. pycocotools
+  computes it the same way — the kernel is right and unchanged; the note was
+  wrong, and backwards: the clamp is what makes duplicate matching work at
+  `t == 1.0`, not a redundancy. For sub-pixel geometry even the clamp is not
+  enough. Both regimes are now pinned by property tests.
 
 - **`from lvis import LVISEval` now works after `init_as_lvis()`.** lvis-api spells the
   class `LVISEval` with a capital E, and that is what Detectron2 and MMDetection import.

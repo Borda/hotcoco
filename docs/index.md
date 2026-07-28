@@ -29,7 +29,7 @@ A drop-in replacement for pycocotools that doesn't become the bottleneck — in 
 
 <div class="feature-card" markdown>
 <strong>Your metrics, unchanged</strong>
-<p>10,000+ parity tests against pycocotools. Your AP scores won't budge.</p>
+<p>All 34 metrics match pycocotools to floating-point precision (3.7e-14). Your AP scores don't budge.</p>
 </div>
 
 <div class="feature-card" markdown>
@@ -109,7 +109,7 @@ Benchmarked on COCO val2017 (5,000 images, 36,781 synthetic detections), Apple M
 
 </div>
 
-All 12 metrics verified against pycocotools on COCO val2017 with a 10,000+ case parity test suite.
+All 34 metrics — 12 bbox, 12 segm, 10 keypoints — match pycocotools on COCO val2017 to within 3.7e-14, the limit of double precision. A hypothesis-based fuzzer separately checks ~10,000 generated datasets.
 
 ## License
 

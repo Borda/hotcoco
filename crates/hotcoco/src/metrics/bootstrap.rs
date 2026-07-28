@@ -26,11 +26,31 @@
 //! # Sampling convention
 //!
 //! Each sample draws `n_units` indices **with replacement**, then deduplicates
-//! them into a set — so a sample holds roughly 63% of the units, not all of them.
+//! them into a set — so a sample holds roughly 63.2% of the units, not all of them.
 //! That is deliberate and standard for detection: the accumulators treat a unit as
 //! present or absent rather than weighted, so a repeated draw can't count twice.
 //! Sampling is seeded per-sample (`seed + i`), which makes results reproducible and
 //! order-independent under parallel execution.
+//!
+//! **This is therefore an m-of-n subsample, not the textbook bootstrap**, and the
+//! intervals are not directly comparable to `scipy.stats.bootstrap` — which
+//! resamples to full size with multiplicity. Two consequences worth stating:
+//!
+//! - Interval width is not the classical bootstrap's. Treat these as a spread
+//!   estimate over which *images* were included, which is the question detection
+//!   evaluation actually asks.
+//! - "The CI contains the point estimate" is **not** guaranteed, and is not
+//!   asserted as an invariant anywhere. Each sample sees ~63% of the data while the
+//!   point estimate uses 100%, so a skewed statistic can legitimately fall outside.
+//!   `lower <= upper` and `std_err >= 0` are the properties that do always hold.
+//!
+//! # Seed portability
+//!
+//! Reproducibility holds **within a build**. [`SmallRng`] is explicitly
+//! non-portable: it is a different algorithm on 32-bit targets, and `rand`'s own
+//! policy allows its output stream to change in any release. A seed does not pin a
+//! result across a `rand` upgrade or a different pointer width — do not cite one in
+//! a paper as if it did.
 
 use std::collections::HashSet;
 

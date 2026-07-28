@@ -83,7 +83,11 @@ train, val, test = coco.split(val_frac=0.15, test_frac=0.15, seed=42)
 ```
 
 The same `seed` always produces the same split — important for reproducibility
-across experiments:
+across experiments. One caveat worth knowing if you are pinning a split for a
+paper: that guarantee holds for a given installed version of hotcoco, not across
+all of them. The underlying generator is not portable across a `rand` upgrade or a
+32-bit target, so record the resulting image IDs — or the split files themselves —
+rather than relying on the seed to regenerate them years later.
 
 ```python
 # These are identical

@@ -59,7 +59,7 @@ Verify metric parity against pycocotools on COCO val2017:
 just parity
 ```
 
-Tolerances: bbox ≤ 1e-4, segm ≤ 2e-4, keypoints exact.
+Tolerance: 1e-12 for every iou_type. Measured worst case is 3.7e-14, so the gate is sized to floating-point noise and nothing else.
 
 ### After changing Python bindings
 

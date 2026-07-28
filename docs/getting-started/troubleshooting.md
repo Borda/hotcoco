@@ -162,7 +162,7 @@ COCO RLE uses `[height, width]` order, not `[width, height]`. If your masks look
 
 ### Metrics differ slightly from pycocotools
 
-hotcoco is verified to match pycocotools within floating-point tolerance (bbox ≤ 0.0001, segm ≤ 0.0002, keypoints exact). Differences within these tolerances are expected.
+hotcoco is verified to match pycocotools to floating-point precision — the worst measured difference across all 34 metrics on val2017 is 3.7e-14. Differences at that scale are the last bits of a `float64` and are expected; anything larger is a bug worth reporting.
 
 If you see differences larger than these tolerances, the most common cause is mismatched `iou_thrs` or `area_ranges` — double-check that `ev.params` matches your expected configuration.
 

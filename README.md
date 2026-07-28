@@ -23,7 +23,7 @@ Benchmarked on COCO val2017 (5,000 images, 36,781 synthetic detections), Apple M
 | segm      | 9.16s | 4.36s (2.1×) | **0.49s (18.6×)** |
 | keypoints | 2.62s | 1.78s (1.5×) | **0.21s (12.7×)** |
 
-Speedups in parentheses are vs pycocotools. Results verified against pycocotools on COCO val2017 with a 10,000+ case parity test suite — your AP scores won't change.
+Speedups in parentheses are vs pycocotools. All 34 COCO metrics match pycocotools to floating-point precision on val2017 — worst measured difference 3.7e-14, so your AP scores don't change. A hypothesis-based fuzzer separately checks ~10,000 generated datasets against pycocotools at 1e-10.
 
 At scale (Objects365 val — 80k images, 365 categories, 1.2M detections), hotcoco completes in **18s** vs 721s for pycocotools and 251s for faster-coco-eval — **39×** and **14×** faster respectively — while using half the memory. See the [full benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
 
