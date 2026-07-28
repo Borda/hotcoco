@@ -10,14 +10,74 @@ hotcoco is a pure Rust port of [pycocotools](https://github.com/ppwwyyxx/cocoapi
 - **Python bindings:** PyO3/maturin in `hotcoco-pyo3`, exposed as the `hotcoco` Python package.
 - **CLI:** `hotcoco-cli` binary wrapping the Rust library.
 
-### Key Architecture
+### Build and binding mechanics
 
 - Single root `pyproject.toml` acts as both maturin build config and Python package definition; `manifest-path = "crates/hotcoco-pyo3/Cargo.toml"` points maturin at the cdylib. `[tool.uv] package = false` means uv won't auto-build — always use `just build` explicitly.
 - `hotcoco-pyo3` uses `hotcoco-core` as the Cargo dependency alias for `hotcoco` to avoid name collision with the `hotcoco` Python module name
 - Python bindings return plain dicts (not wrapped Rust structs) matching pycocotools conventions
 - Mask operations handle numpy row-major <-> Rust column-major transposition in the PyO3 layer
 - `cargo build --workspace` will fail at link time for hotcoco-pyo3 (expected — cdylib needs Python). Use `cargo check` instead, or build via maturin.
-- **Type stubs:** `python/hotcoco/__init__.pyi` is hand-written and must be updated whenever the Python API changes (new methods, renamed parameters, changed return types). Run `uv run pytest scripts/test_stubs.py` to check for drift. The test catches missing names but not signature mismatches — review the stub manually when changing signatures.
+- **Type stubs:** four hand-written files must track the Python API — `python/hotcoco/{__init__,detection,metrics,primitives}.pyi`. Run `uv run pytest scripts/test_stubs.py` for drift, and `uv run pyright` to type-check the shipped package against them. The tests check **names only, never signatures** — review those by hand when changing a signature. For `metrics` they check both directions (stub ⊇ `__all__`, and `__all__` ⊇ the extension module), because a new `#[pyfunction]` that the facade forgets to re-export is otherwise unreachable from Python with the suite green.
+
+### The layered architecture
+
+`crates/hotcoco/src/` splits by **what a function produces**, not by which family calls it:
+
+| Layer | Produces | Contents |
+|---|---|---|
+| `primitives` | matches and similarities | `sim`, `greedy`, `assign` |
+| `metrics` | numbers from matches | `counts`, `calibration`, `confusion`, `bootstrap` |
+| `report` | the cross-family output contract | `EvalReport`, `Provenance` |
+| `detection` | the detection family driver | `COCOeval` + AP/AR, LVIS, Open Images, TIDE |
+| `quality` | dataset introspection | health checks, statistics |
+
+`primitives` and `metrics` are **free functions over flat arrays** — callable with no
+evaluator, the way `sklearn.metrics` and `torchmetrics.functional` are. `COCOeval`'s
+analysis methods (`calibration`, `confusion_matrix`, `compare`, `f_scores`) are
+*adapters*: they decide which detections count, marshal them into arrays, and call the
+shared function. **Put metric math in `metrics`, never in a `COCOeval` method** — the
+alternative is what 1.0 spent its whole cycle undoing.
+
+Dependencies run one way: `detection` → `metrics` → `primitives`. Panoptic, tracking,
+and concepts will be siblings of `detection`, composing the same two layers.
+
+Detection keeps what is genuinely detection-shaped: TIDE's Cls/Loc/Both/Dupe/Bkg
+taxonomy is about box localization vs classification, and `image_diagnostics` reports
+per-image fields. Those would need redesigning, not moving, to serve another family.
+
+### Architecture conformance is enforced
+
+`crates/hotcoco/tests/architecture.rs` fails the build on: a second IoU formula, a
+second greedy matcher, a second `MIN_PARALLEL_WORK`, direct access to the
+whole-dataset `ious` cache, and layer violations.
+
+**Never weaken these to make a build pass.** The layering checks are *allowlists* on
+purpose. Banning `crate::detection` was tried twice and was worthless both times: the
+crate re-exports the same types ~25 times at its root, and `super::` written in a
+`mod.rs` reaches those too. A banlist must enumerate every path to a thing and a
+re-export silently adds one; an allowlist enumerates what a layer is *for*. Widening
+one is a decision about what the layer means — make it deliberately, and prove the
+check still fails on a real violation before trusting it.
+
+### Conventions with exactly one owner
+
+Each of these was duplicated across 3–5 sites before 1.0. Call the owner; don't
+re-derive.
+
+- **`-1.0` means "not computed for this configuration"** — never a low score. It shows
+  up for an area range with no ground truth, or a category absent from the split.
+  `detection::summarize::mean_or_missing` is the only producer; `report()` filters on
+  it before emitting a per-class metric and `metrics::counts::max_f_beta` skips it.
+- **`Params::all_area_idx()`** is the only `"all"` area-range lookup.
+- **`params::default_rec_thrs()`** (a free function, not a `Params` method) is the only
+  101-point recall grid. A caller using the `metrics` functions directly needs the same
+  grid `COCOeval` defaults to, or the two silently disagree about what AP means.
+- **Provenance is a property of the whole configuration**, not of an `iou_type`.
+  Anything that can make a run incomparable to a reference belongs in
+  `COCOeval::reference_deviations()` — the single predicate driving both the
+  `summarize()` warnings and `Provenance`. Adding a condition at the `report()` call
+  site instead produces a silent downgrade with no warning, which is the exact failure
+  it was written to prevent.
 
 ## Metric Parity
 
@@ -27,6 +87,7 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - Verified on val2017: keypoints exact, bbox within 0.0001, segm within 0.0002.
 - When in doubt, run differential tests against pycocotools on real COCO data before declaring a task complete.
 - After any change to evaluation logic, run `/parity` — it holds the full verification sequence and the expected tolerances.
+- **Not everything has a reference.** `scripts/parity.py` covers pycocotools (bbox/segm/keypoints), `parity_lvis.py` covers LVIS, `parity_tide.py` covers tidecv. Open Images and oriented boxes have **no reference implementation**, which is why `report()` marks them `Provenance::Extension` — that downgrade is correct, not a bug to fix.
 
 ## Testing
 
@@ -35,6 +96,38 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - `just test` runs `cargo test` + fast Python regression tests (`scripts/test_parity.py`) — safe for CI, completes in under 30s.
 - `just fuzz` runs the hypothesis-based fuzzer (`scripts/fuzz_parity.py`) — use to hunt for parity bugs, not in CI. Takes several minutes.
 - Model: use the fuzzer to *find* bugs, then prove fixes with Rust integration tests in `crates/hotcoco/tests/`.
+
+Running a single test:
+
+```bash
+cargo test -p hotcoco --test integration_test <test_name>
+cargo test -p hotcoco --test architecture            # just the conformance checks
+cargo test -p hotcoco --lib metrics::counts          # one module's unit tests
+uv run pytest scripts/test_stubs.py::<test_name>
+```
+
+### What CI does and does not check
+
+- `just semver` gates the public Rust API (needs `cargo install cargo-semver-checks --locked`).
+  **Do not pin its baseline.** A pinned baseline plus a major version bump runs 0 checks
+  and still prints "no semver update required" — a gate that passes while checking
+  nothing. The `semver` recipe carries a comment explaining this; leave it there.
+- **`typos` runs in neither CI nor the pre-commit hook** — only via `/review`. The
+  `locale = "en-us"` policy in `_typos.toml` is therefore advisory, and the repo has
+  pre-existing British spellings in older prose. Fix the ones your change introduces;
+  don't rewrite shipped CHANGELOG entries.
+- **Real-data parity is local-only.** `data/` is gitignored, so `just parity` cannot run
+  in CI. The Python CI job asserts only that 12 metrics come out and one is positive —
+  it would not catch a wrong number. Run parity locally before claiming metrics hold.
+
+### Verifying a check can fail
+
+When you add or change a guard — a conformance test, a parity script, a CI gate — prove
+it fails on a real violation before trusting it. This repo has produced the same defect
+repeatedly: `parity_tide.py` exited 0 in both failure modes, a pinned semver baseline
+ran 0 checks, the layering tests passed against four spellings of the import they
+banned. In each case the check looked green and verified nothing. Injecting a violation
+and watching it fail takes a minute and is not optional.
 
 ## Tool Preferences
 

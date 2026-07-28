@@ -355,7 +355,7 @@ if report["provenance"] != "parity_verified":
 
 #### Plotting the curves
 
-`curves` holds the aggregate precision-recall curve for each IoU threshold, meaned over
+`curves` holds the aggregate precision-recall curve for each IoU threshold, averaged over
 categories at `area="all"` and the largest `max_dets` — the slice a chart actually draws.
 All PR curves share the `"rec_thrs"` x-axis.
 

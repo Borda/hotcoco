@@ -35,11 +35,13 @@ Rust Core (all logic) ─┤
 
 Added `EvalReport` — the shape every family reports in — with enforced `Provenance`, so extension numbers cannot silently read as leaderboard numbers. Added the `hotcoco.detection` namespace and fixed `import hotcoco.mask`, which had never worked.
 
+Completed the functional layer, which had stopped half-built. `primitives` already exposed the kernels as free functions, but every derived metric — calibration, confusion, bootstrap — had been written as a `COCOeval` method, so scoring anything outside the COCO pipeline meant reimplementing it. Those moved into `metrics` as functions over flat arrays (`average_precision`, `precision_recall_curve`, `calibration_curve`, `calibration_error`, `confusion_matrix`), the shape `sklearn.metrics` and `torchmetrics.functional` use, and both namespaces ship in Python. `primitives` narrowed to the three matching kernels, splitting the two by what a function produces — matches versus numbers from matches — with `tests/architecture.rs` enforcing the direction of the dependency. `COCOeval`'s analysis methods became adapters over the same functions, so the object API and the functional API cannot diverge.
+
 **Numbers did not move.** Every step was gated byte-identical against a pinned baseline — stats, precision/recall/scores arrays, every `evalImgs` entry, printed output, and the analysis layer — across bbox, segm, and keypoints on full val2017 plus LVIS-federated and threshold-boundary fixtures. `cargo-semver-checks` confirms the entire reorganisation is invisible from outside the crate.
 
 The one deliberate behavior change: detection matching now applies pycocotools' `min(t, 1-1e-10)` match floor, closing a real divergence at `iou_thr=1.0`. Inert below 1.0, so no published metric moves.~~
 
-**Compatibility.** Python is untouched — `hotcoco.COCOeval`, `init_as_pycocotools()`, and the `pycocotools`/LVIS drop-in surface are permanent. Rust code using `hotcoco::eval`, `hotcoco::hierarchy`, or `hotcoco::healthcheck` keeps compiling via deprecated aliases, kept through the 1.x series and removed at 2.0. Crate-root paths are not deprecated.
+**Compatibility.** Python is untouched — `hotcoco.COCOeval`, `init_as_pycocotools()`, and the `pycocotools`/LVIS drop-in surface are permanent, and everything new is additive. On the Rust side five pre-1.0 *module* paths are gone (`eval`, `hierarchy`, `healthcheck`, `types::*Stats`, `primitives::counts`) with no aliases: 0.x carried no stability promise under SemVer, and the crate-root re-exports — `hotcoco::COCOeval`, `hotcoco::Hierarchy`, `hotcoco::SummaryStats` and the rest — absorbed every move unchanged. 1.0 is where the surface is fixed.
 
 ### Evaluation Primitives Foundation
 

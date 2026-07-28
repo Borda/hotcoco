@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
+  functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
+  JSON:
+
+  ```python
+  from hotcoco import metrics, primitives
+
+  ap = metrics.average_precision(scores, matched, num_gt=len(ground_truths))
+  ece, mce = metrics.calibration_error(scores, matched)
+  cm = metrics.confusion_matrix(gt_labels, dt_labels, num_classes=80)
+  rows, cols = primitives.lsap(similarity, maximize=True)
+  ```
+
+  This is the shape `sklearn.metrics` and `torchmetrics.functional` use. Before 1.0
+  every one of these lived only as a `COCOeval` method, so scoring anything that had
+  not been through the COCO pipeline meant reimplementing it.
+
+  The two namespaces split by what a function *produces*: `primitives` produces matches
+  and similarities (`lsap`, `bbox_iou`, `mask_iou`), `metrics` produces numbers from
+  matches (`average_precision`, `precision_recall_curve`, `calibration_curve`,
+  `calibration_error`, `confusion_matrix`). `tests/architecture.rs` enforces the
+  boundary: `metrics` may not import a family driver, and `primitives` may not import
+  `metrics`.
+
+  **Purely additive.** Every `COCOeval` method still exists and returns exactly what it
+  did — the methods are now thin adapters that marshal `eval_imgs` into arrays and call
+  these functions. Verified byte-identical on val2017 bbox/segm/keypoints plus LVIS and
+  boundary fixtures, including bootstrap confidence intervals.
+
+  Bootstrap CIs (`metrics::bootstrap::bootstrap_ci`) and greedy matching
+  (`primitives::greedy::greedy_match`) are Rust-only for now — see
+  [the API reference](https://derekallman.github.io/hotcoco/api/metrics/) for why.
+
 - `hotcoco.detection` — the first metric-family namespace, exposing `COCOeval`,
   `Params`, `Hierarchy`, and `compare`. Panoptic, tracking, and concepts follow the same
   shape, so code evaluating several families reads consistently:
@@ -20,8 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   top level. The LVIS helpers stay top-level too, since they exist to mirror
   `lvis-api`'s import paths.
 
-- `primitives::report::EvalReport` — the shape every metric family reports in, and the
-  last pending item in `primitives`. Carries headline `metrics`, nested `per_class` and
+- `hotcoco::report::EvalReport` — the shape every metric family reports in. Carries headline `metrics`, nested `per_class` and
   `per_group` breakdowns, renderable `curves`, and the producing `params`, so a renderer
   that can draw a detection result will be able to draw a panoptic or tracking one
   unchanged.
@@ -53,19 +85,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`primitives` narrowed to the matching kernels; the metric functions moved to
+  `metrics`.** `primitives` now holds `sim`, `greedy`, and `assign` — the three kernels
+  that produce matches. `primitives::counts` moved to `metrics::counts`, because
+  computing AP from match flags is scoring, not matching.
+
+  `EvalReport` and `Provenance` live in their own top-level `hotcoco::report` — they
+  are the cross-family output *contract*, a peer of `metrics` and `primitives`
+  rather than a member of either, and `metrics` is free functions over arrays. The
+  crate-root `hotcoco::EvalReport` and `hotcoco::Provenance` paths are unchanged.
+
+- The detection analysis methods are now adapters over `metrics`. `COCOeval::calibration`,
+  `confusion_matrix`, and `compare` used to each own their own math; the math now lives
+  in `metrics::calibration`, `metrics::confusion`, and `metrics::bootstrap`, and the
+  methods marshal `eval_imgs` into arrays and call it. Return types and values are
+  unchanged. `bootstrap_ci` takes the statistic as a closure, so it computes intervals
+  for any resampled quantity rather than only detection metric deltas.
+
+  Detection keeps what is genuinely detection-shaped: TIDE's Cls/Loc/Both/Dupe/Bkg
+  taxonomy is about box localization versus classification, and `image_diagnostics`
+  reports per-image fields. Both stay in `detection`.
+
+- `detection::metrics` (the internal `MetricDef` catalog) is now `detection::catalog`, so
+  it no longer collides with the crate-level `metrics`. It was already private.
+
 - **The Rust `eval` module is now `detection`.** `eval` was its name while detection was
   the only metric family in the crate; it is now one family beside the panoptic,
-  tracking, and concepts families that follow. `hotcoco::eval::*` keeps resolving
-  through a deprecated alias for the whole 1.x series, with removal slated for 2.0, so
-  existing Rust code compiles unchanged (with a deprecation warning). Every crate-root
-  path — `hotcoco::COCOeval`, `hotcoco::EvalImg` and the rest — is untouched and not
-  deprecated.
+  tracking, and concepts families that follow.
 
   **The Python API is completely unaffected.** `hotcoco.COCOeval`, `init_as_pycocotools()`,
-  and the whole `pycocotools`/LVIS drop-in surface are Tier 1 and permanent.
+  and the whole `pycocotools`/LVIS drop-in surface are permanent compatibility
+  guarantees.
 
-- Two relocations, each with a deprecated compatibility alias on the same terms as
-  `eval` → `detection` (kept for 1.x, removed at 2.0):
+- Two relocations for the same reason:
   - `hotcoco::hierarchy` → `hotcoco::detection::hierarchy`. The Open Images label
     hierarchy is consumed only by the detection family's GT/DT expansion, so its
     top-level placement wrongly implied it was a cross-family primitive.
@@ -73,11 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     and the `SummaryStats`/`CategoryStats`/`DatasetStats` DTOs, which moved out of
     `hotcoco::types`. Dataset quality is its own tier, distinct from the schema
     (`types` says what a COCO file may contain) and from the metrics engine
-    (`detection` scores predictions against one). `hotcoco::types::SummaryStats` and
-    friends still resolve via deprecated re-exports.
-
-  All crate-root re-exports — `hotcoco::Hierarchy`, `hotcoco::HealthReport`,
-  `hotcoco::SummaryStats` and the rest — are unchanged and **not** deprecated.
+    (`detection` scores predictions against one).
 
 - `eval/types.rs` is dissolved. It held types for four unrelated concerns plus two
   sibling features' public types, so "where is `EvalImg` defined?" answered "in a junk
@@ -129,7 +177,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ErrType::as_str` also replaces a second, separate enumeration of the variants in
   the aggregation step.
 
+### Removed
+
+- **Five pre-1.0 Rust *module* paths, with no compatibility aliases.** `cargo-semver-checks`
+  reports 47 removed paths, and every one is under these five:
+
+  | Gone | Use |
+  |---|---|
+  | `hotcoco::eval::*` | `hotcoco::detection::*` |
+  | `hotcoco::hierarchy` | `hotcoco::detection::hierarchy` |
+  | `hotcoco::healthcheck` | `hotcoco::quality::healthcheck` |
+  | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | `hotcoco::quality::*` |
+  | `hotcoco::primitives::counts` | `hotcoco::metrics::counts` |
+
+  **No crate-root path was removed.** `hotcoco::COCOeval`, `hotcoco::EvalImg`,
+  `hotcoco::Hierarchy`, `hotcoco::HealthReport`, `hotcoco::SummaryStats` and the rest
+  resolve exactly as they did in 0.5.0, so code using them needs no edit — which is
+  most code, since the module paths are the verbose form.
+
+  0.x is pre-release under SemVer ("anything MAY change at any time"), so these paths
+  carried no stability promise. An earlier draft of 1.0 kept them as deprecated
+  aliases; that was dropped because it committed the crate to carrying a compatibility
+  tier through all of 1.x and removing it at 2.0 — a multi-year obligation to a Rust
+  module surface with no known consumer, when the crate-root paths already absorb the
+  moves. A compile error naming the new path is a better migration experience than a
+  silent alias.
+
+  **Python is entirely unaffected** and always was: these are Rust module paths.
+  `hotcoco.COCOeval`, `hotcoco.mask`, `init_as_pycocotools()`, and the
+  `pycocotools`/LVIS drop-in surface are permanent.
+
 ### Fixed
+
+- **`from lvis import LVISEval` now works after `init_as_lvis()`.** lvis-api spells the
+  class `LVISEval` with a capital E, and that is what Detectron2 and MMDetection import.
+  hotcoco exported only `LVISeval`, following pycocotools' `COCOeval` — so `init_as_lvis()`
+  registered a `lvis` module that the canonical import could not use. Both spellings now
+  exist and are the same object. Found by the 1.0 third-party-consumer smoke test, which
+  is now a regression test.
 
 - `scripts/parity_tide.py` can now fail. It exited 0 in both failure modes: when a ΔAP
   exceeded tolerance it printed "Some values exceed tolerance" and fell through, and

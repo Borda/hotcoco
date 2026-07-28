@@ -217,7 +217,7 @@ plt.ylabel("precision")
 plt.legend()
 ```
 
-These are meaned over categories at `area="all"` and the largest `max_dets` — the
+These are averaged over categories at `area="all"` and the largest `max_dets` — the
 slice a chart draws. For per-category curves, read the `eval["precision"]` array
 directly, as shown below.
 

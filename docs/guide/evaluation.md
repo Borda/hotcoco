@@ -662,6 +662,19 @@ coco eval --gt annotations.json --dt detections.json \
 
 See [`calibration`](../api/cocoeval.md#calibration) in the API reference for full parameter details.
 
+!!! tip "Calibrating something that isn't COCO detection"
+    `calibration()` is a thin adapter — it decides which detections count, then
+    calls [`metrics.calibration_error`](../api/metrics.md#calibration_error).
+    That function takes two plain arrays and needs no evaluator:
+
+    ```python
+    from hotcoco import metrics
+
+    ece, mce = metrics.calibration_error(scores, matched, n_bins=10)
+    ```
+
+    Same for AP and the confusion matrix. See [metrics](../api/metrics.md).
+
 ---
 
 ## F-scores
