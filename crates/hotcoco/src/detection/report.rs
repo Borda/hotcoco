@@ -1,21 +1,105 @@
 //! Presentation of summary metrics: printed lines, result maps, and DTOs.
 //!
-//! Everything here formats or reshapes numbers that [`super::summarize`] already
-//! computed — this module performs no evaluation math of its own. At 1.0 it also
-//! becomes where the detection driver assembles `primitives::report::EvalReport`.
+//! Everything here formats or reshapes numbers computed elsewhere: the reduction
+//! is [`super::summarize`]'s, the metric formulas are
+//! [`metrics::counts`](crate::metrics::counts)'. What this module owns is the
+//! presentation — which numbers appear, under which names, in which order — plus
+//! assembling [`EvalReport`].
 
 use std::collections::HashMap;
 
 use crate::params::{IouType, Params, default_iou_thrs};
-use crate::primitives::report::{EvalReport, Provenance};
+use crate::report::{EvalReport, Provenance};
 
 use super::accumulate::AccumulatedEval;
-use super::metrics::build_metric_defs;
+use super::catalog::build_metric_defs;
 use super::results::{EvalParams, EvalResults};
-use super::summarize::{per_cat_ap_static, summarize_impl};
+use super::summarize::{mean_or_missing, per_cat_ap_static, summarize_impl};
 use super::{COCOeval, EvalMode};
 
 impl COCOeval {
+    /// Ways this run's parameters depart from the reference configuration.
+    ///
+    /// Empty means the numbers are directly comparable to the reference
+    /// implementation's published output. Non-empty means they are not, and it is
+    /// the *same* fact that drives both the `summarize()` warnings and
+    /// [`Provenance`]: a report claiming `ParityVerified` on custom `iou_thrs` is
+    /// claiming a check nobody ran.
+    ///
+    /// This is the *whole* comparability predicate, not part of one. An earlier
+    /// version checked only the parameters here and tested geometry and eval mode
+    /// separately at the `report()` call site — so an OBB run with default params,
+    /// and every Open Images run, were downgraded to `Extension` while `summarize()`
+    /// printed no warning at all. Those are the two *largest* comparability breaks,
+    /// and they were the silent ones. Anything that can make a run incomparable
+    /// belongs in this list.
+    pub(super) fn reference_deviations(&self) -> Vec<String> {
+        let mut out = Vec::new();
+
+        // No reference implementation exists for these at all, at any parameters.
+        if self.params.iou_type == IouType::Obb {
+            out.push(
+                "oriented-box evaluation has no reference implementation to check against; \
+                 these numbers are a hotcoco extension, not leaderboard-comparable."
+                    .to_string(),
+            );
+        }
+        if self.eval_mode == EvalMode::OpenImages {
+            out.push(
+                "Open Images evaluation has no reference implementation checked against; \
+                 these numbers are a hotcoco extension, not leaderboard-comparable."
+                    .to_string(),
+            );
+        }
+
+        // Parameter deviations only mean something where there is a reference to
+        // deviate *from*: `scripts/parity.py` (pycocotools) and `parity_lvis.py`.
+        if self.eval_mode != EvalMode::Coco && self.eval_mode != EvalMode::Lvis {
+            return out;
+        }
+
+        let defaults = Params::new(self.params.iou_type);
+
+        if self.params.iou_thrs != default_iou_thrs() {
+            out.push(
+                "iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines may show -1.000."
+                    .to_string(),
+            );
+        }
+
+        let expected_max_dets = if self.eval_mode == EvalMode::Lvis {
+            vec![300usize]
+        } else {
+            defaults.max_dets.clone()
+        };
+        if self.params.max_dets != expected_max_dets {
+            out.push(format!(
+                "max_dets differ from expected ({:?}). AR lines may use unexpected max_dets values.",
+                expected_max_dets
+            ));
+        }
+
+        let default_labels: Vec<&str> = defaults
+            .area_ranges
+            .iter()
+            .map(|ar| ar.label.as_str())
+            .collect();
+        if !self
+            .params
+            .area_ranges
+            .iter()
+            .map(|ar| ar.label.as_str())
+            .eq(default_labels.iter().copied())
+        {
+            out.push(format!(
+                "area range labels differ from default ({:?}). Per-size metrics may not find their area range.",
+                default_labels
+            ));
+        }
+
+        out
+    }
+
     /// Return the summary metric lines as strings without printing.
     ///
     /// Computes stats (setting `self.stats`) and returns each formatted line.
@@ -29,51 +113,8 @@ impl COCOeval {
             }
         };
 
-        // Warn if parameters differ from what the hardcoded summary display expects.
-        // OID has its own defaults — skip these COCO-specific warnings.
-        if self.eval_mode == EvalMode::Coco || self.eval_mode == EvalMode::Lvis {
-            let defaults = Params::new(self.params.iou_type);
-            let mut warnings = Vec::new();
-
-            let default_iou = default_iou_thrs();
-            if self.params.iou_thrs != default_iou {
-                warnings.push(
-                    "iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines may show -1.000."
-                        .to_string(),
-                );
-            }
-            let expected_max_dets = if self.eval_mode == EvalMode::Lvis {
-                vec![300usize]
-            } else {
-                defaults.max_dets.clone()
-            };
-            if self.params.max_dets != expected_max_dets {
-                warnings.push(format!(
-                    "max_dets differ from expected ({:?}). AR lines may use unexpected max_dets values.",
-                    expected_max_dets
-                ));
-            }
-            if !self
-                .params
-                .area_ranges
-                .iter()
-                .map(|ar| ar.label.as_str())
-                .eq(defaults.area_ranges.iter().map(|ar| ar.label.as_str()))
-            {
-                let default_labels: Vec<&str> = defaults
-                    .area_ranges
-                    .iter()
-                    .map(|ar| ar.label.as_str())
-                    .collect();
-                warnings.push(format!(
-                    "area range labels differ from default ({:?}). Per-size metrics may not find their area range.",
-                    default_labels
-                ));
-            }
-
-            for w in &warnings {
-                eprintln!("Warning: {}", w);
-            }
+        for w in &self.reference_deviations() {
+            eprintln!("Warning: {}", w);
         }
 
         // Delegate the actual computation to the free function.
@@ -139,7 +180,7 @@ impl COCOeval {
 
     /// Index of the "all" area range, or 0 if not found.
     fn area_all_idx(&self) -> usize {
-        self.params.area_range_idx("all").unwrap_or(0)
+        self.params.all_area_idx()
     }
 
     /// Metric key names in canonical display order for the current evaluation mode.
@@ -240,7 +281,6 @@ impl COCOeval {
             None => return HashMap::new(),
         };
 
-        let beta2 = beta * beta;
         let a_idx = self.area_all_idx();
         let m_idx = eval.shape.m - 1;
 
@@ -266,26 +306,15 @@ impl COCOeval {
 
         for t_idx in 0..eval.shape.t {
             for k_idx in 0..eval.shape.k {
-                let max_f = self
-                    .params
-                    .rec_thrs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(r_idx, &r)| {
-                        let p_idx = eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
-                        let p = eval.precision[p_idx];
-                        if p < 0.0 {
-                            return None;
-                        }
-                        let denom = beta2 * p + r;
-                        if denom < f64::EPSILON {
-                            return Some(0.0);
-                        }
-                        Some((1.0 + beta2) * p * r / denom)
+                let precisions: Vec<f64> = (0..eval.shape.r)
+                    .map(|r_idx| {
+                        eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
                     })
-                    .fold(f64::NEG_INFINITY, f64::max);
+                    .collect();
 
-                if max_f > f64::NEG_INFINITY {
+                if let Some(max_f) =
+                    crate::metrics::counts::max_f_beta(&precisions, &self.params.rec_thrs, beta)
+                {
                     sum_all += max_f;
                     count_all += 1;
                     if is_t50[t_idx] {
@@ -300,9 +329,6 @@ impl COCOeval {
             }
         }
 
-        let mean_or_neg1 =
-            |sum: f64, count: usize| -> f64 { if count == 0 { -1.0 } else { sum / count as f64 } };
-
         let prefix = if (beta - 1.0).abs() < 1e-9 {
             "F1".to_string()
         } else {
@@ -310,9 +336,9 @@ impl COCOeval {
         };
 
         let mut out = HashMap::new();
-        out.insert(prefix.clone(), mean_or_neg1(sum_all, count_all));
-        out.insert(format!("{}50", prefix), mean_or_neg1(sum_50, count_50));
-        out.insert(format!("{}75", prefix), mean_or_neg1(sum_75, count_75));
+        out.insert(prefix.clone(), mean_or_missing(sum_all, count_all));
+        out.insert(format!("{}50", prefix), mean_or_missing(sum_50, count_50));
+        out.insert(format!("{}75", prefix), mean_or_missing(sum_75, count_75));
         out
     }
 
@@ -383,16 +409,24 @@ impl COCOeval {
     ///
     /// # Provenance
     ///
-    /// [`Provenance::ParityVerified`] for bbox, segm, and keypoints, which are
-    /// checked against pycocotools; [`Provenance::Extension`] for oriented boxes,
-    /// which are a real metric but have no reference implementation to be
-    /// standard against. See [`Provenance`] — this is what stops extension
-    /// numbers being presented as leaderboard numbers.
+    /// [`Provenance::ParityVerified`] only when this run is actually comparable to
+    /// a reference implementation's published numbers — COCO bbox/segm/keypoints
+    /// against pycocotools, or LVIS against `lvis-api`, **with reference
+    /// parameters**. Anything else is [`Provenance::Extension`]:
+    ///
+    /// - oriented boxes, which are a real metric with no reference to be standard against
+    /// - Open Images, whose protocol hotcoco implements but has no checked reference for
+    /// - any run with custom `iou_thrs`, `max_dets`, or area-range labels
+    ///
+    /// That last case is the one worth stating plainly: parity is a property of a
+    /// *configuration*, not of an `iou_type`. Deriving it from the type alone
+    /// would stamp `parity_verified` on numbers pycocotools was never run against,
+    /// which is exactly what [`Provenance`] exists to prevent.
     ///
     /// # Curves
     ///
     /// The aggregate precision-recall curve per IoU threshold (`pr@0.50` …),
-    /// meaned over categories at `area="all"` and the largest `max_dets`, plus
+    /// averaged over categories at `area="all"` and the largest `max_dets`, plus
     /// the shared `rec_thrs` x-axis. That is the slice a chart actually draws;
     /// the full `T×R×K×A×M` tensor stays reachable through
     /// [`accumulated`](COCOeval::accumulated) rather than being copied in here
@@ -404,7 +438,10 @@ impl COCOeval {
                 .to_string()
         })?;
 
-        let provenance = if self.params.iou_type == IouType::Obb {
+        // Parity is a property of the whole configuration, and this is the same
+        // predicate `summarize()` prints its warnings from — one producer, one
+        // consumer, so the printed reason and the recorded provenance cannot drift.
+        let provenance = if !self.reference_deviations().is_empty() {
             Provenance::Extension
         } else {
             Provenance::ParityVerified
@@ -449,19 +486,21 @@ impl COCOeval {
         let a_idx = self.area_all_idx();
         let m_idx = eval.shape.m - 1;
         for (t_idx, &thr) in self.params.iou_thrs.iter().enumerate() {
+            // Summed in place rather than collected: this runs T×R times (10×101
+            // on COCO), and collecting a throwaway Vec per recall threshold cost
+            // ~1000 heap allocations per `report()` call to compute a mean.
             let curve: Vec<f64> = (0..eval.shape.r)
                 .map(|r_idx| {
-                    let vals: Vec<f64> = (0..eval.shape.k)
-                        .map(|k_idx| {
-                            eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
-                        })
-                        .filter(|&v| v >= 0.0)
-                        .collect();
-                    if vals.is_empty() {
-                        -1.0
-                    } else {
-                        vals.iter().sum::<f64>() / vals.len() as f64
+                    let (mut sum, mut count) = (0.0f64, 0usize);
+                    for k_idx in 0..eval.shape.k {
+                        let v =
+                            eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)];
+                        if v >= 0.0 {
+                            sum += v;
+                            count += 1;
+                        }
                     }
+                    mean_or_missing(sum, count)
                 })
                 .collect();
             report = report.with_curve(format!("pr@{thr:.2}"), curve);

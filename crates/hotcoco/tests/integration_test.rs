@@ -5032,68 +5032,64 @@ fn test_match_floor_is_inert_below_one() {
 }
 
 // ---------------------------------------------------------------------------
-// Tier-2 compatibility: the pre-1.0 `eval` module path
+// Public API surface
 // ---------------------------------------------------------------------------
 
-/// `hotcoco::eval::*` must keep resolving for the whole 1.x series.
+/// The crate-root API surface 1.0 commits to.
 ///
-/// The module is now `hotcoco::detection`; `eval` is a deprecated alias, removal
-/// slated for 2.0. Downstream Rust code written against 0.x must still compile,
-/// so this test exercises the alias deliberately — the `allow(deprecated)` is the
-/// point of the test, not an oversight.
+/// Naming each type *is* the assertion — this file stops compiling if a path
+/// stops resolving. These are the paths real code uses, and unlike the module
+/// paths they are stable from 1.0 onward.
 ///
-/// It is a *compile-time* check above all: if the alias or any re-export stops
-/// resolving, this file stops building. `cargo-semver-checks` (`just semver`)
-/// covers the same ground mechanically against the published release; this
-/// catches it without needing the network.
+/// 1.0 renamed `eval` to `detection` and moved `hierarchy`, `healthcheck`, the
+/// statistics DTOs, and `counts` — with **no compatibility aliases**. 0.x is
+/// pre-release under SemVer, so the old module paths carried no stability
+/// promise; carrying them through 1.x would have meant a multi-year obligation
+/// for a surface nothing depended on. The crate-root re-exports below absorbed
+/// every one of those moves, so most code needed no edit at all.
+///
+/// `cargo-semver-checks` (`just semver`) covers the same ground mechanically
+/// against the published release; this catches it without needing the network.
 #[test]
-#[allow(deprecated)]
-fn tier2_eval_module_path_still_resolves() {
-    // Submodules reachable through the alias.
+fn crate_root_api_surface_resolves() {
     let gt_path = fixtures_dir().join("gt.json");
     let coco = COCO::new(&gt_path).expect("Failed to load GT");
     let hierarchy = Hierarchy::from_categories(&coco.dataset.categories);
-    let _expanded = hotcoco::eval::expand::expand_gt(&coco, &hierarchy);
+    let _expanded = hotcoco::detection::expand::expand_gt(&coco, &hierarchy);
 
-    // Types re-exported through the alias, including every one that used to live
-    // in the dissolved `eval/types.rs`. Naming the type is the assertion — these
-    // bindings exist to fail compilation if a path stops resolving.
-    let _: Option<hotcoco::eval::EvalImg> = None;
-    let _: Option<hotcoco::eval::AccumulatedEval> = None;
-    let _: Option<hotcoco::eval::EvalShape> = None;
-    let _: Option<hotcoco::eval::ConfusionMatrix> = None;
-    let _: Option<hotcoco::eval::TideErrors> = None;
-    let _: Option<hotcoco::eval::EvalMode> = None;
-    let _: Option<hotcoco::eval::EvalResults> = None;
-    let _: Option<hotcoco::eval::COCOeval> = None;
-    let _: Option<hotcoco::eval::SliceResult> = None;
-    let _: Option<hotcoco::eval::ComparisonResult> = None;
-
-    // Modules relocated at 1.0, each kept resolving by a deprecated alias:
-    // `hierarchy` moved into the detection family (it is Open Images machinery,
-    // not a cross-family primitive), and health checks plus the statistics DTOs
-    // moved to `quality`.
-    let _: Option<hotcoco::hierarchy::Hierarchy> = None;
-    let _: Option<hotcoco::healthcheck::HealthReport> = None;
-    let _: Option<hotcoco::healthcheck::Finding> = None;
-    let _: Option<hotcoco::healthcheck::Layer> = None;
-    let _: Option<hotcoco::healthcheck::DatasetSummary> = None;
-    let _: Option<hotcoco::types::SummaryStats> = None;
-    let _: Option<hotcoco::types::CategoryStats> = None;
-    let _: Option<hotcoco::types::DatasetStats> = None;
-
-    // And the crate-root paths, which are what most consumers actually use.
-    let _: Option<hotcoco::Hierarchy> = None;
-    let _: Option<hotcoco::HealthReport> = None;
-    let _: Option<hotcoco::SummaryStats> = None;
-    let _: Option<hotcoco::DatasetStats> = None;
+    let _: Option<hotcoco::COCOeval> = None;
     let _: Option<hotcoco::EvalImg> = None;
     let _: Option<hotcoco::AccumulatedEval> = None;
     let _: Option<hotcoco::EvalShape> = None;
+    let _: Option<hotcoco::EvalMode> = None;
+    let _: Option<hotcoco::EvalParams> = None;
+    let _: Option<hotcoco::EvalResults> = None;
     let _: Option<hotcoco::ConfusionMatrix> = None;
     let _: Option<hotcoco::TideErrors> = None;
-    let _: Option<hotcoco::EvalMode> = None;
-    let _: Option<hotcoco::COCOeval> = None;
+    let _: Option<hotcoco::SliceResult> = None;
+    let _: Option<hotcoco::ComparisonResult> = None;
+    let _: Option<hotcoco::BootstrapCI> = None;
+    let _: Option<hotcoco::CalibrationBin> = None;
+    let _: Option<hotcoco::Hierarchy> = None;
+    let _: Option<hotcoco::HealthReport> = None;
+    let _: Option<hotcoco::Finding> = None;
+    let _: Option<hotcoco::Layer> = None;
+    let _: Option<hotcoco::DatasetSummary> = None;
+    let _: Option<hotcoco::SummaryStats> = None;
+    let _: Option<hotcoco::CategoryStats> = None;
+    let _: Option<hotcoco::DatasetStats> = None;
+    let _: Option<hotcoco::EvalReport> = None;
+    let _: Option<hotcoco::Provenance> = None;
+
+    // The functional layer is reachable by its own path, not only through a driver.
+    let ap = hotcoco::metrics::counts::average_precision(&[0.9], &[true], None, 1, &[0.0, 1.0]);
+    assert!(ap.is_finite());
+    let bins = hotcoco::metrics::calibration::calibration_curve(&[0.9], &[true], 4);
+    assert_eq!(bins.len(), 4);
+    let cm = hotcoco::metrics::confusion::confusion_matrix(&[Some(0)], &[Some(0)], 2);
+    assert_eq!(cm.len(), 9);
+    let (rows, _) = hotcoco::primitives::assign::lsap(&[1.0, 2.0, 3.0, 4.0], 2, 2, false);
+    assert_eq!(rows.len(), 2);
 }
 
 // ---------------------------------------------------------------------------

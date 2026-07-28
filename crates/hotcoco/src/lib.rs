@@ -20,37 +20,63 @@
 //! | [`types`] | The COCO schema — `Dataset`, `Image`, `Annotation`, `Category`, `Rle`. |
 //! | [`coco`] | The dataset object: load, index, query, filter, merge, split, sample. |
 //! | [`mask`], [`geometry`] | RLE codec and rotated-rect mechanics. |
-//! | [`primitives`] | The shared evaluation substrate — similarity kernels, matching, accumulation, [`EvalReport`]. |
-//! | [`detection`] | The detection metric family: AP/AR, LVIS, Open Images, TIDE, calibration, confusion. |
+//! | [`primitives`] | Matching kernels — similarity, greedy assignment, LSAP. |
+//! | [`metrics`] | Metric functions over flat arrays — AP, calibration, confusion, bootstrap. |
+//! | [`report`] | [`EvalReport`] — the shape every metric family reports in. |
+//! | [`detection`] | The detection metric family: AP/AR, LVIS, Open Images, TIDE. |
 //! | [`quality`] | Dataset introspection: health checks and statistics. |
 //! | [`convert`] | YOLO, Pascal VOC, CVAT, and DOTA conversion. |
 //!
-//! [`primitives`] is where an auditor should look to answer "how is similarity
-//! computed?", "how are detections matched?", "how is AP accumulated?" — there is
-//! exactly one implementation of each, and `tests/architecture.rs` fails the build
-//! if a second appears.
+//! # The functional layer
 //!
-//! # Module renames in 1.0, and what still compiles
+//! [`primitives`] and [`metrics`] are free functions over flat arrays — no
+//! evaluator required, the way `sklearn.metrics` and `torchmetrics.functional`
+//! work:
+//!
+//! ```
+//! use hotcoco::metrics::counts::average_precision;
+//!
+//! let ap = average_precision(&[0.9, 0.8, 0.3], &[true, false, true], None, 3, &[0.0, 0.5, 1.0]);
+//! ```
+//!
+//! The two split by what a function *produces*: [`primitives`] produces matches
+//! (which detection pairs with which ground truth), [`metrics`] produces numbers
+//! from matches. Nothing in `primitives` scores; nothing in `metrics` matches.
+//!
+//! [`COCOeval`] is the stateful driver on top — it owns the pycocotools-compatible
+//! `evaluate`/`accumulate`/`summarize` lifecycle, and its analysis methods are
+//! adapters that marshal `eval_imgs` into arrays and call the functions above.
+//!
+//! Between them, [`primitives`] and [`metrics`] are where an auditor should look
+//! to answer "how is similarity computed?", "how are detections matched?", "how is
+//! AP accumulated?" — there is exactly one implementation of each, and
+//! `tests/architecture.rs` fails the build if a second appears.
+//!
+//! # Module renames in 1.0
 //!
 //! 1.0 renamed `eval` to [`detection`], because detection is now one metric family
-//! among several rather than the only one. Two modules moved for the same reason:
-//! the Open Images hierarchy is detection machinery, and health checks belong with
-//! dataset statistics rather than beside the schema.
+//! among several rather than the only one. Three modules moved for the same reason:
+//! the Open Images hierarchy is detection machinery, health checks belong with
+//! dataset statistics rather than beside the schema, and `counts` computes numbers
+//! from matches so it belongs in [`metrics`], not [`primitives`].
 //!
-//! | Pre-1.0 path | Now | Status |
-//! |---|---|---|
-//! | `hotcoco::eval` | [`detection`] | deprecated alias |
-//! | `hotcoco::hierarchy` | [`detection::hierarchy`] | deprecated alias |
-//! | `hotcoco::healthcheck` | [`quality::healthcheck`] | deprecated alias |
-//! | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | [`quality`] | deprecated re-export |
+//! | Pre-1.0 module path | Now |
+//! |---|---|
+//! | `hotcoco::eval` | [`detection`] |
+//! | `hotcoco::hierarchy` | [`detection::hierarchy`] |
+//! | `hotcoco::healthcheck` | [`quality::healthcheck`](mod@quality::healthcheck) |
+//! | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | [`quality`] |
+//! | `hotcoco::primitives::counts` | [`metrics::counts`] |
 //!
-//! **Nothing stops compiling.** Every path above still resolves; each emits a
-//! deprecation warning pointing at its replacement. The aliases are kept for the
-//! whole 1.x series and removed at 2.0.
+//! **The crate-root re-exports absorbed every one of these**, so most code needs no
+//! edit at all: [`COCOeval`], [`EvalImg`], [`Hierarchy`], [`HealthReport`],
+//! [`SummaryStats`] and the rest resolve exactly as before.
 //!
-//! **The crate-root re-exports are not deprecated and are the recommended paths.**
-//! [`COCOeval`], [`Hierarchy`], [`HealthReport`], [`SummaryStats`] and the rest are
-//! unchanged — most code needs no edit at all.
+//! There are no compatibility aliases for the old *module* paths. 0.x is
+//! pre-release under SemVer — "anything MAY change at any time" — so those paths
+//! carried no stability promise, and keeping them would have meant a multi-year
+//! obligation to a surface nothing depended on. 1.0 is where the API is fixed;
+//! from here breaking changes wait for 2.0.
 //!
 //! The Python API is entirely unaffected: `hotcoco.COCOeval`,
 //! `init_as_pycocotools()`, and the `pycocotools`/LVIS drop-in surface are
@@ -62,9 +88,11 @@ pub mod detection;
 pub mod error;
 pub mod geometry;
 pub mod mask;
+pub mod metrics;
 pub mod params;
 pub mod primitives;
 pub mod quality;
+pub mod report;
 pub mod types;
 
 pub use coco::COCO;
@@ -77,60 +105,10 @@ pub use detection::{
 };
 pub use error::Error;
 
-/// The detection family under its pre-1.0 name.
-///
-/// `eval` was the module's name while detection was the only metric family in the
-/// crate. It is now [`detection`], one family beside the panoptic, tracking, and
-/// concepts families that follow — but every `hotcoco::eval::*` path keeps
-/// resolving through this alias so existing Rust code compiles unchanged.
-///
-/// This is Tier-2 compatibility surface: kept through the whole 1.x series and
-/// removed at 2.0. The Python API is unaffected — `hotcoco.COCOeval` and the
-/// `pycocotools` drop-in surface are Tier 1 and permanent.
-#[deprecated(
-    since = "1.0.0",
-    note = "renamed to `hotcoco::detection`; the `eval` alias is kept for the 1.x series and removal is slated for 2.0"
-)]
-pub use detection as eval;
-
-/// Open Images label hierarchy, under its pre-1.0 path.
-///
-/// [`Hierarchy`] is Open Images machinery — it is consumed only by the detection
-/// family's GT/DT expansion — so it now lives at [`detection::hierarchy`] rather
-/// than beside the cross-family primitives, where its old top-level placement
-/// wrongly implied it was one.
-///
-/// Tier-2 compatibility: this path is kept for the 1.x series and removed at 2.0.
-/// The crate-root [`Hierarchy`] re-export is **not** deprecated and is the
-/// recommended path.
-#[deprecated(
-    since = "1.0.0",
-    note = "moved to `hotcoco::detection::hierarchy`; this alias is kept for the 1.x series and removal is slated for 2.0"
-)]
-pub mod hierarchy {
-    pub use crate::detection::hierarchy::*;
-}
 pub use detection::hierarchy::Hierarchy;
 pub use params::{AreaRange, IouType, Params};
-pub use primitives::report::{EvalReport, Provenance};
 pub use quality::{
     CategoryStats, DatasetStats, DatasetSummary, Finding, HealthReport, Layer, SummaryStats,
 };
+pub use report::{EvalReport, Provenance};
 pub use types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
-
-/// Dataset health checks, under their pre-1.0 path.
-///
-/// Health checking joined `COCO::stats` and the statistics DTOs in [`quality`] at
-/// 1.0: they are one concern — inspecting a dataset — and are distinct from both
-/// the schema ([`types`]) and the metrics engine ([`detection`]).
-///
-/// Tier-2 compatibility: kept for the 1.x series, removed at 2.0. The crate-root
-/// re-exports ([`HealthReport`], [`Finding`], [`Layer`], [`DatasetSummary`]) are
-/// **not** deprecated.
-#[deprecated(
-    since = "1.0.0",
-    note = "moved to `hotcoco::quality::healthcheck`; this alias is kept for the 1.x series and removal is slated for 2.0"
-)]
-pub mod healthcheck {
-    pub use crate::quality::healthcheck::*;
-}

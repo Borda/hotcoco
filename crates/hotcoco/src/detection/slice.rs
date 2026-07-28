@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::COCOeval;
 use super::accumulate::accumulate_impl;
-use super::metrics::build_metric_defs;
+use super::catalog::build_metric_defs;
 use super::summarize::summarize_impl;
 
 /// Metrics for a single evaluation slice.

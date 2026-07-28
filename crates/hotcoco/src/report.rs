@@ -8,7 +8,7 @@
 //! # Provenance is enforced, not advisory
 //!
 //! [`Provenance`] records whether a number is a benchmark-standard result, a
-//! labelled hotcoco extension, or something a user composed from primitives.
+//! labeled hotcoco extension, or something a user composed from primitives.
 //! Family drivers set it; the Python constructor hardwires
 //! [`Provenance::UserComposed`], so a report cannot claim parity it was never
 //! checked for. It survives serialization, so a deserialized report renders as

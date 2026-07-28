@@ -188,7 +188,7 @@ pub(super) fn accumulate_impl(
                     fp[d] += fp[d - 1];
                 }
 
-                let (final_recall, curve) = crate::primitives::counts::precision_recall_curve(
+                let (final_recall, curve) = crate::metrics::counts::precision_recall_curve(
                     &tp,
                     &fp,
                     num_gt,

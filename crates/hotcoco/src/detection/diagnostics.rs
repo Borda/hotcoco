@@ -118,7 +118,7 @@ fn bbox_iou_plain(a: [f64; 4], b: [f64; 4]) -> f64 {
 /// Compute AP from detections for a single image given the GT count.
 ///
 /// Reuses the standard COCO 101-point interpolation with monotone precision correction
-/// via [`crate::primitives::counts::average_precision`].
+/// via [`crate::metrics::counts::average_precision`].
 ///
 /// `detections` is `(score, is_tp)` sorted by score descending.
 /// `n_gt` is the total number of non-ignored GT annotations for this image.
@@ -126,7 +126,7 @@ fn bbox_iou_plain(a: [f64; 4], b: [f64; 4]) -> f64 {
 /// An image with no ground truth scores `1.0` when nothing was predicted: this is
 /// a per-image *quality* score, where a correctly-empty image is perfect. (TIDE's
 /// corpus AP deliberately uses the opposite convention for `n_gt == 0` — see the
-/// [`counts`](crate::primitives::counts) module note.)
+/// [`counts`](crate::metrics::counts) module note.)
 fn compute_image_ap(detections: &[(f64, bool)], n_gt: u32) -> f64 {
     if n_gt == 0 {
         return if detections.is_empty() { 1.0 } else { 0.0 };
@@ -134,9 +134,9 @@ fn compute_image_ap(detections: &[(f64, bool)], n_gt: u32) -> f64 {
 
     let scores: Vec<f64> = detections.iter().map(|&(score, _)| score).collect();
     let matched: Vec<bool> = detections.iter().map(|&(_, is_tp)| is_tp).collect();
-    let rec_thrs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
+    let rec_thrs = crate::params::default_rec_thrs();
 
-    crate::primitives::counts::average_precision(&scores, &matched, None, n_gt as usize, &rec_thrs)
+    crate::metrics::counts::average_precision(&scores, &matched, None, n_gt as usize, &rec_thrs)
 }
 
 impl COCOeval {
@@ -182,7 +182,7 @@ impl COCOeval {
         let actual_iou_thr = self.params.iou_thrs[t_idx];
 
         // Use "all" area range
-        let target_area_idx = self.params.area_range_idx("all").unwrap_or(0);
+        let target_area_idx = self.params.all_area_idx();
         let target_area = self.params.area_ranges[target_area_idx].range;
 
         // Last max_det (largest)
@@ -264,6 +264,14 @@ impl COCOeval {
         let mut images: HashMap<u64, ImageSummary> = HashMap::new();
 
         for (&img_id, &(tp, fp, fn_count)) in &img_counts {
+            // F1 straight from the counts: algebraically 2PR/(P+R), but computed as
+            // one division of exact integers rather than two divisions fed into
+            // `f_beta`. Same value in real arithmetic, and this form has no
+            // rounding to differ in — these numbers are gate-compared.
+            //
+            // The empty-image convention (nothing to detect, nothing predicted, so
+            // nothing to get wrong) lives here rather than in `metrics::counts`,
+            // per that module's rule: the shared formulas take no policy flag.
             let denom = 2 * tp + fp + fn_count;
             let f1 = if denom == 0 {
                 1.0

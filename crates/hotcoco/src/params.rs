@@ -95,6 +95,17 @@ pub(crate) fn default_iou_thrs() -> Vec<f64> {
     (0..10).map(|i| 0.5 + 0.05 * i as f64).collect()
 }
 
+/// COCO's 101-point recall grid: 0.00, 0.01, …, 1.00.
+///
+/// The x-axis every AP in the crate is interpolated onto. Public because the
+/// metric functions in [`metrics`](crate::metrics) take it as a parameter, so a
+/// caller reaching for them directly needs the same grid `Params` defaults to —
+/// otherwise their AP is on a different axis than `COCOeval`'s and the two
+/// silently disagree.
+pub fn default_rec_thrs() -> Vec<f64> {
+    (0..=100).map(|i| i as f64 / 100.0).collect()
+}
+
 /// Evaluation parameters controlling IoU thresholds, area ranges, and detection limits.
 ///
 /// Defaults match pycocotools: 10 IoU thresholds (0.50:0.05:0.95), 101 recall
@@ -130,6 +141,17 @@ impl Params {
     /// Index of the area range with the given label, or `None` if not found.
     pub fn area_range_idx(&self, label: &str) -> Option<usize> {
         self.area_ranges.iter().position(|ar| ar.label == label)
+    }
+
+    /// Index of the `"all"` area range, falling back to the first.
+    ///
+    /// Every whole-dataset metric is reported at `area="all"`, so this lookup runs
+    /// in the summarize, report, calibration, diagnostics, and TIDE paths. The
+    /// fallback matters: a caller with custom area labels and no `"all"` still gets
+    /// a defined index rather than a panic, and index 0 is the widest range by
+    /// convention.
+    pub fn all_area_idx(&self) -> usize {
+        self.area_range_idx("all").unwrap_or(0)
     }
 
     /// Create default parameters for the given evaluation type.
@@ -181,7 +203,7 @@ impl Params {
 
         let kpt_oks_sigmas = KPT_OKS_SIGMAS.to_vec();
         let iou_thrs = default_iou_thrs();
-        let rec_thrs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
+        let rec_thrs = default_rec_thrs();
 
         Params {
             iou_type,

@@ -15,13 +15,6 @@
 //! primitive takes no policy flag — callers guard `num_gt == 0` themselves and
 //! document why.
 //!
-//! The broader count vocabulary the plan envisions here — a `GroupKey` unifying
-//! the class axis and structs for TP/FP/FN, TPA/FPA/FNA, IDSW, per-track
-//! coverage, and matched-similarity sums (MOTP/LocA/SQ) — is intentionally NOT
-//! built yet. Those serve tracking/panoptic/concepts, which don't exist; adding
-//! them now would shape the contract around detection alone (the plan's risk #2)
-//! and introduce enum variants nothing matches on. They land additively with the
-//! family that needs them.
 
 /// Precision interpolated at fixed recall thresholds, from cumulative TP/FP.
 ///
@@ -132,9 +125,80 @@ pub fn average_precision(
     curve.iter().map(|&(_, prec, _)| prec).sum::<f64>() / rec_thrs.len() as f64
 }
 
+/// The F-beta score for one precision/recall pair.
+///
+/// `beta` weights recall relative to precision: `beta = 1` is the harmonic mean
+/// (F1), `beta > 1` favors recall, `beta < 1` favors precision. Returns `0.0`
+/// when both inputs are zero, where the formula is otherwise `0/0`.
+pub fn f_beta(precision: f64, recall: f64, beta: f64) -> f64 {
+    let beta2 = beta * beta;
+    let denom = beta2 * precision + recall;
+    if denom < f64::EPSILON {
+        return 0.0;
+    }
+    (1.0 + beta2) * precision * recall / denom
+}
+
+/// The best F-beta achievable anywhere on a precision-recall curve.
+///
+/// `precisions[i]` is the precision at `recalls[i]`; the pair is the curve
+/// [`precision_recall_curve`] produces. Sweeping it answers "how good could this
+/// model be at its best operating point?", which is what an F-score reports —
+/// unlike AP, which averages over the whole curve.
+///
+/// Entries with negative precision are skipped: `-1.0` is the crate's
+/// "not computed for this configuration" sentinel, not a real low score.
+/// Returns `None` when no entry is valid, so callers pick their own convention
+/// for an undefined score rather than inheriting one.
+pub fn max_f_beta(precisions: &[f64], recalls: &[f64], beta: f64) -> Option<f64> {
+    let n = precisions.len().min(recalls.len());
+    let mut best = f64::NEG_INFINITY;
+    for i in 0..n {
+        if precisions[i] < 0.0 {
+            continue;
+        }
+        best = best.max(f_beta(precisions[i], recalls[i], beta));
+    }
+    (best > f64::NEG_INFINITY).then_some(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f_beta_at_one_is_the_harmonic_mean() {
+        assert!((f_beta(0.5, 0.5, 1.0) - 0.5).abs() < 1e-12);
+        // Harmonic mean of 1.0 and 0.5 is 2/3.
+        assert!((f_beta(1.0, 0.5, 1.0) - 2.0 / 3.0).abs() < 1e-12);
+        // Both zero would be 0/0; defined as 0.
+        assert_eq!(f_beta(0.0, 0.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn beta_shifts_the_weight_between_precision_and_recall() {
+        // High precision, low recall. beta < 1 favors precision, so scores higher.
+        let (p, r) = (0.9, 0.3);
+        assert!(f_beta(p, r, 0.5) > f_beta(p, r, 1.0));
+        assert!(f_beta(p, r, 2.0) < f_beta(p, r, 1.0));
+    }
+
+    #[test]
+    fn max_f_beta_sweeps_the_curve_for_the_best_point() {
+        // Best F1 is at the middle point: f_beta(0.6, 0.6) = 0.6.
+        let precisions = [1.0, 0.6, 0.2];
+        let recalls = [0.1, 0.6, 0.9];
+        let best = max_f_beta(&precisions, &recalls, 1.0).expect("a valid point exists");
+        assert!((best - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_f_beta_skips_the_missing_data_sentinel() {
+        // -1.0 means "not computed", not "precision of -1".
+        assert_eq!(max_f_beta(&[-1.0, -1.0], &[0.5, 0.5], 1.0), None);
+        let best = max_f_beta(&[-1.0, 0.5], &[0.1, 0.5], 1.0).expect("one valid point");
+        assert!((best - 0.5).abs() < 1e-12);
+    }
 
     #[test]
     fn empty_or_no_gt_is_zero() {

@@ -1,22 +1,24 @@
-//! Reusable evaluation primitives — the shared substrate that family drivers
-//! (detection at 1.0; panoptic/tracking/concepts later) compose into metrics.
+//! Matching kernels — the shared substrate that decides what pairs with what.
 //!
-//! This module is built alongside the existing `eval/` monolith and does not
-//! change its behavior. At 1.0 the detection driver is rebuilt on these
-//! primitives and `eval/` is deleted; until then the primitives are validated
-//! against the monolith's output rather than replacing it.
+//! Three kernels, and nothing else: [`sim`] computes similarity between two sets,
+//! [`greedy`] resolves it into COCO's rank-ordered assignment, [`assign`] resolves
+//! it optimally via rectangular LSAP. Family drivers (detection at 1.0;
+//! panoptic/tracking/concepts later) compose them.
 //!
-//! The public surface mirrors the planned Python `hotcoco.primitives` package.
-//! Contracts here are designed against detection's needs *and* the documented
-//! needs of tracking/panoptic/concepts, so they don't have to be reshaped when
-//! those families land.
+//! Kernels here produce matches and similarities; the functions in
+//! [`metrics`](crate::metrics) turn those into numbers. Nothing here scores;
+//! nothing there matches. See [`metrics`](crate::metrics) for the full split.
+//!
+//! This module is where an auditor should look to answer "how is similarity
+//! computed?" and "how are detections matched?" — there is exactly one
+//! implementation of each, and `tests/architecture.rs` fails the build if a second
+//! appears.
 //!
 //! # Stability
 //!
 //! These APIs are **provisional**. They are public so the family drivers can
 //! share them, but they are not frozen until 1.4, after real-world soak — expect
-//! additive change (new [`sim::SimKind`] variants, the tracking count vocabulary
-//! in [`counts`]) in the 1.x minors.
+//! additive change (new [`sim::SimKind`] variants) in the 1.x minors.
 //!
 //! The similarity kernels re-exported onto Tier-1 paths are the exception —
 //! already frozen. See [`sim`][sim#where-the-math-lives].
@@ -29,17 +31,7 @@
 //! whole sequence's matrices in memory (at MOT20 scale, hundreds of MB per
 //! sequence per thread). Batched or per-sequence helpers added later must
 //! iterate-and-consume — never return every timestep's matrix at once.
-//!
-//! Submodules are added as each primitive is built:
-//! - [`sim`] — similarity kernels + the `SimKind` geometry axis.
-//! - [`greedy`] — COCO greedy matching (pycocotools-exact).
-//! - [`assign`] — rectangular LSAP, semantic port of scipy.
-//! - [`counts`] — detection rank-based PR accumulator (broader count vocabulary
-//!   lands with the family that needs it).
-//! - [`report`] — `EvalReport` (metrics + curves + params + provenance).
 
 pub mod assign;
-pub mod counts;
 pub mod greedy;
-pub mod report;
 pub mod sim;

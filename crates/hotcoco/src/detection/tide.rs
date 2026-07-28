@@ -78,12 +78,12 @@ impl COCOeval {
     /// Compute average precision from per-detection matched/ignored flags.
     ///
     /// Uses the same 101-point interpolation as [`accumulate`](COCOeval::accumulate),
-    /// via [`crate::primitives::counts::average_precision`].
+    /// via [`crate::metrics::counts::average_precision`].
     ///
     /// Returns `0.0` when `num_gt == 0`: TIDE's ΔAP compares corpus-level APs, so
     /// a category with no ground truth contributes a vacuous `0.0`. (Per-image
     /// diagnostics deliberately uses the opposite convention — see the
-    /// [`counts`](crate::primitives::counts) module note.)
+    /// [`counts`](crate::metrics::counts) module note.)
     pub(super) fn compute_ap_from_matched(
         scores: &[f64],
         matched: &[bool],
@@ -91,13 +91,7 @@ impl COCOeval {
         num_gt: usize,
         rec_thrs: &[f64],
     ) -> f64 {
-        crate::primitives::counts::average_precision(
-            scores,
-            matched,
-            Some(ignored),
-            num_gt,
-            rec_thrs,
-        )
+        crate::metrics::counts::average_precision(scores, matched, Some(ignored), num_gt, rec_thrs)
     }
 
     /// Decompose detection errors into TIDE error types.
@@ -121,12 +115,7 @@ impl COCOeval {
 
         let cat_ids = &self.params.cat_ids;
         let iou_type = self.params.iou_type;
-        let target_area_rng = self
-            .params
-            .area_range_idx("all")
-            .map_or(self.params.area_ranges[0].range, |idx| {
-                self.params.area_ranges[idx].range
-            });
+        let target_area_rng = self.params.area_ranges[self.params.all_area_idx()].range;
         let max_det = *self.params.max_dets.last().unwrap_or(&100);
 
         // Find t_idx for pos_thr (nearest threshold in params.iou_thrs)

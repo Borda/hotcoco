@@ -7,12 +7,17 @@
 //! and two disagreeing `MIN_PARALLEL_WORK` constants (1024 vs 1000, under a
 //! comment claiming they matched).
 //!
-//! Those are consolidated into `primitives/`. These tests exist so the
-//! duplication cannot silently creep back between 0.5 and the 1.0 rewrite. They
-//! are deliberately crude — grep over source text, no parsing. A determined
-//! author can evade them; the point is to catch the *accidental* re-introduction
-//! that code review misses, and to make the rule explicit and enforced rather
-//! than folklore in a planning doc.
+//! Those are consolidated into `primitives/` and `metrics/`. These tests exist so
+//! the duplication cannot silently creep back. They are deliberately crude — grep
+//! over source text, no parsing. A determined author can evade them; the point is
+//! to catch the *accidental* re-introduction that code review misses, and to make
+//! the rule explicit and enforced rather than folklore in a planning doc.
+//!
+//! The layering checks below are **allowlists**, not banlists, and that distinction
+//! is load-bearing. Their first version banned the spelling `crate::detection` —
+//! which the same release made meaningless by shipping `hotcoco::eval` and ~25
+//! crate-root re-exports of the very same types. A banlist must enumerate every
+//! path to a thing; an allowlist enumerates what a layer is for.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,7 +38,7 @@ fn workspace_root() -> &'static Path {
 /// Every `.rs` file under `crates/*/src/` (the shipped source; tests excluded),
 /// paired with its workspace-relative path and its code lines.
 ///
-/// Read once and shared: all three tests scan the same tree.
+/// Read once and shared across the checks below.
 fn sources() -> &'static [SourceFile] {
     static SOURCES: LazyLock<Vec<SourceFile>> = LazyLock::new(|| {
         let mut paths = Vec::new();
@@ -94,7 +99,7 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Every code line matching `hit`, in files not excluded by `skip`, formatted as
-/// `path:line  text`. The shared body of all three checks below.
+/// `path:line  text`. The shared body of the grep-style checks below.
 fn scan(skip: impl Fn(&str) -> bool, hit: impl Fn(&str) -> bool) -> Vec<String> {
     sources()
         .iter()
@@ -216,10 +221,9 @@ fn greedy_matching_only_in_primitives() {
 /// # Adding a sanctioned home
 ///
 /// [`CACHE_OWNERS`] is the driver, and only the driver: the module that owns the
-/// field, the one that populates it, and the one that consumes it per cell. When
-/// `eval/` becomes `detection/` at 1.0 these paths are renamed — update them.
-/// Do not add an analysis or `primitives` file to this list; needing to is the
-/// signal that the code should call `cell_ious` instead.
+/// field, the one that populates it, and the one that consumes it per cell.
+/// Do not add an analysis or `metrics`/`primitives` file to this list; needing to
+/// is the signal that the code should call `cell_ious` instead.
 #[test]
 fn similarity_cache_stays_driver_private() {
     /// Files permitted to touch the `ious` field directly.
@@ -246,6 +250,155 @@ fn similarity_cache_stays_driver_private() {
          cell and cannot leak the map. Exposing the map as a shared \"similarity \
          cache\" type would foreclose the 1.2 recompute-instead-of-retain lever.",
         CACHE_OWNERS.join(", "),
+        violations.join("\n  ")
+    );
+}
+
+/// The path an import brings in, for every spelling of `use`.
+///
+/// Handles `use`, `pub use`, and the restricted forms `pub(crate) use`,
+/// `pub(super) use`, `pub(in path) use`. Matching only the first two — which is
+/// what the first allowlist did — makes `pub(crate) use crate::detection::EvalMode`
+/// invisible rather than violating, and that is the *most* likely spelling for a
+/// real leak: a layer smuggling in a driver type wants it crate-visible.
+fn import_target(line: &str) -> Option<&str> {
+    let mut rest = line.trim_start();
+    if let Some(after_pub) = rest.strip_prefix("pub") {
+        let after_pub = after_pub.trim_start();
+        rest = match after_pub.strip_prefix('(') {
+            Some(vis) => vis.split_once(')')?.1.trim_start(),
+            None => after_pub,
+        };
+    }
+    rest.strip_prefix("use ")
+}
+
+/// Every import in `dir` whose target is not on `allowed`.
+///
+/// **Allowlist, not banlist.** The first version banned the spelling
+/// `crate::detection`, and it was worthless: the crate re-exports ~25 of the same
+/// types at its root, so `use crate::COCOeval` put a family driver inside
+/// `metrics/` with the suite fully green. A banlist has to enumerate every path to
+/// a thing — and a re-export or rename silently adds one.
+///
+/// # Why `super::` needs structural handling, not an allowlist entry
+///
+/// The *second* version allowlisted `super::` as "my own layer" and was bypassable
+/// four ways. `super::` is relative, so what it reaches depends on where it is
+/// written:
+///
+/// | Written at | Resolves to | Safe? |
+/// |---|---|---|
+/// | top level of `metrics/counts.rs` | `crate::metrics` | yes |
+/// | top level of `metrics/mod.rs` | **the crate root** — all ~25 re-exports | no |
+/// | `super::super::` at top level | at or above the crate root | no |
+/// | inside `mod tests { … }` (indented) | the enclosing module | yes |
+///
+/// So a bare `super::` is accepted only from a non-`mod.rs` file, `super::super::`
+/// is never accepted at top level, and indented `use` statements — which are inside
+/// a nested `mod`, where one `super::` is consumed by the nesting — are left alone.
+fn foreign_imports(dir: &str, allowed: &[&str]) -> Vec<String> {
+    sources()
+        .iter()
+        .filter(|f| f.path.contains(dir))
+        .flat_map(|f| {
+            // `super::` from a module root climbs out of the layer.
+            let is_module_root = f.path.ends_with("/mod.rs");
+            f.lines.iter().filter_map(move |(n, line)| {
+                // Indented => inside a nested `mod`, where `super::` stays local.
+                let nested = line.starts_with(char::is_whitespace);
+                let target = import_target(line)?;
+
+                let ok = if target.starts_with("super::super::") {
+                    nested
+                } else if target.starts_with("super::") {
+                    nested || !is_module_root
+                } else {
+                    allowed.iter().any(|prefix| target.starts_with(prefix))
+                };
+
+                (!ok).then(|| format!("{}:{n}  {}", f.path, line.trim()))
+            })
+        })
+        .collect()
+}
+
+/// Imports every layer may reach for: the standard library and the shared
+/// third-party substrate. None of these can carry a family's semantics.
+///
+/// `super::`/`self::` are deliberately absent — [`foreign_imports`] handles them
+/// structurally, because whether they escape the layer depends on the file.
+const NEUTRAL: &[&str] = &["std::", "core::", "serde", "rand", "rayon", "self::"];
+
+/// `metrics/` computes numbers from matches; it may not know which family called.
+///
+/// The whole point of the functional layer is that
+/// `metrics::calibration::calibration_curve(scores, matched, n_bins)` is callable
+/// by detection, tracking, or a user with two arrays and no evaluator at all. One
+/// import of a family driver — under *any* of its names — and that stops being
+/// true: the function silently becomes detection machinery filed in the wrong
+/// drawer, which is the state 1.0 exists to fix.
+///
+/// Doc comments are exempt (the scanner drops `//`-prefixed lines), so `metrics/`
+/// is free to *point at* its detection adapters in rustdoc. Naming them in prose
+/// is documentation; importing them is a dependency.
+#[test]
+fn metrics_never_depends_on_a_family_driver() {
+    let allowed = [
+        NEUTRAL,
+        &[
+            "crate::metrics", // sibling metric functions
+            "crate::error",   // the crate's Result type
+            "crate::report",  // the cross-family output contract
+        ],
+    ]
+    .concat();
+    let violations = foreign_imports("/metrics/", &allowed);
+
+    assert!(
+        violations.is_empty(),
+        "`metrics/` may only import {allowed:?}.\nFound:\n  {}\n\n\
+         A metric function takes flat arrays — `(scores, matched)`, label pairs, a \
+         closure. If it needs something from a family driver, that something is the \
+         adapter's job to extract and pass in. Move the family-specific part into \
+         `detection/` and keep the math here.\n\n\
+         Widening this allowlist is a decision about what the layer means. Make it \
+         deliberately, not to make a build pass.",
+        violations.join("\n  ")
+    );
+}
+
+/// `primitives/` produces matches; it may not depend on the layer that scores them.
+///
+/// The dependency runs one way — `metrics` may use `primitives`, never the
+/// reverse. A kernel that reached into `metrics` would be scoring, not matching,
+/// and the "what does it produce?" split that separates the two modules would stop
+/// describing anything.
+///
+#[test]
+fn primitives_never_depends_on_metrics() {
+    // The sibling kernels are listed one by one rather than as `crate::primitives`,
+    // so that adding a fourth kernel is a deliberate edit here. Nothing from
+    // `metrics` is permitted at all — the dependency runs one way.
+    let allowed = [
+        NEUTRAL,
+        &[
+            "crate::primitives::sim",
+            "crate::primitives::greedy",
+            "crate::primitives::assign",
+            "crate::geometry",
+            "crate::mask",
+            "crate::types",
+        ],
+    ]
+    .concat();
+    let violations = foreign_imports("/primitives/", &allowed);
+
+    assert!(
+        violations.is_empty(),
+        "`primitives/` may only import {allowed:?}.\nFound:\n  {}\n\n\
+         Kernels match; metrics score. If a primitive needs a metric, the layering \
+         is inverted — the caller should compose the two instead.",
         violations.join("\n  ")
     );
 }

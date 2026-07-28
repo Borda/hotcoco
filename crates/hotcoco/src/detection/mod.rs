@@ -4,6 +4,7 @@
 
 pub(super) mod accumulate;
 mod calibration;
+mod catalog;
 mod compare;
 mod confusion;
 mod diagnostics;
@@ -12,7 +13,6 @@ pub mod expand;
 pub mod hierarchy;
 mod iou;
 mod matching;
-mod metrics;
 mod mode;
 mod report;
 mod results;

@@ -170,16 +170,8 @@ impl Rle {
     }
 }
 
-/// Dataset statistics, under their pre-1.0 path.
-///
-/// These describe what was *found* in a dataset rather than what a COCO file may
-/// contain, so at 1.0 they moved to [`crate::quality`] alongside `COCO::stats`
-/// and the health checks, leaving this module as schema only.
-///
-/// Tier-2 compatibility: kept for the 1.x series, removed at 2.0. The crate-root
-/// re-exports (`hotcoco::SummaryStats` and friends) are **not** deprecated.
-#[deprecated(
-    since = "1.0.0",
-    note = "moved to `hotcoco::quality`; this alias is kept for the 1.x series and removal is slated for 2.0"
-)]
-pub use crate::quality::{CategoryStats, DatasetStats, SummaryStats};
+// `SummaryStats`, `CategoryStats`, and `DatasetStats` lived here before 1.0. They
+// describe what was *found* in a dataset rather than what a COCO file may contain,
+// so they moved to `crate::quality` alongside `COCO::stats` and the health checks,
+// leaving this module as schema only. Reachable as `hotcoco::SummaryStats` and
+// friends, unchanged.

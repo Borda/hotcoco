@@ -8,12 +8,25 @@ use crate::params::Params;
 
 use super::EvalMode;
 use super::accumulate::AccumulatedEval;
-use super::metrics::MetricDef;
+use super::catalog::MetricDef;
 use super::mode::FreqGroups;
 
 /// Per-category mean AP as a free function (for use by `summarize_impl` and `slice_by`).
+/// Mean of `count` values summing to `sum`, or the `-1.0` "not computed" sentinel.
+///
+/// The crate's most load-bearing convention, in one place. `-1.0` means a metric
+/// was not computable for this configuration — no ground truth in an area range,
+/// a category absent from the split — and it is *not* a low score: `report()`
+/// filters on it before emitting a per-class metric, and
+/// [`max_f_beta`](crate::metrics::counts::max_f_beta) skips it. It was spelled out
+/// at five sites across two modules; change the sentinel or the validity test at
+/// four of them and a category silently reports `-1.0` as a real score.
+pub(super) fn mean_or_missing(sum: f64, count: usize) -> f64 {
+    if count == 0 { -1.0 } else { sum / count as f64 }
+}
+
 pub(super) fn per_cat_ap_static(eval: &AccumulatedEval, params: &Params) -> Vec<f64> {
-    let a_idx = params.area_range_idx("all").unwrap_or(0);
+    let a_idx = params.all_area_idx();
     let m_idx = eval.shape.m - 1;
     (0..eval.shape.k)
         .map(|k_idx| {
@@ -29,7 +42,7 @@ pub(super) fn per_cat_ap_static(eval: &AccumulatedEval, params: &Params) -> Vec<
                     }
                 }
             }
-            if count == 0 { -1.0 } else { sum / count as f64 }
+            mean_or_missing(sum, count)
         })
         .collect()
 }
@@ -86,11 +99,7 @@ pub(super) fn summarize_impl(
             }
         }
 
-        if vals.is_empty() {
-            -1.0
-        } else {
-            vals.iter().sum::<f64>() / vals.len() as f64
-        }
+        mean_or_missing(vals.iter().sum(), vals.len())
     };
 
     let per_cat_ap = if eval_mode == EvalMode::Lvis || eval_mode == EvalMode::OpenImages {
@@ -108,11 +117,7 @@ pub(super) fn summarize_impl(
                 if v >= 0.0 { Some(v) } else { None }
             })
             .collect();
-        if valid.is_empty() {
-            -1.0
-        } else {
-            valid.iter().sum::<f64>() / valid.len() as f64
-        }
+        mean_or_missing(valid.iter().sum(), valid.len())
     };
 
     metrics
