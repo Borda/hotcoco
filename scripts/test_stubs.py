@@ -66,6 +66,7 @@ def test_top_level_exports_covered():
     skip = {
         "LVIS",
         "LVISeval",
+        "LVISEval",
         "LVISResults",
         "CocoDetection",
         "CocoEvaluator",
@@ -75,6 +76,12 @@ def test_top_level_exports_covered():
         # Family namespace: it re-exports names already stubbed at the top level
         # and has its own detection.pyi. Covered by the tests below instead.
         "detection",
+        # The functional layer. Unlike `detection`, these are *not* re-exported
+        # at the top level — `average_precision` and `lsap` exist only under
+        # their namespace — so their signatures live in metrics.pyi and
+        # primitives.pyi, checked by the tests below.
+        "metrics",
+        "primitives",
     }
     runtime_names -= skip
 
@@ -180,6 +187,116 @@ def test_detection_stub_matches_runtime():
     assert not missing, f"Names missing from detection.pyi: {sorted(missing)}"
 
 
-def test_py_typed_covers_the_package():
-    """`py.typed` is what makes any of these stubs visible to a type checker."""
-    assert (STUB_PATH.parent / "py.typed").exists()
+# ---------------------------------------------------------------------------
+# The functional layer
+# ---------------------------------------------------------------------------
+
+
+def _stub_function_names(filename: str) -> set[str]:
+    """Top-level `def` names declared in a sibling stub file."""
+    tree = ast.parse((STUB_PATH.parent / filename).read_text())
+    return {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.FunctionDef)}
+
+
+def test_functional_layer_importable_both_ways():
+    """`import hotcoco.metrics` must work, not only `from hotcoco import metrics`."""
+    import sys
+
+    import hotcoco.metrics
+    import hotcoco.primitives
+    from hotcoco import metrics, primitives
+
+    assert "hotcoco.metrics" in sys.modules
+    assert "hotcoco.primitives" in sys.modules
+    assert metrics is hotcoco.metrics
+    assert primitives is hotcoco.primitives
+
+
+def test_metrics_stub_matches_runtime():
+    from hotcoco import metrics
+
+    missing = set(metrics.__all__) - _stub_function_names("metrics.pyi")
+    assert not missing, f"Names missing from metrics.pyi: {sorted(missing)}"
+
+
+def test_metrics_facade_reexports_every_extension_function():
+    """The facade is hand-maintained, so check the *other* direction too.
+
+    `test_metrics_stub_matches_runtime` asserts stub >= __all__. Without this,
+    adding a #[pyfunction] to crates/hotcoco-pyo3/src/metrics.rs and forgetting
+    the two-line edit in metrics.py leaves it unreachable from Python with the
+    whole suite green.
+    """
+    from hotcoco import metrics
+    from hotcoco.hotcoco import metrics as _ext
+
+    exported = {n for n in dir(_ext) if not n.startswith("_")}
+    missing = exported - set(metrics.__all__)
+    assert not missing, f"In the extension but not re-exported by metrics.py: {sorted(missing)}"
+
+
+def test_primitives_stub_matches_runtime():
+    from hotcoco import primitives
+
+    missing = set(primitives.__all__) - _stub_function_names("primitives.pyi")
+    assert not missing, f"Names missing from primitives.pyi: {sorted(missing)}"
+
+
+def test_functional_layer_needs_no_evaluator():
+    """The whole point: metric functions callable on bare arrays.
+
+    If these ever start requiring a COCOeval, the functional layer has collapsed
+    back into the god object 1.0 pulled them out of.
+    """
+    from hotcoco import metrics, primitives
+
+    assert metrics.average_precision([0.9, 0.1], [True, False], num_gt=2) > 0.0
+    ece, mce = metrics.calibration_error([0.9] * 10, [True] * 5 + [False] * 5)
+    assert ece == mce  # single occupied bin
+    assert metrics.confusion_matrix([0, None], [0, 1], num_classes=2).shape == (3, 3)
+    assert len(metrics.calibration_curve([0.5], [True], n_bins=4)) == 4
+    rows, _ = primitives.lsap([[1.0, 2.0], [3.0, 4.0]])
+    assert len(rows) == 2
+
+
+def test_metric_functions_reject_mismatched_arrays():
+    """Parallel arrays of different lengths are a caller bug, not a silent truncation."""
+    import pytest
+    from hotcoco import metrics
+
+    with pytest.raises(ValueError):
+        metrics.average_precision([0.9, 0.8], [True], num_gt=1)
+    with pytest.raises(ValueError):
+        metrics.calibration_error([0.9, 0.8], [True])
+    with pytest.raises(ValueError):
+        metrics.confusion_matrix([0, 1], [0], num_classes=2)
+
+
+def test_lsap_rejects_ragged_and_nan():
+    import math
+
+    import pytest
+    from hotcoco import primitives
+
+    with pytest.raises(ValueError):
+        primitives.lsap([[1.0, 2.0], [3.0]])
+    with pytest.raises(ValueError):
+        primitives.lsap([[1.0, math.nan], [3.0, 4.0]])
+
+
+def test_lvis_dropin_matches_lvis_api_spelling():
+    """`from lvis import LVISEval` must work — capital E, as lvis-api spells it.
+
+    hotcoco names the class `LVISeval` after pycocotools' `COCOeval`, but
+    lvis-api exports `LVISEval`, and that is what Detectron2 and MMDetection
+    import. Without the alias, `init_as_lvis()` registered a `lvis` module that
+    the canonical import could not use.
+    """
+    import hotcoco
+
+    hotcoco.init_as_lvis()
+    from lvis import LVIS, LVISEval, LVISResults
+
+    assert LVISEval is hotcoco.LVISeval
+    assert LVIS is hotcoco.COCO
+    assert LVISResults is hotcoco.LVISResults

@@ -249,12 +249,7 @@ pub fn merge(py: Python<'_>, rles: &Bound<'_, PyAny>, intersect: bool) -> PyResu
 }
 
 fn check_iscrowd_len(iscrowd_len: usize, gt_len: usize) -> PyResult<()> {
-    if iscrowd_len != gt_len {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "iscrowd length ({iscrowd_len}) must equal gt length ({gt_len})"
-        )));
-    }
-    Ok(())
+    crate::convert::check_parallel(iscrowd_len, gt_len, "iscrowd", "gt")
 }
 
 // ---------------------------------------------------------------------------

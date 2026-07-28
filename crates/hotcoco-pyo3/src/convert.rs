@@ -377,3 +377,41 @@ pub fn py_to_dataset(dict: &Bound<'_, PyDict>) -> PyResult<Dataset> {
         licenses: vec![],
     })
 }
+
+// ---------------------------------------------------------------------------
+// Shared marshaling helpers
+// ---------------------------------------------------------------------------
+
+/// Encode one calibration bin as a Python dict.
+///
+/// Shared by `COCOeval.calibration()` and `metrics.calibration_curve()`. Both
+/// expose the same `CalibrationBin`, and when each hand-wrote its own five
+/// `set_item` calls, adding a field meant remembering to update two places — so
+/// the two Python surfaces could silently start describing the same struct
+/// differently.
+pub fn calibration_bin_to_py<'py>(
+    py: Python<'py>,
+    bin: &hotcoco_core::CalibrationBin,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("bin_lower", bin.bin_lower)?;
+    d.set_item("bin_upper", bin.bin_upper)?;
+    d.set_item("avg_confidence", bin.avg_confidence)?;
+    d.set_item("avg_accuracy", bin.avg_accuracy)?;
+    d.set_item("count", bin.count)?;
+    Ok(d)
+}
+
+/// Reject parallel arrays of differing length.
+///
+/// Every function taking `(scores, matched)`-style arrays needs this, and a
+/// silent truncation would report a metric over a subset the caller never asked
+/// for.
+pub fn check_parallel(a: usize, b: usize, name_a: &str, name_b: &str) -> PyResult<()> {
+    if a != b {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name_a} and {name_b} must have the same length, got {a} and {b}"
+        )));
+    }
+    Ok(())
+}

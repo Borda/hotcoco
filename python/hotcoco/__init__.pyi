@@ -8,6 +8,14 @@ from typing import Any, overload
 import numpy as np
 import numpy.typing as npt
 
+# Submodule namespaces. Re-exported explicitly (`as` form) so `from hotcoco
+# import metrics` type-checks, not only `import hotcoco.metrics` — a stub
+# package shadows the runtime `__init__.py`, so a checker sees only what this
+# file declares.
+from . import detection as detection
+from . import metrics as metrics
+from . import primitives as primitives
+
 # ---------------------------------------------------------------------------
 # COCO
 # ---------------------------------------------------------------------------

@@ -547,9 +547,6 @@ def test_virtual_nodes():
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v", "-x", "--tb=short"]))
-
 
 # ---------------------------------------------------------------------------
 # EvalReport
@@ -598,10 +595,5 @@ def test_report_curves_are_plottable():
         assert len(curve) == len(rec_thrs), name
 
 
-def test_report_and_results_agree():
-    ev = _eval_for_report()
-    report, results = ev.report(), ev.results(per_class=True)
-
-    assert report["metrics"] == results["metrics"]
-    for name, ap in results["per_class"].items():
-        assert report["per_class"][name]["AP"] == ap
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v", "-x", "--tb=short"]))

@@ -11,6 +11,8 @@ use hotcoco_core::Annotation;
 
 mod convert;
 mod mask;
+mod metrics;
+mod primitives;
 
 /// Convert a hotcoco error to a Python exception with appropriate type mapping.
 fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
@@ -1368,7 +1370,7 @@ Returns a dict with:
   threshold (``'pr@0.50'`` ...) plus the shared ``'rec_thrs'`` x-axis
 - ``params``: the evaluation parameters used
 
-The curves are the aggregate slice a chart draws, meaned over categories at
+The curves are the aggregate slice a chart draws, averaged over categories at
 ``area='all'`` and the largest ``max_dets``. For the full per-category arrays use
 ``.eval['precision']``, which is ~1M floats on COCO.
 
@@ -1721,13 +1723,7 @@ Example\n\
 
         let bins_list = PyList::empty(py);
         for b in &cal.bins {
-            let d = PyDict::new(py);
-            d.set_item("bin_lower", b.bin_lower)?;
-            d.set_item("bin_upper", b.bin_upper)?;
-            d.set_item("avg_confidence", b.avg_confidence)?;
-            d.set_item("avg_accuracy", b.avg_accuracy)?;
-            d.set_item("count", b.count)?;
-            bins_list.append(d)?;
+            bins_list.append(convert::calibration_bin_to_py(py, b)?)?;
         }
 
         // Map category IDs to names for per_category
@@ -2247,6 +2243,15 @@ fn hotcoco(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     mask_mod.add_function(wrap_pyfunction!(mask::fr_py_objects, &mask_mod)?)?;
     mask_mod.add_function(wrap_pyfunction!(mask::fr_py_objects_snake, &mask_mod)?)?;
     m.add_submodule(&mask_mod)?;
+
+    // The functional layer — metric functions and matching kernels, callable
+    // without a COCOeval. `__init__.py` also registers these in sys.modules so
+    // `import hotcoco.metrics` works and not just `from hotcoco import metrics`;
+    // add_submodule only sets an attribute.
+    let metrics_mod = metrics::register(py)?;
+    m.add_submodule(&metrics_mod)?;
+    let primitives_mod = primitives::register(py)?;
+    m.add_submodule(&primitives_mod)?;
 
     Ok(())
 }

@@ -119,6 +119,13 @@ class LVISeval:
         return COCOeval(gt, dt, iou_type, lvis_style=True)
 
 
+# lvis-api spells it `LVISEval`, with a capital E — `from lvis import LVISEval`
+# is the canonical import, and it is what Detectron2 and MMDetection write. The
+# `LVISeval` spelling above follows pycocotools' `COCOeval`, so both exist: one
+# for consistency with the rest of hotcoco, one so `init_as_lvis()` actually
+# satisfies the import it promises to.
+LVISEval = LVISeval
+
 # lvis-api uses LVIS as the dataset class name, not COCO.
 LVIS = COCO
 
@@ -137,7 +144,7 @@ class LVISResults:
 
 import sys as _sys  # noqa: E402
 
-from . import detection  # noqa: E402, F401
+from . import detection, metrics, primitives  # noqa: E402, F401
 
 # `mask` is a PyO3 submodule object, which `from hotcoco import mask` finds as an
 # attribute but `import hotcoco.mask` does not — the import system looks in
@@ -155,6 +162,7 @@ __all__ = [
     "CocoEvaluator",
     "Hierarchy",
     "LVIS",
+    "LVISEval",
     "LVISResults",
     "LVISeval",
     "Params",
@@ -163,4 +171,6 @@ __all__ = [
     "init_as_lvis",
     "init_as_pycocotools",
     "mask",
+    "metrics",
+    "primitives",
 ]
