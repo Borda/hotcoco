@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use rayon::prelude::*;
 
 use crate::coco::COCO;
+use crate::metrics::confusion;
 use crate::params::IouType;
 use crate::primitives;
 use crate::primitives::sim;
@@ -151,131 +152,133 @@ impl COCOeval {
         let coco_gt = &self.coco_gt;
         let coco_dt = &self.coco_dt;
 
-        // Compute a (k×k) local matrix for each image in parallel, then sum.
-        let matrices: Vec<Vec<u64>> = img_ids
+        // One accumulator per rayon worker, written in place. Collecting a matrix
+        // per image held 5000 × 81² × 8 bytes ≈ 262 MB resident on COCO val to
+        // produce a single 52 KB result; allocating one per image and adding it in
+        // still costs a memset plus a full read-modify-write per image, which is
+        // ~86 GB of traffic on Objects365 (365 classes) and scales with K², not
+        // with the data. Counts are integer addition, so fold order cannot change
+        // the answer.
+        let matrix = img_ids
             .par_iter()
-            .map(|&img_id| {
-                let mut local = vec![0u64; k * k];
+            .fold(
+                || vec![0u64; k * k],
+                |mut acc, &img_id| {
+                    // --- Collect non-crowd GTs: (cat_idx, ann_id) ---
+                    let gt_pairs: Vec<(usize, u64)> = cat_ids
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(cat_idx, &cat_id)| {
+                            coco_gt
+                                .get_ann_ids_for_img_cat(img_id, cat_id)
+                                .iter()
+                                .copied()
+                                .filter_map(move |ann_id| {
+                                    let ann = coco_gt.get_ann(ann_id)?;
+                                    if ann.iscrowd {
+                                        return None;
+                                    }
+                                    Some((cat_idx, ann_id))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
 
-                // --- Collect non-crowd GTs: (cat_idx, ann_id) ---
-                let gt_pairs: Vec<(usize, u64)> = cat_ids
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(cat_idx, &cat_id)| {
-                        coco_gt
-                            .get_ann_ids_for_img_cat(img_id, cat_id)
-                            .iter()
-                            .copied()
-                            .filter_map(move |ann_id| {
-                                let ann = coco_gt.get_ann(ann_id)?;
-                                if ann.iscrowd {
-                                    return None;
-                                }
-                                Some((cat_idx, ann_id))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
+                    // --- Collect DTs: (cat_idx, score, ann_id), apply min_score ---
+                    let mut dt_pairs: Vec<(usize, f64, u64)> = cat_ids
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(cat_idx, &cat_id)| {
+                            coco_dt
+                                .get_ann_ids_for_img_cat(img_id, cat_id)
+                                .iter()
+                                .copied()
+                                .filter_map(move |ann_id| {
+                                    let ann = coco_dt.get_ann(ann_id)?;
+                                    let score = ann.score.unwrap_or(0.0);
+                                    if min_score.is_some_and(|ms| score < ms) {
+                                        return None;
+                                    }
+                                    Some((cat_idx, score, ann_id))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
 
-                // --- Collect DTs: (cat_idx, score, ann_id), apply min_score ---
-                let mut dt_pairs: Vec<(usize, f64, u64)> = cat_ids
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(cat_idx, &cat_id)| {
-                        coco_dt
-                            .get_ann_ids_for_img_cat(img_id, cat_id)
-                            .iter()
-                            .copied()
-                            .filter_map(move |ann_id| {
-                                let ann = coco_dt.get_ann(ann_id)?;
-                                let score = ann.score.unwrap_or(0.0);
-                                if min_score.is_some_and(|ms| score < ms) {
-                                    return None;
-                                }
-                                Some((cat_idx, score, ann_id))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
-
-                // Sort DTs by score descending, then truncate to max_det.
-                dt_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                if dt_pairs.len() > eff_max_det {
-                    dt_pairs.truncate(eff_max_det);
-                }
-
-                if gt_pairs.is_empty() && dt_pairs.is_empty() {
-                    return local;
-                }
-
-                let d = dt_pairs.len();
-                let g = gt_pairs.len();
-
-                // --- Compute cross-category IoU matrix [D × G] ---
-                let dt_ids: Vec<u64> = dt_pairs.iter().map(|&(_, _, ann_id)| ann_id).collect();
-                let gt_ids: Vec<u64> = gt_pairs.iter().map(|&(_, ann_id)| ann_id).collect();
-                let iou_matrix =
-                    Self::cross_category_iou(&dt_ids, &gt_ids, coco_dt, coco_gt, iou_type);
-
-                // --- Greedy matching at iou_thr (DTs already in score-sorted order) ---
-                //
-                // The shared matcher, at its simplest setting: one threshold, every
-                // GT non-ignored (so phase 2 never runs), nothing rematchable (no
-                // crowd — this is a cross-category matrix, where a crowd GT would
-                // double-count). `iou_thr` is passed through **unclamped**: the
-                // confusion matrix is hotcoco-native analysis over a user-chosen
-                // threshold, so it does not inherit pycocotools' `min(t, 1-1e-10)`
-                // match floor. See the policy table in `primitives::greedy`.
-                //
-                // The degenerate shapes need no special-casing: `cross_category_iou`
-                // returns an empty matrix exactly when `d == 0 || g == 0`, and
-                // `greedy_match` never indexes the matrix in either case — it yields
-                // one `None` per detection, so every DT falls through to the
-                // background row and every GT to the background column.
-                let iou_flat: Vec<f64> = iou_matrix.into_iter().flatten().collect();
-                let mut matches = primitives::greedy::greedy_match(
-                    &iou_flat,
-                    d,
-                    g,
-                    g, // all GTs non-ignored
-                    &vec![false; g],
-                    &vec![true; g],
-                    &[iou_thr],
-                );
-                // Take both halves of the result — recomputing `gt_matched` from
-                // `dt_gt` would be a second source of truth for the same fact.
-                let matched = matches.dt_gt.swap_remove(0);
-                let gt_matched = matches.gt_matched.swap_remove(0);
-
-                for (di, &gi_opt) in matched.iter().enumerate() {
-                    let dt_cat_idx = dt_pairs[di].0;
-                    if let Some(gi) = gi_opt {
-                        let gt_cat_idx = gt_pairs[gi].0;
-                        local[gt_cat_idx * k + dt_cat_idx] += 1;
-                    } else {
-                        // Unmatched DT → false positive (background row)
-                        local[num_cats * k + dt_cat_idx] += 1;
+                    // Sort DTs by score descending, then truncate to max_det.
+                    dt_pairs
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    if dt_pairs.len() > eff_max_det {
+                        dt_pairs.truncate(eff_max_det);
                     }
-                }
 
-                // Unmatched GTs → false negatives (background column)
-                for (is_matched, &(gt_cat_idx, _)) in gt_matched.iter().zip(gt_pairs.iter()) {
-                    if !is_matched {
-                        local[gt_cat_idx * k + num_cats] += 1;
+                    if gt_pairs.is_empty() && dt_pairs.is_empty() {
+                        return acc;
                     }
-                }
 
-                local
-            })
-            .collect();
+                    let d = dt_pairs.len();
+                    let g = gt_pairs.len();
 
-        // Reduce: element-wise sum of per-image matrices.
-        let mut matrix = vec![0u64; k * k];
-        for local in matrices {
-            for (i, &v) in local.iter().enumerate() {
-                matrix[i] += v;
-            }
-        }
+                    // --- Compute cross-category IoU matrix [D × G] ---
+                    let dt_ids: Vec<u64> = dt_pairs.iter().map(|&(_, _, ann_id)| ann_id).collect();
+                    let gt_ids: Vec<u64> = gt_pairs.iter().map(|&(_, ann_id)| ann_id).collect();
+                    let iou_matrix =
+                        Self::cross_category_iou(&dt_ids, &gt_ids, coco_dt, coco_gt, iou_type);
+
+                    // --- Greedy matching at iou_thr (DTs already in score-sorted order) ---
+                    //
+                    // The shared matcher, at its simplest setting: one threshold, every
+                    // GT non-ignored (so phase 2 never runs), nothing rematchable (no
+                    // crowd — this is a cross-category matrix, where a crowd GT would
+                    // double-count). `iou_thr` is passed through **unclamped**: the
+                    // confusion matrix is hotcoco-native analysis over a user-chosen
+                    // threshold, so it does not inherit pycocotools' `min(t, 1-1e-10)`
+                    // match floor. See the policy table in `primitives::greedy`.
+                    //
+                    // The degenerate shapes need no special-casing: `cross_category_iou`
+                    // returns an empty matrix exactly when `d == 0 || g == 0`, and
+                    // `greedy_match` never indexes the matrix in either case — it yields
+                    // one `None` per detection, so every DT falls through to the
+                    // background row and every GT to the background column.
+                    let iou_flat: Vec<f64> = iou_matrix.into_iter().flatten().collect();
+                    let mut matches = primitives::greedy::greedy_match(
+                        &iou_flat,
+                        d,
+                        g,
+                        g, // all GTs non-ignored
+                        &vec![false; g],
+                        &vec![true; g],
+                        &[iou_thr],
+                    );
+                    // Take both halves of the result — recomputing `gt_matched` from
+                    // `dt_gt` would be a second source of truth for the same fact.
+                    let matched = matches.dt_gt.swap_remove(0);
+                    let gt_matched = matches.gt_matched.swap_remove(0);
+
+                    // Turn the matching into one record per decision: every detection
+                    // (paired with a GT category or with background), then every GT
+                    // that nothing claimed. Translating matches into labeled pairs is
+                    // the detection-specific step — the counting itself belongs to
+                    // `metrics::confusion` and is shared with every other family.
+                    let mut gt_labels: Vec<Option<usize>> = Vec::with_capacity(d + g);
+                    let mut dt_labels: Vec<Option<usize>> = Vec::with_capacity(d + g);
+
+                    for (di, &gi_opt) in matched.iter().enumerate() {
+                        gt_labels.push(gi_opt.map(|gi| gt_pairs[gi].0));
+                        dt_labels.push(Some(dt_pairs[di].0));
+                    }
+                    for (is_matched, &(gt_cat_idx, _)) in gt_matched.iter().zip(gt_pairs.iter()) {
+                        if !is_matched {
+                            gt_labels.push(Some(gt_cat_idx));
+                            dt_labels.push(None);
+                        }
+                    }
+
+                    confusion::accumulate_confusion(&mut acc, &gt_labels, &dt_labels, num_cats);
+                    acc
+                },
+            )
+            .reduce(|| vec![0u64; k * k], add_into);
 
         let cat_names: Vec<String> = cat_ids
             .iter()
@@ -294,6 +297,18 @@ impl COCOeval {
             iou_thr,
         }
     }
+}
+
+/// Element-wise `a += b`, the merge step for both halves of the parallel fold.
+///
+/// Written once rather than inline in each: a change to how counts merge — a
+/// saturating add, an overflow check, a narrower width — must apply to the
+/// per-worker and cross-worker paths together or they disagree.
+fn add_into(mut a: Vec<u64>, b: Vec<u64>) -> Vec<u64> {
+    for (slot, v) in a.iter_mut().zip(b) {
+        *slot += v;
+    }
+    a
 }
 
 /// Per-category confusion matrix for object detection.
@@ -329,17 +344,6 @@ impl ConfusionMatrix {
     /// Each row is divided by its sum so rows sum to 1.0.
     /// Zero rows remain all-zero.
     pub fn normalized(&self) -> Vec<f64> {
-        let k = self.num_cats + 1;
-        let mut norm = vec![0.0f64; k * k];
-        for row in 0..k {
-            let row_sum: u64 = (0..k).map(|col| self.matrix[row * k + col]).sum();
-            if row_sum > 0 {
-                let denom = row_sum as f64;
-                for col in 0..k {
-                    norm[row * k + col] = self.matrix[row * k + col] as f64 / denom;
-                }
-            }
-        }
-        norm
+        confusion::row_normalize(&self.matrix, self.num_cats)
     }
 }
