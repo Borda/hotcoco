@@ -3,25 +3,10 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use super::COCOeval;
+use crate::metrics::calibration::{calibration_curve, calibration_error};
 
-/// Single bin in a calibration analysis.
-///
-/// Each bin covers an equal-width interval of the `[0, 1]` confidence range.
-/// After bucketing detections by confidence, `avg_confidence` and
-/// `avg_accuracy` are the means within the bin.
-#[derive(Debug, Clone, Serialize)]
-pub struct CalibrationBin {
-    /// Lower bound of the confidence interval (inclusive).
-    pub bin_lower: f64,
-    /// Upper bound of the confidence interval (exclusive, except last bin).
-    pub bin_upper: f64,
-    /// Mean predicted confidence of detections in this bin.
-    pub avg_confidence: f64,
-    /// Fraction of detections in this bin that are true positives.
-    pub avg_accuracy: f64,
-    /// Number of (non-ignored) detections in this bin.
-    pub count: usize,
-}
+// Private for the same reason as `BootstrapCI` in `compare.rs`.
+use crate::metrics::calibration::CalibrationBin;
 
 /// Confidence calibration analysis result.
 ///
@@ -29,7 +14,9 @@ pub struct CalibrationBin {
 /// detection accuracy. A perfectly calibrated model produces detections at
 /// confidence 0.8 that are correct 80% of the time.
 ///
-/// Use [`COCOeval::calibration`] to compute.
+/// Use [`COCOeval::calibration`] to compute. For the underlying math on arbitrary
+/// `(score, correct)` arrays — no evaluator required — see
+/// [`metrics::calibration`](crate::metrics::calibration).
 #[derive(Debug, Clone, Serialize)]
 pub struct CalibrationResult {
     /// Expected Calibration Error — weighted mean of |accuracy - confidence| per bin.
@@ -48,12 +35,9 @@ pub struct CalibrationResult {
     pub num_detections: usize,
 }
 
-/// A single detection's confidence and correctness for calibration.
-#[derive(Clone, Copy)]
-struct Detection {
-    confidence: f64,
-    correct: bool,
-}
+/// Confidences and outcomes as parallel arrays — the shape every metric function
+/// in [`metrics`](crate::metrics) takes.
+type ScoredOutcomes = (Vec<f64>, Vec<bool>);
 
 impl COCOeval {
     /// Compute confidence calibration metrics.
@@ -61,6 +45,12 @@ impl COCOeval {
     /// Requires [`evaluate`](COCOeval::evaluate) to have been called first.
     /// Iterates all per-image evaluation results and buckets detections by
     /// confidence score, computing accuracy (fraction of TPs) per bin.
+    ///
+    /// This is the detection adapter over
+    /// [`metrics::calibration`](crate::metrics::calibration): it decides which
+    /// detections count (the "all" area range, non-ignored, at `iou_threshold`)
+    /// and the metric functions do the rest. To calibrate scores that did not come
+    /// from a `COCOeval`, call those functions directly.
     ///
     /// # Arguments
     ///
@@ -96,12 +86,12 @@ impl COCOeval {
 
         // Use the "all" area range, matching standard COCO evaluation semantics.
         // Fallback to first area range if "all" label is absent (consistent with tide.rs).
-        let target_area_rng = self.params.area_range_idx("all").unwrap_or(0);
+        let target_area_rng = self.params.all_area_idx();
         let target_area = self.params.area_ranges[target_area_rng].range;
 
         // Collect detections globally and per-category
-        let mut all_dets: Vec<Detection> = Vec::new();
-        let mut per_cat_dets: HashMap<u64, Vec<Detection>> = HashMap::new();
+        let mut all: ScoredOutcomes = (Vec::new(), Vec::new());
+        let mut per_cat: HashMap<u64, ScoredOutcomes> = HashMap::new();
 
         for eval_img in self.eval_imgs.iter().flatten() {
             // Filter to "all" area range (evaluate() uses a single max_det for all entries)
@@ -118,33 +108,31 @@ impl COCOeval {
                 .min(ignored.len())
                 .min(eval_img.dt_scores.len());
 
+            // Resolved once per image rather than once per detection — the entry
+            // is the same for every detection in an eval_img, and on COCO val that
+            // is ~500K hash lookups collapsed to ~20K.
+            let cat = per_cat.entry(eval_img.category_id).or_default();
+
             for d in 0..n {
                 if ignored[d] {
                     continue;
                 }
-                let det = Detection {
-                    confidence: eval_img.dt_scores[d],
-                    correct: matched[d],
-                };
-                per_cat_dets
-                    .entry(eval_img.category_id)
-                    .or_default()
-                    .push(det);
-                all_dets.push(det);
+                let (score, correct) = (eval_img.dt_scores[d], matched[d]);
+                cat.0.push(score);
+                cat.1.push(correct);
+                all.0.push(score);
+                all.1.push(correct);
             }
         }
 
-        let bins = compute_bins(&all_dets, n_bins);
-        let (ece, mce) = compute_ece_mce(&bins, all_dets.len());
-        let num_detections = all_dets.len();
+        let bins = calibration_curve(&all.0, &all.1, n_bins);
+        let (ece, mce) = calibration_error(&bins);
 
-        // Per-category ECE
-        let per_category: HashMap<u64, f64> = per_cat_dets
+        let per_category: HashMap<u64, f64> = per_cat
             .iter()
-            .map(|(&cat_id, dets)| {
-                let cat_bins = compute_bins(dets, n_bins);
-                let (cat_ece, _) = compute_ece_mce(&cat_bins, dets.len());
-                (cat_id, cat_ece)
+            .map(|(&cat_id, (scores, matched))| {
+                let cat_bins = calibration_curve(scores, matched, n_bins);
+                (cat_id, calibration_error(&cat_bins).0)
             })
             .collect();
 
@@ -155,129 +143,7 @@ impl COCOeval {
             per_category,
             iou_threshold,
             n_bins,
-            num_detections,
+            num_detections: all.0.len(),
         })
-    }
-}
-
-fn compute_bins(dets: &[Detection], n_bins: usize) -> Vec<CalibrationBin> {
-    let mut bins: Vec<CalibrationBin> = (0..n_bins)
-        .map(|i| {
-            let lower = i as f64 / n_bins as f64;
-            let upper = (i + 1) as f64 / n_bins as f64;
-            CalibrationBin {
-                bin_lower: lower,
-                bin_upper: upper,
-                avg_confidence: 0.0,
-                avg_accuracy: 0.0,
-                count: 0,
-            }
-        })
-        .collect();
-
-    for det in dets {
-        // Bin index: clamp to [0, n_bins-1]
-        let idx = ((det.confidence * n_bins as f64) as usize).min(n_bins - 1);
-        bins[idx].avg_confidence += det.confidence;
-        bins[idx].avg_accuracy += if det.correct { 1.0 } else { 0.0 };
-        bins[idx].count += 1;
-    }
-
-    for bin in &mut bins {
-        if bin.count > 0 {
-            let n = bin.count as f64;
-            bin.avg_confidence /= n;
-            bin.avg_accuracy /= n;
-        }
-    }
-
-    bins
-}
-
-fn compute_ece_mce(bins: &[CalibrationBin], total: usize) -> (f64, f64) {
-    if total == 0 {
-        return (0.0, 0.0);
-    }
-    let mut ece = 0.0;
-    let mut mce = 0.0f64;
-    for bin in bins {
-        if bin.count > 0 {
-            let gap = (bin.avg_accuracy - bin.avg_confidence).abs();
-            ece += (bin.count as f64 / total as f64) * gap;
-            mce = mce.max(gap);
-        }
-    }
-    (ece, mce)
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_bins_perfect_calibration() {
-        // Detections where confidence == accuracy in each bin
-        let dets: Vec<Detection> = (0..100)
-            .map(|i| {
-                let conf = (i as f64 + 0.5) / 100.0;
-                Detection {
-                    confidence: conf,
-                    // For perfect calibration at bin level, each bin should have
-                    // accuracy matching avg confidence. Use a simplified model.
-                    correct: i % 2 == 0, // 50% correct overall
-                }
-            })
-            .collect();
-
-        let bins = compute_bins(&dets, 10);
-        assert_eq!(bins.len(), 10);
-        // Each bin should have 10 detections
-        for bin in &bins {
-            assert_eq!(bin.count, 10);
-        }
-    }
-
-    #[test]
-    fn test_ece_all_correct_high_confidence() {
-        // All detections correct with confidence ~0.95
-        let dets: Vec<Detection> = (0..100)
-            .map(|_| Detection {
-                confidence: 0.95,
-                correct: true,
-            })
-            .collect();
-
-        let bins = compute_bins(&dets, 10);
-        let (ece, mce) = compute_ece_mce(&bins, dets.len());
-        // accuracy = 1.0, confidence = 0.95, gap = 0.05
-        assert!((ece - 0.05).abs() < 1e-9);
-        assert!((mce - 0.05).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_ece_empty() {
-        let dets: Vec<Detection> = vec![];
-        let bins = compute_bins(&dets, 10);
-        let (ece, mce) = compute_ece_mce(&bins, 0);
-        assert_eq!(ece, 0.0);
-        assert_eq!(mce, 0.0);
-    }
-
-    #[test]
-    fn test_ece_single_bin_overconfident() {
-        // All detections at confidence 0.9 but only 50% correct
-        let mut dets = Vec::new();
-        for i in 0..100 {
-            dets.push(Detection {
-                confidence: 0.9,
-                correct: i < 50,
-            });
-        }
-        let bins = compute_bins(&dets, 10);
-        let (ece, mce) = compute_ece_mce(&bins, dets.len());
-        // gap = |0.5 - 0.9| = 0.4, weight = 1.0
-        assert!((ece - 0.4).abs() < 1e-9);
-        assert!((mce - 0.4).abs() < 1e-9);
     }
 }

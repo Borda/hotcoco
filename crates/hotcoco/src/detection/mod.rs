@@ -21,7 +21,7 @@ mod summarize;
 mod tide;
 
 pub use accumulate::{AccumulatedEval, EvalShape};
-pub use calibration::{CalibrationBin, CalibrationResult};
+pub use calibration::CalibrationResult;
 pub use compare::{BootstrapCI, CategoryDelta, CompareOpts, ComparisonResult, compare};
 pub use confusion::ConfusionMatrix;
 pub use diagnostics::{
