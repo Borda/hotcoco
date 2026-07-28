@@ -5,7 +5,7 @@
 | Feature | pycocotools | faster-coco-eval | hotcoco |
 |---------|-------------|------------------|---------|
 | **Installation** | Prebuilt wheels available | Prebuilt wheels available | Prebuilt wheels — `pip install` just works |
-| **Metric parity** | Reference | Exact | ≤1e-4 bbox, ≤2e-4 segm, exact keypoints |
+| **Metric parity** | Reference | Exact | All 34 metrics exact to float precision (≤3.7e-14) |
 | **LVIS evaluation** | No | Yes — via `lvis_style=True` flag | Yes — 13 metrics, `LVISeval` class, `init_as_lvis()` |
 | **TIDE error analysis** | No | No | Yes — 6 error types, ΔAP per type |
 | **Confusion matrix** | No | No | Yes — cross-category, configurable threshold |
@@ -69,64 +69,75 @@ Peak RAM is the peak working set (physical memory). Committed includes swap — 
 
 ## Metric parity
 
-**Dataset:** COCO val2017 — 5,000 images, synthetic detections (included in repository)
+**Reference:** pycocotools 2.0.11, numpy 2.4.3.
+**Ground truth:** COCO val2017 — 5,000 images.
+**Detections:** the published `instances_val2017_fake*_results.json` files from
+[ppwwyyxx/cocoapi](https://github.com/ppwwyyxx/cocoapi), the same inputs pycocotools uses in its own
+tests. Both are fetched by `just download-coco` — `data/` is not checked into the repository.
 
-All 34 metrics match pycocotools within tolerance (bbox ≤1e-4, segm ≤2e-4, keypoints exact):
+**All 34 metrics agree to within 3.7e-14** — floating-point noise, the last few
+bits a `f64` can represent. Diffs below are raw measured differences, not rounded.
 
 ### Bounding box
 
 | Metric | pycocotools | hotcoco | Diff |
 |--------|-------------|---------|------|
-| AP     | 0.578       | 0.578   | 0.000 |
-| AP50   | 0.861       | 0.861   | 0.000 |
-| AP75   | 0.600       | 0.600   | 0.000 |
-| APs    | 0.327       | 0.327   | 0.000 |
-| APm    | 0.707       | 0.707   | 0.000 |
-| APl    | 0.918       | 0.918   | 0.000 |
-| AR1    | 0.427       | 0.427   | 0.000 |
-| AR10   | 0.687       | 0.687   | 0.000 |
-| AR100  | 0.701       | 0.701   | 0.000 |
-| ARs    | 0.437       | 0.437   | 0.000 |
-| ARm    | 0.806       | 0.806   | 0.000 |
-| ARl    | 0.960       | 0.960   | 0.000 |
+| AP     | 0.57793065 | 0.57793065 | 3.02e-14 |
+| AP50   | 0.86052720 | 0.86052720 | 8.88e-16 |
+| AP75   | 0.60003745 | 0.60003745 | 1.04e-14 |
+| APs    | 0.32723763 | 0.32723763 | 1.57e-14 |
+| APm    | 0.70684507 | 0.70684507 | 3.63e-14 |
+| APl    | 0.91751661 | 0.91751661 | 1.27e-14 |
+| AR1    | 0.42708926 | 0.42708926 | 3.33e-16 |
+| AR10   | 0.68690535 | 0.68690535 | 6.66e-16 |
+| AR100  | 0.70127765 | 0.70127765 | 2.22e-16 |
+| ARs    | 0.43712612 | 0.43712612 | 0.00e+00 |
+| ARm    | 0.80637778 | 0.80637778 | 3.33e-16 |
+| ARl    | 0.95956720 | 0.95956720 | 5.55e-16 |
 
-7 of 12 metrics are exact; the remaining 5 differ by less than 1e-4.
+Every bbox metric agrees to within 3.7e-14 — the limit of double precision. The
+threshold grids are constructed to match `numpy.linspace` bit-for-bit, which
+removed the last systematic source of divergence here.
 
 ### Segmentation
 
 | Metric | pycocotools | hotcoco | Diff |
 |--------|-------------|---------|------|
-| AP     | 0.658       | 0.658   | 0.000 |
-| AP50   | 0.923       | 0.923   | 0.000 |
-| AP75   | 0.701       | 0.701   | 0.000 |
-| APs    | 0.461       | 0.461   | 0.000 |
-| APm    | 0.772       | 0.772   | 0.000 |
-| APl    | 0.934       | 0.934   | 0.000 |
-| AR1    | 0.455       | 0.455   | 0.000 |
-| AR10   | 0.746       | 0.746   | 0.000 |
-| AR100  | 0.762       | 0.762   | 0.000 |
-| ARs    | 0.546       | 0.546   | 0.000 |
-| ARm    | 0.859       | 0.859   | 0.000 |
-| ARl    | 0.981       | 0.981   | 0.000 |
+| AP     | 0.65763117 | 0.65763117 | 1.11e-14 |
+| AP50   | 0.92315461 | 0.92315461 | 8.77e-15 |
+| AP75   | 0.70141134 | 0.70141134 | 6.55e-15 |
+| APs    | 0.46056290 | 0.46056290 | 9.49e-15 |
+| APm    | 0.77182113 | 0.77182113 | 1.19e-14 |
+| APl    | 0.93431919 | 0.93431919 | 6.11e-15 |
+| AR1    | 0.45457448 | 0.45457448 | 4.44e-16 |
+| AR10   | 0.74556101 | 0.74556101 | 1.78e-15 |
+| AR100  | 0.76167772 | 0.76167772 | 1.89e-15 |
+| ARs    | 0.54570783 | 0.54570783 | 0.00e+00 |
+| ARm    | 0.85891625 | 0.85891625 | 0.00e+00 |
+| ARl    | 0.98103170 | 0.98103170 | 4.44e-16 |
 
-All metrics accurate to within 2e-4 (shown rounded to 3 decimal places).
+Exact. Segmentation was the last family carrying a real residual (AP ~1e-5);
+it came from polygon rasterization, where the reference's C compiler fuses
+`s*t+ys` into a single FMA and Rust does not. Matching that arithmetic closed it.
 
 ### Keypoints
 
 | Metric | pycocotools | hotcoco | Diff |
 |--------|-------------|---------|------|
-| AP     | 0.413       | 0.413   | 0.000 |
-| AP50   | 0.606       | 0.606   | 0.000 |
-| AP75   | 0.429       | 0.429   | 0.000 |
-| APm    | 0.403       | 0.403   | 0.000 |
-| APl    | 0.883       | 0.883   | 0.000 |
-| AR1    | 0.766       | 0.766   | 0.000 |
-| AR10   | 0.975       | 0.975   | 0.000 |
-| AR100  | 0.806       | 0.806   | 0.000 |
-| ARm    | 0.622       | 0.622   | 0.000 |
-| ARl    | 0.963       | 0.963   | 0.000 |
+| AP     | 0.41255451 | 0.41255451 | 1.67e-15 |
+| AP50   | 0.60631206 | 0.60631206 | 1.11e-16 |
+| AP75   | 0.42916428 | 0.42916428 | 1.11e-16 |
+| APm    | 0.40337197 | 0.40337197 | 1.39e-15 |
+| APl    | 0.88304294 | 0.88304294 | 1.44e-15 |
+| AR     | 0.76642003 | 0.76642003 | 1.11e-16 |
+| AR50   | 0.97481108 | 0.97481108 | 0.00e+00 |
+| AR75   | 0.80636020 | 0.80636020 | 0.00e+00 |
+| ARm    | 0.62190658 | 0.62190658 | 0.00e+00 |
+| ARl    | 0.96335935 | 0.96335935 | 0.00e+00 |
 
-Keypoint metrics are exact.
+Keypoint metrics are exact. Note that keypoint evaluation reports `AR`, `AR50`, and
+`AR75` — there is no small area range and no maxDets sweep, so the `AR1`/`AR10`/`AR100`
+of bbox and segm do not apply.
 
 ## Methodology
 

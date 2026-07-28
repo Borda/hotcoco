@@ -252,6 +252,36 @@ fn check_iscrowd_len(iscrowd_len: usize, gt_len: usize) -> PyResult<()> {
     crate::convert::check_parallel(iscrowd_len, gt_len, "iscrowd", "gt")
 }
 
+/// Extract `iscrowd` from bools, ints, or a numpy array of either.
+///
+/// COCO JSON stores `iscrowd` as `0`/`1` integers, and pycocotools takes them
+/// straight through — `maskUtils.iou(dt, gt, [a["iscrowd"] for a in anns])` is the
+/// idiomatic call, as is passing a numpy array. A `Vec<bool>` parameter rejects
+/// both with a `TypeError`, which breaks the drop-in claim on a public API for a
+/// reason the caller cannot guess from the error.
+///
+/// The crate already accepts either spelling when deserializing annotations (see
+/// `types::deserialize_iscrowd`); this is the same convention at the Python edge.
+fn extract_iscrowd(obj: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    let mut out = Vec::new();
+    for item in obj.try_iter()? {
+        let item = item?;
+        // `bool` first: Python's `bool` is a subclass of `int`, and numpy's
+        // `bool_` extracts here but not always as an integer.
+        if let Ok(b) = item.extract::<bool>() {
+            out.push(b);
+        } else if let Ok(i) = item.extract::<i64>() {
+            out.push(i != 0);
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "iscrowd entries must be bool or int (0/1), got {}",
+                item.get_type().name()?
+            )));
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // iou
 // ---------------------------------------------------------------------------
@@ -262,10 +292,11 @@ pub fn iou(
     py: Python<'_>,
     dt: &Bound<'_, PyAny>,
     gt: &Bound<'_, PyAny>,
-    iscrowd: Vec<bool>,
+    iscrowd: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let dt_rles = extract_rle_list(dt)?;
     let gt_rles = extract_rle_list(gt)?;
+    let iscrowd = extract_iscrowd(iscrowd)?;
     check_iscrowd_len(iscrowd.len(), gt_rles.len())?;
     let result = rmask::iou(&dt_rles, &gt_rles, &iscrowd);
     let d = dt_rles.len();
@@ -285,8 +316,9 @@ pub fn bbox_iou(
     py: Python<'_>,
     dt: Vec<[f64; 4]>,
     gt: Vec<[f64; 4]>,
-    iscrowd: Vec<bool>,
+    iscrowd: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
+    let iscrowd = extract_iscrowd(iscrowd)?;
     check_iscrowd_len(iscrowd.len(), gt.len())?;
     let result = rmask::bbox_iou(&dt, &gt, &iscrowd);
     let d = dt.len();
@@ -363,8 +395,11 @@ pub fn rle_from_string(py: Python<'_>, s: &str, h: u32, w: u32) -> PyResult<Py<P
 ///
 /// Parameters
 /// ----------
-/// seg : list[list[float]] | dict | list[dict]
-///     - List of polygon coordinate lists → list of RLE dicts.
+/// seg : list[list[float]] | numpy.ndarray | dict | list[dict]
+///     - List (or 2-D array) of boxes ``[x, y, w, h]`` → list of RLE dicts.
+///     - List of flattened polygons ``[x1, y1, x2, y2, ...]`` → list of RLE dicts.
+///       Entries of exactly 4 values are boxes, more than 4 are polygons —
+///       the same length-based dispatch pycocotools uses.
 ///     - Single uncompressed RLE dict → list of 1 RLE dict.
 ///     - List of uncompressed RLE dicts → list of RLE dicts.
 /// h : int
@@ -407,11 +442,30 @@ pub fn fr_py_objects(
         }
         Ok(list.into_any().unbind())
     } else {
-        // List of polygon coordinate lists
+        // List (or ndarray) of coordinate sequences. pycocotools dispatches on the
+        // length of the first entry — exactly 4 is a `[x, y, w, h]` box, more than
+        // 4 is a flattened polygon — and routing everything to `fr_poly` was
+        // silently wrong for boxes: `fr_poly` returns an empty RLE below three
+        // points, so every bbox produced a blank mask instead of a rectangle.
+        //
+        // One deliberate deviation: pycocotools' box path is reachable only with a
+        // numpy array and raises `TypeError` on a list of lists. Accepting both is
+        // strictly more permissive, so nothing that works against pycocotools
+        // breaks here.
         let list = PyList::empty(py);
         for item in &items {
             let coords: Vec<f64> = item.extract()?;
-            let rle = rmask::fr_poly(&coords, h, w);
+            let rle = match coords.len() {
+                4 => rmask::fr_bbox(&[coords[0], coords[1], coords[2], coords[3]], h, w),
+                n if n > 4 => rmask::fr_poly(&coords, h, w),
+                n => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "frPyObjects: each entry must be a box [x, y, w, h] (4 values) \
+                         or a flattened polygon [x1, y1, x2, y2, ...] (more than 4, \
+                         even count); got {n}"
+                    )));
+                }
+            };
             list.append(rle_to_coco_py(py, &rle)?)?;
         }
         Ok(list.into_any().unbind())

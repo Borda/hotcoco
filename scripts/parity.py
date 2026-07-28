@@ -3,10 +3,15 @@
 Uses third-party published fake result files from ppwwyyxx/cocoapi.
 See docs/getting-started/installation.md for download instructions.
 
-Tolerances match documented verified parity:
-  bbox:      <= 1e-4
-  segm:      <= 2e-4
-  keypoints: exact (0)
+Tolerances are 1e-12 across the board — tight enough that only floating-point
+noise passes.
+
+They used to be 1e-4 (bbox) and 2e-4 (segm), sized around real divergences that
+have since been removed: the threshold grids now match `numpy.linspace`
+bit-for-bit, and polygon rasterization reproduces the reference's FMA contraction.
+Measured worst case across all 34 metrics is now 3.7e-14, so a 1e-4 gate would
+have accepted a number wrong in the fourth decimal place. A gate has to be sized
+to what the code actually does, or it stops being a gate.
 
 Usage:
     uv run python scripts/parity.py
@@ -26,21 +31,21 @@ BENCHMARKS = [
         "gt": DATA_DIR / "annotations/instances_val2017.json",
         "dt": DATA_DIR / "bbox_val2017_results.json",
         "iou_type": "bbox",
-        "tol": 1e-4,
+        "tol": 1e-12,
     },
     {
         "name": "segm",
         "gt": DATA_DIR / "annotations/instances_val2017.json",
         "dt": DATA_DIR / "segm_val2017_results.json",
         "iou_type": "segm",
-        "tol": 2e-4,
+        "tol": 1e-12,
     },
     {
         "name": "keypoints",
         "gt": DATA_DIR / "annotations/person_keypoints_val2017.json",
         "dt": DATA_DIR / "kpt_val2017_results.json",
         "iou_type": "keypoints",
-        "tol": 1e-10,
+        "tol": 1e-12,
     },
 ]
 

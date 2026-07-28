@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, overload
 
 import numpy as np
@@ -307,12 +307,16 @@ class mask:
         ...
     @staticmethod
     def iou(
-        dt: dict[str, Any] | list[dict[str, Any]], gt: dict[str, Any] | list[dict[str, Any]], iscrowd: list[bool]
+        dt: dict[str, Any] | list[dict[str, Any]],
+        gt: dict[str, Any] | list[dict[str, Any]],
+        iscrowd: Sequence[bool | int] | npt.NDArray[Any],
     ) -> npt.NDArray[np.float64]:
         """Compute IoU between dt and gt RLE masks. Shape: (D, G)."""
         ...
     @staticmethod
-    def bbox_iou(dt: list[list[float]], gt: list[list[float]], iscrowd: list[bool]) -> npt.NDArray[np.float64]:
+    def bbox_iou(
+        dt: list[list[float]], gt: list[list[float]], iscrowd: Sequence[bool | int] | npt.NDArray[Any]
+    ) -> npt.NDArray[np.float64]:
         """Compute IoU between dt and gt bounding boxes. Shape: (D, G)."""
         ...
     @staticmethod

@@ -363,19 +363,33 @@ pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
         } else {
             (xe - xs) as f64 / dy as f64
         };
+        // `mul_add`, not `a + s * t`, to reproduce the reference's arithmetic.
+        //
+        // maskApi.c writes `(int)(ys+s*t+.5)`, and both clang and gcc default to
+        // `-ffp-contract=fast`, so every shipped pycocotools wheel fuses `s*t+ys`
+        // into a single FMA — one rounding where the unfused form has two. Rust
+        // never contracts implicitly, so the plain expression is a *more accurate*
+        // computation that disagrees with the reference.
+        //
+        // It bites rarely and only at a boundary: with `s = -5/6`, `t = 57`,
+        // `ys = 75` the product lands a hair either side of `-47.5`, so the two
+        // forms round to 28 and 27 and the rasterized polygon differs by one
+        // pixel. Two of 400 random polygons hit it. COCO ground-truth
+        // segmentations are polygons, so this path builds every segm GT mask —
+        // `mul_add` is what makes segmentation parity exact rather than close.
         if dx >= dy {
             // Step along x, interpolate y
             for d in 0..=dx {
                 let t = if flip { dx - d } else { d };
                 u.push(t + xs);
-                v.push((ys as f64 + s * t as f64 + 0.5) as i32);
+                v.push((s.mul_add(t as f64, ys as f64) + 0.5) as i32);
             }
         } else {
             // Step along y, interpolate x
             for d in 0..=dy {
                 let t = if flip { dy - d } else { d };
                 v.push(t + ys);
-                u.push((xs as f64 + s * t as f64 + 0.5) as i32);
+                u.push((s.mul_add(t as f64, xs as f64) + 0.5) as i32);
             }
         }
     }
