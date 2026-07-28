@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use rand::Rng;
-use rand::SeedableRng;
-use rand::rngs::SmallRng;
-use rayon::prelude::*;
 use serde::Serialize;
+
+use crate::metrics::bootstrap::bootstrap_ci;
 
 use super::COCOeval;
 use super::accumulate::accumulate_impl;
@@ -32,20 +30,11 @@ impl Default for CompareOpts {
     }
 }
 
-/// Bootstrap confidence interval for a metric difference.
-#[derive(Debug, Clone, Serialize)]
-pub struct BootstrapCI {
-    /// Lower bound of the confidence interval.
-    pub lower: f64,
-    /// Upper bound of the confidence interval.
-    pub upper: f64,
-    /// Confidence level (e.g. 0.95).
-    pub confidence: f64,
-    /// Fraction of bootstrap samples where delta > 0.
-    pub prob_positive: f64,
-    /// Standard error of the delta across bootstrap samples.
-    pub std_err: f64,
-}
+// Private: `BootstrapCI` belongs to `metrics::bootstrap` and reaches the crate
+// root from there. Re-exporting it publicly here would create
+// `hotcoco::detection::BootstrapCI` — a detection path for a type detection does
+// not own, which 1.0 would then freeze.
+use crate::metrics::bootstrap::BootstrapCI;
 
 /// Per-category AP comparison entry.
 #[derive(Debug, Clone, Serialize)]
@@ -166,10 +155,7 @@ pub fn compare(
     let deltas: HashMap<String, f64> = metric_keys
         .iter()
         .zip(stats_a.iter().zip(stats_b.iter()))
-        .map(|(&k, (&a, &b))| {
-            let d = if a >= 0.0 && b >= 0.0 { b - a } else { 0.0 };
-            (k.to_string(), d)
-        })
+        .map(|(&k, (&a, &b))| (k.to_string(), metric_delta(a, b)))
         .collect();
 
     // --- Per-category AP ---
@@ -243,11 +229,12 @@ pub fn compare(
 
 /// Run bootstrap resampling to compute confidence intervals on metric deltas.
 ///
-/// For each sample, draws `shared_img_ids.len()` image IDs with replacement,
-/// deduplicates into a HashSet, and re-accumulates both evaluators on that
-/// subset. The deduplication means each sample contains ~63% of the original
-/// images — this is standard practice for detection evaluation bootstrap since
-/// `accumulate_impl` treats images as present/absent (not weighted).
+/// The resampling, the percentile bounds, and `prob_positive` all belong to
+/// [`metrics::bootstrap::bootstrap_ci`](crate::metrics::bootstrap::bootstrap_ci).
+/// What is detection-specific — and all this function supplies — is the statistic:
+/// re-accumulate both evaluators over the sampled images and take the metric
+/// deltas. Missing metrics (`-1.0`) contribute a zero delta rather than a spurious
+/// swing, since a metric undefined for a subset is not evidence either way.
 fn bootstrap_compare(
     eval_a: &COCOeval,
     eval_b: &COCOeval,
@@ -256,18 +243,13 @@ fn bootstrap_compare(
     metrics: &[MetricDef],
     metric_keys: &[&str],
 ) -> HashMap<String, BootstrapCI> {
-    let n = shared_img_ids.len();
-
-    // Each bootstrap sample produces a delta vector
-    let all_deltas: Vec<Vec<f64>> = (0..opts.n_bootstrap)
-        .into_par_iter()
-        .map(|i| {
-            let mut rng = SmallRng::seed_from_u64(opts.seed.wrapping_add(i as u64));
-            let sample: HashSet<u64> = (0..n)
-                .map(|_| shared_img_ids[rng.random_range(0..n)])
-                .collect();
-
-            let acc_a = accumulate_impl(&eval_a.eval_imgs, &eval_a.params, Some(&sample));
+    let cis = bootstrap_ci(
+        shared_img_ids,
+        opts.n_bootstrap,
+        opts.seed,
+        opts.confidence,
+        |sample| {
+            let acc_a = accumulate_impl(&eval_a.eval_imgs, &eval_a.params, Some(sample));
             let stats_a = summarize_impl(
                 &acc_a,
                 &eval_a.params,
@@ -276,7 +258,7 @@ fn bootstrap_compare(
                 metrics,
             );
 
-            let acc_b = accumulate_impl(&eval_b.eval_imgs, &eval_b.params, Some(&sample));
+            let acc_b = accumulate_impl(&eval_b.eval_imgs, &eval_b.params, Some(sample));
             let stats_b = summarize_impl(
                 &acc_b,
                 &eval_b.params,
@@ -288,50 +270,27 @@ fn bootstrap_compare(
             stats_a
                 .iter()
                 .zip(stats_b.iter())
-                .map(|(&a, &b)| if a >= 0.0 && b >= 0.0 { b - a } else { 0.0 })
+                .map(|(&a, &b)| metric_delta(a, b))
                 .collect()
-        })
-        .collect();
-
-    // Compute CIs from the sampled deltas
-    let alpha = 1.0 - opts.confidence;
-    let nb = opts.n_bootstrap;
+        },
+    );
 
     metric_keys
         .iter()
-        .enumerate()
-        .map(|(m, &name)| {
-            let mut samples: Vec<f64> = all_deltas.iter().map(|d| d[m]).collect();
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-            let lo_idx = ((alpha / 2.0) * nb as f64).floor() as usize;
-            let hi_idx = ((1.0 - alpha / 2.0) * nb as f64).ceil() as usize;
-
-            let lower = samples[lo_idx.min(nb - 1)];
-            let upper = samples[hi_idx.min(nb - 1)];
-
-            let pos_count = samples.iter().filter(|&&x| x > 0.0).count();
-            let prob_positive = pos_count as f64 / nb as f64;
-
-            let mean: f64 = samples.iter().sum::<f64>() / nb as f64;
-            let variance = if nb > 1 {
-                samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nb - 1) as f64
-            } else {
-                0.0
-            };
-
-            (
-                name.to_string(),
-                BootstrapCI {
-                    lower,
-                    upper,
-                    confidence: opts.confidence,
-                    prob_positive,
-                    std_err: variance.sqrt(),
-                },
-            )
-        })
+        .zip(cis)
+        .map(|(&name, ci)| (name.to_string(), ci))
         .collect()
+}
+
+/// B minus A, treating a metric missing from either side as no evidence.
+///
+/// `-1.0` is the "not computed for this configuration" sentinel — APs for an area
+/// range with no ground truth, say. Subtracting it would manufacture a swing of up
+/// to 1.0 out of missing data, so the delta is zero instead. The point estimate and
+/// the bootstrap CIs must agree on this, which is why it is one function.
+#[inline]
+fn metric_delta(a: f64, b: f64) -> f64 {
+    if a >= 0.0 && b >= 0.0 { b - a } else { 0.0 }
 }
 
 fn stats_to_map(metric_keys: &[&str], stats: &[f64]) -> HashMap<String, f64> {

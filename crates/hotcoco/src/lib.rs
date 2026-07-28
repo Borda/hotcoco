@@ -98,21 +98,24 @@ pub mod types;
 pub use coco::COCO;
 pub use convert::{ConvertError, CvatStats, DotaStats, VocStats, YoloStats};
 pub use detection::{
-    AccumulatedEval, AnnotationIndex, BootstrapCI, COCOeval, CalibrationResult, CategoryDelta,
-    CompareOpts, ComparisonResult, ConfusionMatrix, DtStatus, ErrorProfile, EvalImg, EvalMode,
-    EvalParams, EvalResults, EvalShape, GtStatus, ImageDiagnostics, ImageSummary, LabelError,
-    LabelErrorType, SliceResult, SlicedResults, TideErrors, compare,
+    AccumulatedEval, AnnotationIndex, COCOeval, CalibrationResult, CategoryDelta, CompareOpts,
+    ComparisonResult, ConfusionMatrix, DtStatus, ErrorProfile, EvalImg, EvalMode, EvalParams,
+    EvalResults, EvalShape, GtStatus, ImageDiagnostics, ImageSummary, LabelError, LabelErrorType,
+    SliceResult, SlicedResults, TideErrors, compare,
 };
 pub use error::Error;
 
 pub use detection::hierarchy::Hierarchy;
+// Re-exported from where they are defined, not through `detection`. Both are
+// family-agnostic — any family that resamples gets a `BootstrapCI`, any family
+// that bins confidences gets a `CalibrationBin` — so routing the crate-root path
+// through the detection driver would make the next family import a detection path
+// for a type detection does not own.
+pub use metrics::bootstrap::BootstrapCI;
+pub use metrics::calibration::CalibrationBin;
 pub use params::{AreaRange, IouType, Params};
 pub use quality::{
     CategoryStats, DatasetStats, DatasetSummary, Finding, HealthReport, Layer, SummaryStats,
 };
-// `CalibrationBin` is family-agnostic — anything that bins confidences produces
-// one — so the crate-root path comes from where it is defined, not through the
-// detection driver.
-pub use metrics::calibration::CalibrationBin;
 pub use report::{EvalReport, Provenance};
 pub use types::{Annotation, Category, Dataset, Image, Rle, Segmentation};

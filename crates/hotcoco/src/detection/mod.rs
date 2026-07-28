@@ -22,7 +22,7 @@ mod tide;
 
 pub use accumulate::{AccumulatedEval, EvalShape};
 pub use calibration::CalibrationResult;
-pub use compare::{BootstrapCI, CategoryDelta, CompareOpts, ComparisonResult, compare};
+pub use compare::{CategoryDelta, CompareOpts, ComparisonResult, compare};
 pub use confusion::ConfusionMatrix;
 pub use diagnostics::{
     AnnotationIndex, DtStatus, ErrorProfile, GtStatus, ImageDiagnostics, ImageSummary, LabelError,
