@@ -98,3 +98,29 @@ py-fmt-check:
 # Lint Python code
 py-lint:
     uv run ruff check python/ scripts/
+
+# Verify LVIS metric parity vs lvis-api (synthetic data — no data/ needed)
+parity-lvis: build
+    uv run python scripts/parity_lvis.py
+
+# Verify TIDE error-type parity vs tidecv (needs data/)
+parity-tide: build
+    uv run python scripts/parity_tide.py
+
+# Verify every hotcoco.mask operation against pycocotools.mask, bit-for-bit
+parity-mask cases="400": build
+    uv run python scripts/parity_mask.py --cases {{cases}}
+
+# Fuzz oriented-box IoU against shapely
+fuzz-obb: build
+    uv run pytest scripts/fuzz_obb_parity.py -v -x --tb=short
+
+# Diff per-(image, category) matching decisions against pycocotools for one fixture
+adversarial fixture: build
+    uv run python scripts/adversarial_harness.py {{fixture}}
+
+# Every reference comparison that does not need data/ — what CI runs
+parity-all: build
+    uv run pytest scripts/test_parity.py -q
+    uv run python scripts/parity_lvis.py
+    uv run python scripts/parity_mask.py --cases 200

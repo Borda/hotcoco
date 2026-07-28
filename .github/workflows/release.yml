@@ -14,9 +14,18 @@ env:
   PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
 
 jobs:
+  # ── gate ───────────────────────────────────────────────────────────────
+  # A tag used to publish straight to crates.io and PyPI with no tests run at
+  # all. Everything below now waits on this, so a release cannot ship a build
+  # that would have failed CI.
+  verify:
+    name: Verify before publishing
+    uses: ./.github/workflows/ci.yml
+
   # ── crates.io ──────────────────────────────────────────────────────────
   publish-crates:
     name: Publish to crates.io
+    needs: verify
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -40,6 +49,7 @@ jobs:
   # ── PyPI wheels ────────────────────────────────────────────────────────
   build-wheels:
     name: Build wheels (${{ matrix.target }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -76,6 +86,7 @@ jobs:
 
   build-sdist:
     name: Build sdist
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

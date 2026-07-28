@@ -29,6 +29,7 @@ from hotcoco import COCO, LVISeval  # noqa: E402
 from lvis import LVIS, LVISEval  # noqa: E402
 from lvis import LVISResults as LVISResultsRef  # noqa: E402
 
+EXPECTED_METRIC_COUNT = 13  # LVIS: 12 COCO-style + AR@300, APr/APc/APf
 TOL = 1e-4
 
 
@@ -80,6 +81,15 @@ def compare(ref, got, label):
     # lvis-api omits keys that are -1 (undefined)
     failures = 0
     all_keys = set(ref) | set(got)
+    # A metric missing from *both* dicts never enters the union, so it is silently
+    # never compared and the script still prints "ALL LVIS PARITY TESTS PASSED".
+    # Assert the count, the way scripts/test_parity.py does.
+    if len(all_keys) != EXPECTED_METRIC_COUNT:
+        print(
+            f"  ERROR: compared {len(all_keys)} metrics, expected {EXPECTED_METRIC_COUNT}. "
+            f"Missing from both sides: nothing can be verified about them."
+        )
+        failures += 1
     for key in sorted(all_keys):
         ref_v = ref.get(key, None)
         got_v = got.get(key, None)
