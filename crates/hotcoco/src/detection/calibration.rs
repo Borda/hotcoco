@@ -60,8 +60,12 @@ impl COCOeval {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if `evaluate()` has not been called or `iou_threshold`
-    /// is not found in `params.iou_thrs`.
+    /// Returns `Err` if `evaluate()` has not been called, if `iou_threshold` is
+    /// not found in `params.iou_thrs`, or if any detection score falls outside
+    /// `[0, 1]`. The last is rejected rather than clamped: binning saturates an
+    /// out-of-range score into an end bin while keeping its raw magnitude in the
+    /// bin mean, so unnormalized scores would otherwise yield a calibration error
+    /// above 1.0 with nothing to indicate why.
     pub fn calibration(
         &self,
         n_bins: usize,
@@ -123,6 +127,26 @@ impl COCOeval {
                 all.0.push(score);
                 all.1.push(correct);
             }
+        }
+
+        // Scores must be confidences in [0, 1]. `calibration_curve` buckets by
+        // `score * n_bins` and clamps the *index*, not the score — so a value
+        // outside the unit interval saturates into an end bin and carries its raw
+        // magnitude into that bin's mean, yielding an ECE above 1.0 with no other
+        // symptom. Detection scores arrive straight from user JSON, so a model
+        // exporting logits lands here; failing loudly beats a plausible-looking
+        // number nobody can interpret. Checking `all` covers the per-category
+        // vectors too, since every detection is pushed to both.
+        if let Some(&bad) = all.0.iter().find(|&&s| !(0.0..=1.0).contains(&s)) {
+            let n_bad = all.0.iter().filter(|&&s| !(0.0..=1.0).contains(&s)).count();
+            return Err(format!(
+                "calibration() requires detection scores in [0, 1], found {bad} \
+                 ({n_bad} of {} detections out of range). Raw logits or unnormalized \
+                 scores bucket into the end bins and produce a meaningless \
+                 calibration error — apply a sigmoid or softmax first.",
+                all.0.len()
+            )
+            .into());
         }
 
         let bins = calibration_curve(&all.0, &all.1, n_bins);

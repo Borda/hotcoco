@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::params::{IouType, Params, default_iou_thrs};
+use crate::params::{IouType, Params, default_iou_thrs, default_rec_thrs};
 use crate::report::{EvalReport, Provenance};
 
 use super::accumulate::AccumulatedEval;
@@ -54,8 +54,15 @@ impl COCOeval {
 
         // Parameter deviations only mean something where there is a reference to
         // deviate *from*: `scripts/parity.py` (pycocotools) and `parity_lvis.py`.
-        if self.eval_mode != EvalMode::Coco && self.eval_mode != EvalMode::Lvis {
-            return out;
+        //
+        // Default-deny, not default-allow: a mode with no checked reference is a
+        // reason to say so, not a reason to skip the parameter checks and stay
+        // silent. `EvalMode` has three variants today, so the only way to reach
+        // this is to add a fourth — and the failure mode of the old early return
+        // was that such a mode inherited `parity_verified` for free.
+        match self.eval_mode {
+            EvalMode::Coco | EvalMode::Lvis => {}
+            EvalMode::OpenImages => return out, // already flagged above
         }
 
         let defaults = Params::new(self.params.iou_type);
@@ -95,6 +102,56 @@ impl COCOeval {
                 "area range labels differ from default ({:?}). Per-size metrics may not find their area range.",
                 default_labels
             ));
+        }
+
+        // Area-range *bounds*, not just labels. Comparing labels alone made this
+        // check structurally blind to the one path a Python caller actually takes:
+        // the `params.areaRng` setter deliberately preserves the existing labels,
+        // so redefining "small" as [0, 100] kept the name, passed the label check,
+        // and reported different APs/APm/APl as parity_verified.
+        if !self
+            .params
+            .area_ranges
+            .iter()
+            .map(|ar| ar.range)
+            .eq(defaults.area_ranges.iter().map(|ar| ar.range))
+        {
+            out.push(
+                "area range bounds differ from default. APs/APm/APl measure different \
+                 object-size buckets than the reference."
+                    .to_string(),
+            );
+        }
+
+        // The 101-point recall grid defines what AP *means*: it is the x-axis the
+        // precision curve is averaged over. A different grid is a different metric
+        // wearing the same name.
+        if self.params.rec_thrs != default_rec_thrs() {
+            out.push(format!(
+                "rec_thrs differ from the default {}-point grid. AP is averaged over a \
+                 different recall axis than the reference.",
+                default_rec_thrs().len()
+            ));
+        }
+
+        // Class-agnostic pooling is a different question than the leaderboard asks.
+        if !self.params.use_cats {
+            out.push(
+                "use_cats is false, so detections are pooled across categories. This is \
+                 not the per-category AP any COCO or LVIS leaderboard reports."
+                    .to_string(),
+            );
+        }
+
+        // Custom sigmas redefine OKS, and OKS is the similarity keypoint AP is built on.
+        if self.params.iou_type == IouType::Keypoints
+            && self.params.kpt_oks_sigmas != defaults.kpt_oks_sigmas
+        {
+            out.push(
+                "kpt_oks_sigmas differ from the COCO defaults, which redefines OKS. \
+                 Keypoint AP is no longer COCO keypoint AP."
+                    .to_string(),
+            );
         }
 
         out

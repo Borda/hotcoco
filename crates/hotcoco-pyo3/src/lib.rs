@@ -1335,7 +1335,16 @@ per_class : bool
         per_class: bool,
     ) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
-        for (k, v) in self.inner.get_results(prefix, per_class) {
+        // Sorted: Python dicts keep insertion order, so handing this straight out
+        // of a `HashMap` gave callers a different key order on every run and made
+        // any archived or diffed output churn for no reason.
+        let mut items: Vec<_> = self
+            .inner
+            .get_results(prefix, per_class)
+            .into_iter()
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, v) in items {
             dict.set_item(k, v)?;
         }
         Ok(dict.into_any().unbind())
@@ -1358,10 +1367,13 @@ render a panoptic or tracking one unchanged.
 Returns a dict with:
 
 - ``task``: ``'detection'``
-- ``provenance``: ``'parity_verified'`` for bbox/segm/keypoints, which are checked
-  against pycocotools; ``'extension'`` for oriented boxes, which are a real metric
-  but have no reference implementation to be standard against. Check this before
-  presenting numbers as comparable to a published leaderboard.
+- ``provenance``: ``'parity_verified'`` only when this exact run is comparable to a
+  reference implementation — bbox/segm/keypoints against pycocotools, or LVIS
+  against lvis-api, **at reference parameters**. Everything else is
+  ``'extension'``: oriented boxes and Open Images (no reference exists for
+  either), and any run with non-default ``iou_thrs``, ``rec_thrs``, ``max_dets``,
+  area-range labels or bounds, ``use_cats=False``, or custom ``kpt_oks_sigmas``.
+  Check this before presenting numbers as comparable to a published leaderboard.
 - ``metrics``: summary metrics (AP, AP50, AP75, ...)
 - ``per_class``: ``{class_name: {metric: value}}``
 - ``per_group``: ``{group_name: {metric: value}}`` — LVIS frequency buckets in
@@ -1656,13 +1668,18 @@ Example\n\
             .detach(|| self.inner.tide_errors(pos_thr, bg_thr))
             .map_err(to_pyerr)?;
 
+        // Sorted for the same reason as `get_results` above.
         let delta_ap = PyDict::new(py);
-        for (k, v) in &te.delta_ap {
+        let mut da: Vec<_> = te.delta_ap.iter().collect();
+        da.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in da {
             delta_ap.set_item(k, v)?;
         }
 
         let counts = PyDict::new(py);
-        for (k, v) in &te.counts {
+        let mut ct: Vec<_> = te.counts.iter().collect();
+        ct.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in ct {
             counts.set_item(k, v)?;
         }
 
@@ -1728,7 +1745,9 @@ Example\n\
 
         // Map category IDs to names for per_category
         let per_cat = PyDict::new(py);
-        for (&cat_id, &ece) in &cal.per_category {
+        let mut pc: Vec<_> = cal.per_category.iter().collect();
+        pc.sort_by_key(|&(&cat_id, _)| cat_id);
+        for (&cat_id, &ece) in pc {
             let name = self
                 .inner
                 .coco_gt
@@ -1801,12 +1820,16 @@ Example\n\
 
         let to_dict = |sr: &hotcoco_core::SliceResult, py: Python<'_>| -> PyResult<Py<PyAny>> {
             let d = PyDict::new(py);
-            for (k, v) in &sr.metrics {
+            let mut ms: Vec<_> = sr.metrics.iter().collect();
+            ms.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in ms {
                 d.set_item(k, v)?;
             }
             d.set_item("num_images", sr.num_images)?;
             let delta_dict = PyDict::new(py);
-            for (k, v) in &sr.delta {
+            let mut ds: Vec<_> = sr.delta.iter().collect();
+            ds.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in ds {
                 delta_dict.set_item(k, v)?;
             }
             d.set_item("delta", delta_dict)?;

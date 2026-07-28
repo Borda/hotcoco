@@ -465,6 +465,28 @@ impl COCO {
             }
         }
 
+        // A NaN score is rejected rather than warned about, because it corrupts the
+        // whole run rather than one annotation. Every ranking path sorts with
+        // `partial_cmp(..).unwrap_or(Equal)`, and that comparator is not transitive
+        // once NaN is present: the sort does not panic, it silently produces an
+        // arbitrary order, so AP becomes a function of the sort implementation.
+        // There is no sensible score to substitute — a detection with no confidence
+        // has no place in a ranked list at all.
+        if let Some((i, ann)) = anns
+            .iter()
+            .enumerate()
+            .find(|(_, a)| a.score.is_some_and(f64::is_nan))
+        {
+            return Err(format!(
+                "load_res(): annotation {} (id {}, image_id {}) has a NaN score. \
+                 Scores order the detection ranking, and NaN makes that order \
+                 undefined — every metric downstream would be meaningless. Filter \
+                 or repair these detections before evaluating.",
+                i, ann.id, ann.image_id
+            )
+            .into());
+        }
+
         let mut dataset = Dataset {
             info: self.dataset.info.clone(),
             images: self.dataset.images.clone(),

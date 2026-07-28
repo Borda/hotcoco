@@ -414,7 +414,9 @@ ev.run()
 OID uses `is_group_of: true` on annotations that represent a cluster of objects rather than a single instance. These are handled differently from `iscrowd`:
 
 - **Ignored for false negatives** — a group-of GT that goes undetected does not count as a miss.
-- **Multiple detections can match** — if two detections both overlap a group-of GT at IoU ≥ 0.5, both are genuine TPs (no duplicate penalty).
+- **Matching detections are ignored** — any number of detections overlapping a group-of GT at IoU ≥ 0.5 are absorbed by it and score as neither true positives nor false positives. A cluster costs nothing and earns nothing. This matches the reference `OpenImagesChallengeEvaluator`.
+
+The two rules go together. Because a group-of GT carries no false-negative penalty, it never enters the recall denominator — so crediting its detections as true positives would grow the numerator against a denominator that cannot grow, and recall could exceed 1.0. Absorbing them keeps the metric coherent.
 
 Your annotations need `"is_group_of": true` in the JSON for this to take effect. Standard annotations without this field default to `false`.
 

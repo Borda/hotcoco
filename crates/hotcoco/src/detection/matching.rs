@@ -279,9 +279,16 @@ fn match_cell(
     }
     let gt_matched = m.gt_matched;
 
-    // Open Images second pass: unmatched detections may match a group-of GT.
-    // Several detections may match the same one (no `gt_matched` check), and
-    // those are genuine true positives rather than ignored.
+    // Open Images second pass: an unmatched detection that overlaps a group-of GT
+    // is *ignored* — neither a true positive nor a false positive — matching the
+    // reference `OpenImagesChallengeEvaluator`. Several detections may be absorbed
+    // by the same group-of box, so there is deliberately no `gt_matched` check.
+    //
+    // Crediting them as true positives instead is not a free choice. Group-of GTs
+    // are ignored above, so they carry no false-negative penalty and contribute
+    // nothing to `num_gt`. Every extra TP would raise `tp_cum` against a
+    // denominator that never grows, and `recall = tp_cum / num_gt` would exceed
+    // 1.0 — measured at 4.0 on one image before this was corrected.
     if is_oid {
         for (t_idx, &iou_thr) in ctx.match_floors.iter().enumerate() {
             for di in 0..d {
@@ -294,9 +301,14 @@ fn match_cell(
                         continue;
                     }
                     if iou_flat[base + gi] >= iou_thr {
+                        // Record which group-of box absorbed it and flag it ignored
+                        // — the same pairing pycocotools uses for a detection
+                        // matched to a crowd GT (`dtm` set, `dtIg` set). Every
+                        // consumer tests `dt_ignore` first, so the pair reads as
+                        // "matched, but not scored".
                         dt_matches[t_idx][di] = gt.id_at(gi);
                         dt_matched[t_idx][di] = true;
-                        dt_ignore[t_idx][di] = false;
+                        dt_ignore[t_idx][di] = true;
                         break;
                     }
                 }

@@ -67,13 +67,30 @@ pub(super) fn summarize_impl(
             .unwrap_or(0);
 
         let t_indices: Vec<usize> = if let Some(thr) = iou_thr {
+            // The *nearest* threshold within tolerance, not every threshold within
+            // it. A single-threshold metric like AP50 means one slice of the IoU
+            // axis; collecting all matches meant that a params list holding two
+            // thresholds within 1e-9 of each other silently reported their average
+            // under the name of one of them. Picking the nearest is deterministic
+            // and degenerates to the same answer in every well-formed config.
+            //
+            // The tolerance itself is not a fudge: `thr` is a caller-supplied
+            // `f64` compared against a grid built by `params::linspace`, so exact
+            // equality would fail on values that are 0.5 in every sense that
+            // matters.
             params
                 .iou_thrs
                 .iter()
                 .enumerate()
                 .filter(|&(_, &t)| (t - thr).abs() < 1e-9)
-                .map(|(i, _)| i)
-                .collect()
+                .min_by(|&(_, &a), &(_, &b)| {
+                    (a - thr)
+                        .abs()
+                        .partial_cmp(&(b - thr).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| vec![i])
+                .unwrap_or_default()
         } else {
             (0..eval.shape.t).collect()
         };

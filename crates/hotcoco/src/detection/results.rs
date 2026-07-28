@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
@@ -16,7 +16,7 @@ pub struct EvalParams {
     pub iou_type: IouType,
     pub iou_thresholds: Vec<f64>,
     /// Area ranges as a map from label to `[min, max]`.
-    pub area_ranges: HashMap<String, [f64; 2]>,
+    pub area_ranges: BTreeMap<String, [f64; 2]>,
     pub max_dets: Vec<usize>,
     /// Evaluation mode: "coco", "lvis", or "openimages".
     pub eval_mode: String,
@@ -27,6 +27,12 @@ pub struct EvalParams {
 /// Returned by [`super::COCOeval::results`]. Contains summary metrics,
 /// evaluation parameters, and optional per-class breakdown.
 ///
+/// Every map here is a `BTreeMap` so serialization is byte-stable: this is the
+/// struct users archive, diff in CI, and check into git, and a `HashMap` gave a
+/// different key order on every run. Three identical `coco-eval` invocations
+/// produced three different file hashes with identical numbers. `report::EvalReport`
+/// made the same choice for the same reason.
+///
 /// Use [`save`](EvalResults::save) to write JSON to a file, or
 /// [`to_json`](EvalResults::to_json) to get a JSON string.
 #[derive(Debug, Clone, Serialize)]
@@ -36,10 +42,10 @@ pub struct EvalResults {
     /// Evaluation parameters used to produce these metrics.
     pub params: EvalParams,
     /// Summary metrics (AP, AP50, AP75, AR1, AR10, AR100, etc.).
-    pub metrics: HashMap<String, f64>,
+    pub metrics: BTreeMap<String, f64>,
     /// Per-class AP values, keyed by category name. `None` if not requested.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub per_class: Option<HashMap<String, f64>>,
+    pub per_class: Option<BTreeMap<String, f64>>,
 }
 
 impl EvalResults {
@@ -60,7 +66,7 @@ impl EvalResults {
 impl EvalParams {
     /// Create from a [`Params`] struct and evaluation mode.
     pub(in crate::detection) fn from_params(params: &Params, eval_mode: EvalMode) -> Self {
-        let area_ranges: HashMap<String, [f64; 2]> = params
+        let area_ranges: BTreeMap<String, [f64; 2]> = params
             .area_ranges
             .iter()
             .map(|ar| (ar.label.clone(), ar.range))

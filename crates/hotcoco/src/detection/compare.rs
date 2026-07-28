@@ -159,17 +159,42 @@ pub fn compare(
         .collect();
 
     // --- Per-category AP ---
-    let per_cat_a = per_cat_ap_static(&acc_a, &eval_a.params);
-    let per_cat_b = per_cat_ap_static(&acc_b, &eval_b.params);
-
-    let mut per_category: Vec<CategoryDelta> = eval_a
+    // `per_cat_ap_static` returns one entry per `params.cat_ids` slot, so both
+    // sides must be looked up by category id rather than by position. The two
+    // evaluators may carry different category lists — different GT files, or the
+    // same file filtered differently — and a positional read would pair A's
+    // category with whatever B happened to evaluate in that slot, under A's name.
+    let per_cat_a: HashMap<u64, f64> = eval_a
         .params
         .cat_ids
         .iter()
-        .enumerate()
-        .filter_map(|(i, &cat_id)| {
-            let ap_a = per_cat_a.get(i).copied().unwrap_or(-1.0);
-            let ap_b = per_cat_b.get(i).copied().unwrap_or(-1.0);
+        .copied()
+        .zip(per_cat_ap_static(&acc_a, &eval_a.params))
+        .collect();
+    let per_cat_b: HashMap<u64, f64> = eval_b
+        .params
+        .cat_ids
+        .iter()
+        .copied()
+        .zip(per_cat_ap_static(&acc_b, &eval_b.params))
+        .collect();
+
+    // Union, so a category only one side evaluated is reported rather than dropped.
+    let mut all_cat_ids: Vec<u64> = eval_a
+        .params
+        .cat_ids
+        .iter()
+        .chain(eval_b.params.cat_ids.iter())
+        .copied()
+        .collect();
+    all_cat_ids.sort_unstable();
+    all_cat_ids.dedup();
+
+    let mut per_category: Vec<CategoryDelta> = all_cat_ids
+        .into_iter()
+        .filter_map(|cat_id| {
+            let ap_a = per_cat_a.get(&cat_id).copied().unwrap_or(-1.0);
+            let ap_b = per_cat_b.get(&cat_id).copied().unwrap_or(-1.0);
             // Skip categories with no data in either model
             if ap_a < 0.0 && ap_b < 0.0 {
                 return None;
@@ -177,19 +202,18 @@ pub fn compare(
             let cat_name = eval_a
                 .coco_gt
                 .get_cat(cat_id)
+                .or_else(|| eval_b.coco_gt.get_cat(cat_id))
                 .map_or_else(|| cat_id.to_string(), |c| c.name.clone());
-            let delta = match (ap_a >= 0.0, ap_b >= 0.0) {
-                (true, true) => ap_b - ap_a,
-                (false, true) => ap_b,
-                (true, false) => -ap_a,
-                (false, false) => unreachable!("both < 0 filtered above"),
-            };
             Some(CategoryDelta {
                 cat_id,
                 cat_name,
-                ap_a: if ap_a >= 0.0 { ap_a } else { -1.0 },
-                ap_b: if ap_b >= 0.0 { ap_b } else { -1.0 },
-                delta,
+                ap_a,
+                ap_b,
+                // `metric_delta`, not a raw subtraction: a category missing from
+                // one side is no evidence, not a swing of up to 1.0. Since the
+                // table sorts ascending as "worst regressions first", the raw form
+                // put every B-missing category at the top.
+                delta: metric_delta(ap_a, ap_b),
             })
         })
         .collect();
@@ -335,6 +359,47 @@ mod tests {
             );
         }
         assert!(result.ci.is_none());
+    }
+
+    /// `per_cat_ap_static` returns one entry per `params.cat_ids` slot, so pairing
+    /// the two sides by position reports B's category-2 AP under A's category-1
+    /// name whenever the evaluators carry different category lists.
+    #[test]
+    fn per_category_pairs_by_cat_id_not_position() {
+        let ev_a = make_eval();
+        let cat_ids = ev_a.params.cat_ids.clone();
+        assert!(cat_ids.len() >= 2, "fixture must have >= 2 categories");
+        let only = cat_ids[1];
+
+        // Same data, but B evaluates only the *second* category — so its
+        // per-category vector has one entry, at the slot A uses for its first.
+        let gt = COCO::new(&fixtures_dir().join("gt.json")).unwrap();
+        let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
+        let mut ev_b = COCOeval::new(gt, dt, IouType::Bbox);
+        ev_b.params.cat_ids = vec![only];
+        ev_b.evaluate();
+
+        let result = compare(&ev_a, &ev_b, &CompareOpts::default()).unwrap();
+
+        for cat in &result.per_category {
+            if cat.cat_id == only {
+                assert!(
+                    cat.ap_b >= 0.0,
+                    "category {only} was evaluated by B and should carry its own AP"
+                );
+            } else {
+                assert_eq!(
+                    cat.ap_b, -1.0,
+                    "category {} was not evaluated by B and must not borrow \
+                     another category's AP",
+                    cat.cat_id
+                );
+                assert_eq!(
+                    cat.delta, 0.0,
+                    "a category missing from B is no evidence, not a regression"
+                );
+            }
+        }
     }
 
     #[test]
