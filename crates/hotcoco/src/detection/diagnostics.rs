@@ -247,7 +247,10 @@ impl COCOeval {
                 if gt_status.contains_key(&gid) {
                     continue;
                 }
-                if g < eval_img.gt_ignore.len() && eval_img.gt_ignore[g] {
+                // `counts_as_miss`, not `!gt_ignore` — otherwise per-image
+                // diagnostics disagree with `stats[0]` about whether an undetected
+                // Open Images group-of box is a false negative.
+                if !eval_img.counts_as_miss(g) {
                     continue;
                 }
                 let is_matched = g < gt_matched_at_t.len() && gt_matched_at_t[g];

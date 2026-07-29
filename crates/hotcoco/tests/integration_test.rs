@@ -122,6 +122,21 @@ fn iou_of(a: [f64; 4], b: [f64; 4]) -> f64 {
     if union > 0.0 { inter / union } else { 0.0 }
 }
 
+/// Intersection-over-area of `a` — `inter / area(a)`, where `a` is the detection.
+///
+/// This is the measure COCO uses for crowd regions and Open Images uses for
+/// group-of boxes: "the area of intersection of the detection and the box divided
+/// by the area of the detection". A detection wholly inside the box scores 1.0
+/// however small it is, which is the entire point and the thing plain IoU misses.
+fn ioa_of(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let (ax2, ay2) = (a[0] + a[2], a[1] + a[3]);
+    let (bx2, by2) = (b[0] + b[2], b[1] + b[3]);
+    let iw = (ax2.min(bx2) - a[0].max(b[0])).max(0.0);
+    let ih = (ay2.min(by2) - a[1].max(b[1])).max(0.0);
+    let area_a = a[2] * a[3];
+    if area_a > 0.0 { iw * ih / area_a } else { 0.0 }
+}
+
 #[test]
 fn test_load_gt() {
     let gt_path = fixtures_dir().join("gt.json");
@@ -3869,32 +3884,40 @@ fn test_gt_expansion_idempotent() {
 
 #[test]
 fn test_oid_group_of_multi_match() {
-    // One non-group GT + one group-of GT. DT1 matches the non-group GT; DT2 and
-    // DT3 clear IoU 0.5 against the group-of box (1.00 and 0.9025) and are
-    // absorbed by it, which makes them *ignored* — neither TP nor FP.
+    // One ordinary GT + one group-of GT. DT1 matches the ordinary GT. DT2 and DT3
+    // both lie inside the group-of box; the Open Images protocol scores the
+    // *best* of them as a single true positive and ignores the rest:
     //
-    // The geometry matters and is asserted below. This test previously used
-    // 80x80 detections against the 200x200 group-of box, an IoU of 0.16, so the
-    // group-of pass it was written to cover never ran; it passed on VOC
-    // interpolation instead. Assert the mechanism, not just the AP it moves.
+    //   "If at least one detection is inside group-of box a single True Positive
+    //    is scored. ... Multiple correct detections inside the same group-of box
+    //    is still count as a single True Positive."
+    //
+    // DT3 is deliberately small — IoA 1.00 but IoU 0.16 — because that is the
+    // case the old implementation got wrong. It matched group-of boxes on plain
+    // IoU, so any detection smaller than the box (i.e. the normal case: one
+    // object inside a crowd) fell through as a false positive.
     const ORDINARY_GT: [f64; 4] = [300.0, 300.0, 100.0, 100.0];
     const GROUP_OF_GT: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
     const ABSORBED_A: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
-    const ABSORBED_B: [f64; 4] = [10.0, 10.0, 190.0, 190.0];
+    const ABSORBED_B: [f64; 4] = [10.0, 10.0, 80.0, 80.0];
 
-    // The precondition the whole test rests on: both detections must actually
-    // clear OID's 0.5 threshold against the group-of box. Asserted, not trusted.
-    assert!(iou_of(ABSORBED_A, GROUP_OF_GT) >= 0.5);
-    assert!(iou_of(ABSORBED_B, GROUP_OF_GT) >= 0.5);
-    assert!(iou_of(ORDINARY_GT, GROUP_OF_GT) < 0.5);
+    // Preconditions, asserted rather than trusted. Note these are IoA, the
+    // measure the protocol specifies — and that DT3 would fail an IoU test.
+    assert!(ioa_of(ABSORBED_A, GROUP_OF_GT) >= 0.5);
+    assert!(ioa_of(ABSORBED_B, GROUP_OF_GT) >= 0.5);
+    assert!(
+        iou_of(ABSORBED_B, GROUP_OF_GT) < 0.5,
+        "DT3 must fail plain IoU, or this test cannot detect a regression to it"
+    );
+    assert!(ioa_of(ORDINARY_GT, GROUP_OF_GT) < 0.5);
 
     let cats = vec![cat(1, "person")];
     let gt_dataset = dataset(
         vec![img(1)],
         cats.clone(),
         vec![
-            ann(1, ORDINARY_GT),            // provides the recall denominator
-            ann(2, GROUP_OF_GT).group_of(), // ignored: no FN penalty, not in num_gt
+            ann(1, ORDINARY_GT),            // one ground truth
+            ann(2, GROUP_OF_GT).group_of(), // one more: a group-of box counts once
         ],
     );
     let dt_dataset = dataset(
@@ -3902,8 +3925,8 @@ fn test_oid_group_of_multi_match() {
         cats,
         vec![
             det(1, ORDINARY_GT, 0.9), // matches the ordinary GT -> TP
-            det(2, ABSORBED_A, 0.8),  // IoU 1.0000 with the group-of box -> absorbed
-            det(3, ABSORBED_B, 0.7),  // IoU 0.9025 with the group-of box -> absorbed
+            det(2, ABSORBED_A, 0.8),  // best detection in the group box -> the one TP
+            det(3, ABSORBED_B, 0.7),  // also inside it -> absorbed, neither TP nor FP
         ],
     );
 
@@ -3915,36 +3938,47 @@ fn test_oid_group_of_multi_match() {
     ev.summarize();
 
     let stats = ev.stats().unwrap();
+    // Two ground truths, both found: the ordinary GT by DT1, the group-of box by
+    // DT2. DT3 is ignored, so it cannot depress precision.
     assert!(
         stats[0] > 0.99,
-        "AP should be ~1.0 with group-of multi-match, got {:.4}",
+        "AP should be ~1.0: both GTs found, surplus group-of detection ignored, got {:.4}",
         stats[0]
     );
 
-    // The mechanism: both group-of detections were reached and absorbed. OID runs
-    // a single IoU threshold, so t_idx is 0.
-    let absorbed: Vec<u64> = ev
+    // The mechanism. OID runs a single IoU threshold, so t_idx is 0.
+    let e = ev
         .eval_imgs()
         .iter()
         .flatten()
-        .flat_map(|e| {
-            e.dt_ids
-                .iter()
-                .zip(&e.dt_ignore[0])
-                .filter(|&(_, &ignored)| ignored)
-                .map(|(&id, _)| id)
-        })
+        .next()
+        .expect("one image/category cell");
+    let ignored: Vec<u64> = e
+        .dt_ids
+        .iter()
+        .zip(&e.dt_ignore[0])
+        .filter(|&(_, &ig)| ig)
+        .map(|(&id, _)| id)
         .collect();
     assert_eq!(
-        absorbed.len(),
-        2,
-        "DT2 and DT3 should be absorbed by the group-of box and ignored, got {absorbed:?}"
+        ignored,
+        vec![3],
+        "only the surplus detection is ignored; the best one scores the box"
+    );
+    assert_eq!(
+        e.dt_matches[0][1], 2,
+        "DT2 should be paired with the group-of GT (id 2)"
     );
 
-    // The invariant the absorbed detections would break if they were credited as
-    // TPs: group-of GTs carry no false-negative penalty, so they never enter
-    // `num_gt`, and crediting them scored a numerator against a denominator that
-    // never grew. This measured 4.0 before the fix.
+    // The group-of box is counted, and counted exactly once.
+    assert_eq!(
+        e.gt_in_denominator.iter().filter(|&&x| x).count(),
+        2,
+        "ordinary GT + group-of box = 2 ground truths in the denominator"
+    );
+
+    // Recall stays bounded. This configuration measured 4.0 when the group-of
+    // pass credited every overlapping detection against a denominator of 1.
     let acc = ev.accumulated().expect("accumulate() was called");
     let a_idx = ev.params.all_area_idx();
     let m_idx = acc.shape.m - 1;
@@ -3960,98 +3994,109 @@ fn test_oid_group_of_multi_match() {
 }
 
 #[test]
-fn test_oid_group_of_no_fn_penalty() {
-    // Group-of GT with NO detections — should NOT count as FN
-    let gt_dataset = Dataset {
-        info: None,
-        images: vec![Image {
-            id: 1,
-            file_name: "img1.jpg".into(),
-            height: 640,
-            width: 640,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
-        }],
-        annotations: vec![
-            Annotation {
-                id: 1,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([0.0, 0.0, 100.0, 100.0]),
-                area: Some(10000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None, // NOT group-of
-            },
-            Annotation {
-                id: 2,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([400.0, 400.0, 100.0, 100.0]),
-                area: Some(10000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: Some(true), // Group-of, no detection nearby
-            },
+fn test_oid_group_of_matches_on_ioa_not_iou() {
+    // Regression test for the defect that made group-of handling near-inoperative:
+    // the IoU matrix was built with the crowd flag forced off under OID, so
+    // group-of boxes were matched on plain IoU. Any detection *smaller* than the
+    // group box — one object inside a crowd, i.e. the normal case — fell through
+    // as a false positive instead of being absorbed.
+    //
+    // The scoring here is deliberate. The small detection outranks the ordinary
+    // true positive, so a regression puts its false positive *before* full recall
+    // where the interpolated precision cannot hide it. With the order reversed
+    // this test reports AP 1.0 either way and proves nothing — which is exactly
+    // how the original group-of tests passed for the whole life of the feature.
+    const ORDINARY_GT: [f64; 4] = [300.0, 300.0, 100.0, 100.0];
+    const GROUP_OF_GT: [f64; 4] = [0.0, 0.0, 200.0, 200.0];
+    const INSIDE: [f64; 4] = [10.0, 10.0, 80.0, 80.0];
+
+    assert!(
+        ioa_of(INSIDE, GROUP_OF_GT) >= 0.5,
+        "the protocol's measure must accept this detection"
+    );
+    assert!(
+        iou_of(INSIDE, GROUP_OF_GT) < 0.5,
+        "and plain IoU must reject it, or the test cannot tell the two apart"
+    );
+
+    let cats = vec![cat(1, "person")];
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        cats.clone(),
+        vec![ann(1, ORDINARY_GT), ann(2, GROUP_OF_GT).group_of()],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        cats,
+        vec![
+            det(1, INSIDE, 0.9),      // inside the group box; scores it
+            det(2, ORDINARY_GT, 0.8), // the ordinary true positive
         ],
-        categories: vec![Category {
-            id: 1,
-            name: "person".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
-        }],
-        licenses: vec![],
-    };
+    ));
 
-    let dt_dataset = Dataset {
-        info: None,
-        images: gt_dataset.images.clone(),
-        annotations: vec![Annotation {
-            id: 1,
-            image_id: 1,
-            category_id: 1,
-            bbox: Some([0.0, 0.0, 100.0, 100.0]),
-            area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: Some(0.9),
-            obb: None,
-            is_group_of: None,
-        }],
-        categories: gt_dataset.categories.clone(),
-        licenses: vec![],
-    };
-
-    let coco_gt = COCO::from_dataset(gt_dataset);
-    let coco_dt = COCO::from_dataset(dt_dataset);
     let mut ev = COCOeval::new_oid(coco_gt, coco_dt, None);
-    ev.evaluate();
-    ev.accumulate();
-    ev.summarize();
+    ev.run();
 
+    // Both ground truths found, no false positives -> AP 1.0.
+    // Matched on IoU instead, the first detection is an FP at recall 0 and AP
+    // collapses to ~0.25.
     let stats = ev.stats().unwrap();
-    // Detection matches non-group GT perfectly. Group-of GT unmatched but NOT FN.
-    // AP should be 1.0.
     assert!(
         stats[0] > 0.99,
-        "AP should be ~1.0 (unmatched group-of is not FN), got {:.4}",
+        "detection inside a group-of box must be absorbed, not counted FP; got AP {:.4}",
         stats[0]
+    );
+}
+
+#[test]
+fn test_oid_undetected_group_of_is_a_miss() {
+    // A group-of box nothing was detected inside. The Open Images protocol:
+    // "Otherwise, the group-of box is counted as a single False Negative."
+    //
+    // Contrast with Open Images V2 (TF's `group_of_weight = 0.0`), where an
+    // undetected group-of box costs nothing. Both are real protocols; hotcoco
+    // follows the Challenge one, as FiftyOne does. Naming the alternative here so
+    // a future reader does not "fix" this back to V2.
+    const FOUND_GT: [f64; 4] = [0.0, 0.0, 100.0, 100.0];
+    const MISSED_GROUP_OF: [f64; 4] = [400.0, 400.0, 100.0, 100.0];
+
+    // The detection must not reach the group-of box, or this tests nothing.
+    assert!(ioa_of(FOUND_GT, MISSED_GROUP_OF) < 0.5);
+
+    let cats = vec![cat(1, "person")];
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        cats.clone(),
+        vec![ann(1, FOUND_GT), ann(2, MISSED_GROUP_OF).group_of()],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(vec![img(1)], cats, vec![det(1, FOUND_GT, 0.9)]));
+
+    let mut ev = COCOeval::new_oid(coco_gt, coco_dt, None);
+    ev.run();
+
+    // Two ground truths in the denominator, one found. Recall caps at 0.5 and
+    // precision is 1.0 up to there, so all-points AP is exactly 0.5.
+    let stats = ev.stats().unwrap();
+    assert!(
+        (stats[0] - 0.5).abs() < 1e-9,
+        "AP should be 0.5: the undetected group-of box is a miss, got {:.6}",
+        stats[0]
+    );
+
+    let e = ev
+        .eval_imgs()
+        .iter()
+        .flatten()
+        .next()
+        .expect("one image/category cell");
+    assert_eq!(
+        e.num_gt_in_denominator(),
+        2,
+        "the group-of box counts toward the denominator even though nothing hit it"
+    );
+    assert!(
+        !e.gt_matched[0][1],
+        "the group-of box should be unmatched — that is what makes it a miss"
     );
 }
 

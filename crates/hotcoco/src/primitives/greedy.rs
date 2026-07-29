@@ -92,6 +92,55 @@ pub fn coco_match_floor(iou_thr: f64) -> f64 {
     iou_thr.min(1.0 - 1e-10)
 }
 
+/// Index of the best-scoring eligible candidate at or above `floor`.
+///
+/// Ties go to the **earliest** index. That is not a stylistic choice: it is what
+/// `numpy.argmax` does, and therefore what every reference implementation built on
+/// numpy does. Rust's [`Iterator::max_by`] returns the *last* maximum, so the
+/// obvious one-liner silently disagrees with the reference wherever two candidates
+/// tie — and similarity measures tie constantly. Intersection-over-area saturates
+/// at 1.0 for *any* fully-contained box, so a detection inside two overlapping
+/// regions ties by construction rather than by coincidence.
+///
+/// This exists as a shared function rather than a loop at the call site because
+/// the tie-break is observable public contract through `evalImgs`, and a second
+/// copy is exactly how two callers come to disagree about it. `parity_oid.py`
+/// caught precisely that bug: picking the later of two tied group-of boxes left
+/// the earlier one permanently unmatched, turning a true positive into a miss.
+///
+/// Unlike [`greedy_match`] this performs no assignment and no exclusion — it
+/// answers "which candidate is best for this one row", and repeated calls may
+/// return the same index. `eligible` masks out candidates the caller does not want
+/// considered; it must be at least as long as `sims`.
+///
+/// **This module now hosts two opposite tie-break rules, deliberately.**
+/// [`greedy_match`] compares with `>=`, so the *last* tied ground truth wins —
+/// that is pycocotools, and it is observable through `evalImgs`. This function
+/// compares with `>`, so the *first* wins, which is numpy. Neither can adopt the
+/// other without breaking parity with its own reference. Do not "unify" them.
+///
+/// ```
+/// # use hotcoco::primitives::greedy::best_above_floor;
+/// let sims = [0.9, 1.0, 1.0, 0.2];
+/// let all = [true; 4];
+/// assert_eq!(best_above_floor(&sims, &all, 0.5), Some(1)); // first of the tied maxima
+/// assert_eq!(best_above_floor(&sims, &all, 1.5), None);    // nothing clears the floor
+/// let mask = [true, false, true, true];
+/// assert_eq!(best_above_floor(&sims, &mask, 0.5), Some(2)); // index 1 masked out
+/// ```
+pub fn best_above_floor(sims: &[f64], eligible: &[bool], floor: f64) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_sim = f64::NEG_INFINITY;
+    for (i, &s) in sims.iter().enumerate() {
+        // Strictly greater, so the first of any tied run wins.
+        if eligible[i] && s >= floor && s > best_sim {
+            best = Some(i);
+            best_sim = s;
+        }
+    }
+    best
+}
+
 /// Per-threshold greedy match results, indexed `[T]` over IoU thresholds.
 pub struct GreedyMatches {
     /// `[T][D]`: for each threshold and detection (caller's score-descending

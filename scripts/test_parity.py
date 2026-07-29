@@ -401,8 +401,17 @@ def test_basic_hierarchy():
     assert abs(per_class["dog"] - 1.0) < 1e-6, f"Dog AP should be 1.0, got {per_class['dog']}"
 
 
-def test_group_of_multi_match():
-    """3 detections on 1 group-of GT: all should be TPs."""
+def test_group_of_scores_one_tp_and_absorbs_the_rest():
+    """A group-of box is worth one TP; surplus detections inside it are ignored.
+
+    Open Images protocol: "If at least one detection is inside group-of box a
+    single True Positive is scored. ... Multiple correct detections inside the
+    same group-of box is still count as a single True Positive."
+
+    The old version asserted "all should be TPs" and used detections at IoU 0.16
+    against the group box, so the group-of path never executed -- it passed on VOC
+    interpolation. Both halves are fixed here.
+    """
     gt = _make_coco(
         {
             "images": [_img()],
@@ -417,9 +426,9 @@ def test_group_of_multi_match():
         {
             "images": [_img()],
             "annotations": [
-                _ann(1, 1, 1, [300, 300, 100, 100], 10000, score=0.9),  # Matches normal GT
-                _ann(2, 1, 1, [10, 10, 80, 80], 6400, score=0.8),  # Matches group-of
-                _ann(3, 1, 1, [50, 50, 80, 80], 6400, score=0.7),  # Also matches group-of
+                _ann(1, 1, 1, [300, 300, 100, 100], 10000, score=0.9),  # ordinary TP
+                _ann(2, 1, 1, [10, 10, 80, 80], 6400, score=0.8),  # scores the group box
+                _ann(3, 1, 1, [50, 50, 80, 80], 6400, score=0.7),  # absorbed, ignored
             ],
             "categories": [_cat(1, "person")],
         }
@@ -427,11 +436,60 @@ def test_group_of_multi_match():
 
     ev = COCOeval(gt, dt, "bbox", oid_style=True)
     ev.run()
-    assert ev.stats[0] > 0.99, f"AP should be ~1.0 with group-of multi-match, got {ev.stats[0]:.4f}"
+    assert ev.stats[0] > 0.99, f"both GTs found, surplus ignored -> AP ~1.0, got {ev.stats[0]:.4f}"
+
+    e = ev.eval_imgs[0]
+    ignored = [i for i, ig in zip(e["dtIds"], e["dtIgnore"][0]) if ig]
+    assert ignored == [3], f"only the surplus detection should be ignored, got {ignored}"
+    assert sum(e["gtInDenominator"]) == 2, "ordinary GT + group-of box = 2 in the denominator"
 
 
-def test_group_of_no_fn():
-    """Unmatched group-of GT should not count as FN."""
+def test_group_of_matches_on_ioa_not_iou():
+    """A detection smaller than the group-of box must still be absorbed.
+
+    Group-of matching uses IoA (intersection / detection area), so a detection
+    wholly inside the box scores 1.0 however small it is. Under plain IoU this
+    80x80 detection scores 0.16 against the 200x200 box and leaks out as a false
+    positive -- the defect this guards.
+
+    The inside-the-box detection deliberately outranks the ordinary true positive
+    so a regression lands its false positive *before* full recall. Reverse the
+    scores and AP reads 1.0 either way, proving nothing.
+    """
+    gt = _make_coco(
+        {
+            "images": [_img()],
+            "annotations": [
+                _ann(1, 1, 1, [300, 300, 100, 100], 10000),
+                _ann(2, 1, 1, [0, 0, 200, 200], 40000, is_group_of=True),
+            ],
+            "categories": [_cat(1, "person")],
+        }
+    )
+    dt = _make_coco(
+        {
+            "images": [_img()],
+            "annotations": [
+                _ann(1, 1, 1, [10, 10, 80, 80], 6400, score=0.9),
+                _ann(2, 1, 1, [300, 300, 100, 100], 10000, score=0.8),
+            ],
+            "categories": [_cat(1, "person")],
+        }
+    )
+
+    ev = COCOeval(gt, dt, "bbox", oid_style=True)
+    ev.run()
+    # Matched on IoU instead, AP collapses to ~0.25.
+    assert ev.stats[0] > 0.99, f"detection inside a group-of box must be absorbed, got {ev.stats[0]:.4f}"
+
+
+def test_undetected_group_of_is_a_miss():
+    """An undetected group-of box is a single false negative.
+
+    Protocol: "Otherwise, the group-of box is counted as a single False Negative."
+    This previously asserted the opposite, which is the Open Images *V2* metric
+    (TF `group_of_weight=0.0`), not the Challenge metric hotcoco targets.
+    """
     gt = _make_coco(
         {
             "images": [_img()],
@@ -454,7 +512,7 @@ def test_group_of_no_fn():
 
     ev = COCOeval(gt, dt, "bbox", oid_style=True)
     ev.run()
-    assert ev.stats[0] > 0.99, f"AP should be ~1.0 (unmatched group-of not FN), got {ev.stats[0]:.4f}"
+    assert abs(ev.stats[0] - 0.5) < 0.02, f"one of two GTs found -> AP ~0.5, got {ev.stats[0]:.4f}"
 
 
 def test_pre_expanded_idempotent():

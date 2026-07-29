@@ -37,6 +37,10 @@ struct GtView<'a> {
     /// Index into `anns` -> column in the cell's IoU matrix.
     iou_indices: Vec<usize>,
     ignore_sorted: Vec<bool>,
+    /// Whether each GT counts toward the recall denominator. Differs from
+    /// `!ignore_sorted` only for Open Images group-of boxes, which are held out
+    /// of matching but still counted. See `gather_gt`.
+    in_denominator_sorted: Vec<bool>,
     iscrowd_sorted: Vec<bool>,
     /// Open Images only; empty otherwise. Guarded by `is_oid` at every use.
     is_group_of_sorted: Vec<bool>,
@@ -105,22 +109,32 @@ fn gather_gt<'a>(
         .filter_map(|(iou_idx, &id)| Some((iou_idx, ctx.coco_gt.get_ann(id)?)))
         .unzip();
 
-    let ignore: Vec<bool> = anns
+    // `ignore` governs *matching*; `in_denominator` governs the *recall
+    // denominator*. They are complements of each other in every mode but Open
+    // Images, where a group-of box is held out of matching (the second pass in
+    // `match_cell` absorbs it instead) yet still counts as one ground truth,
+    // because the protocol scores an undetected group-of box as a single false
+    // negative. COCO's single `gtIgnore` cannot express "not matchable here" and
+    // "counted" at once, so the two are computed together and kept apart.
+    let (ignore, in_denominator): (Vec<bool>, Vec<bool>) = anns
         .iter()
         .map(|ann| {
             let a = ann.area.unwrap_or(0.0);
             let area_ignore = a < area_rng[0] || a > area_rng[1];
             if is_oid {
-                ann.is_group_of.unwrap_or(false) || area_ignore
+                (
+                    ann.is_group_of.unwrap_or(false) || area_ignore,
+                    !area_ignore,
+                )
             } else {
                 let mut ignore = ann.iscrowd || area_ignore;
                 if is_kp {
                     ignore = ignore || ann.num_keypoints.unwrap_or(0) == 0;
                 }
-                ignore
+                (ignore, !ignore)
             }
         })
-        .collect();
+        .unzip();
 
     // Stable sort on the ignore flag: non-ignored first, load order preserved
     // within each partition. Tie order is observable through `evalImgs`.
@@ -128,6 +142,7 @@ fn gather_gt<'a>(
     order.sort_by_key(|&i| ignore[i] as u8);
 
     let ignore_sorted: Vec<bool> = order.iter().map(|&i| ignore[i]).collect();
+    let in_denominator_sorted: Vec<bool> = order.iter().map(|&i| in_denominator[i]).collect();
     let iscrowd_sorted: Vec<bool> = order.iter().map(|&i| anns[i].iscrowd).collect();
     let is_group_of_sorted: Vec<bool> = if is_oid {
         order
@@ -144,6 +159,7 @@ fn gather_gt<'a>(
         order,
         iou_indices,
         ignore_sorted,
+        in_denominator_sorted,
         iscrowd_sorted,
         is_group_of_sorted,
         num_not_ignored,
@@ -277,40 +293,78 @@ fn match_cell(
             }
         }
     }
-    let gt_matched = m.gt_matched;
+    let mut gt_matched = m.gt_matched;
 
-    // Open Images second pass: an unmatched detection that overlaps a group-of GT
-    // is *ignored* — neither a true positive nor a false positive — matching the
-    // reference `OpenImagesChallengeEvaluator`. Several detections may be absorbed
-    // by the same group-of box, so there is deliberately no `gt_matched` check.
+    // Open Images second pass — group-of boxes.
     //
-    // Crediting them as true positives instead is not a free choice. Group-of GTs
-    // are ignored above, so they carry no false-negative penalty and contribute
-    // nothing to `num_gt`. Every extra TP would raise `tp_cum` against a
-    // denominator that never grows, and `recall = tp_cum / num_gt` would exceed
-    // 1.0 — measured at 4.0 on one image before this was corrected.
-    if is_oid {
+    // The protocol (https://storage.googleapis.com/openimages/web/evaluation.html):
+    //
+    //   "If at least one detection is inside group-of box a single True Positive
+    //    is scored. ... Multiple correct detections inside the same group-of box
+    //    is still count as a single True Positive. Otherwise, the group-of box is
+    //    counted as a single False Negative."
+    //
+    // So a group-of box is worth exactly one ground truth: the best-scoring
+    // detection inside it becomes a true positive, every other detection inside it
+    // is ignored (neither TP nor FP), and if nothing is inside it the box is a
+    // miss. This is the Open Images *Challenge* metric, equivalently TensorFlow's
+    // `group_of_weight = 1.0`, and it is what FiftyOne implements unconditionally.
+    //
+    // "Inside" is IoA, not IoU — see the note in `iou.rs` where group-of GT
+    // columns are flagged crowd so `sim` selects intersection-over-detection-area.
+    //
+    // Group-of GTs are excluded from both greedy phases (`gt_phase2_eligible`),
+    // so this is their only matching route. That exclusion is load-bearing: an IoA
+    // column saturates at 1.0 for any detection inside the region, so a group-of
+    // box left in phase 1 would outbid the real object a detection is sitting on
+    // and turn that object into a false negative.
+    //
+    // Detections arrive score-descending, so the first one to claim a given box is
+    // the highest-scoring one — the same choice TF makes with
+    // `scores_group_of[gt_id] = max(scores_group_of[gt_id], scores[i])`.
+    //
+    // `is_group_of_sorted` doubles as the candidate mask: under OID `ignore` is
+    // `is_group_of || area_ignore`, so every group-of box is ignored and therefore
+    // already sorted into the `[num_not_ignored, g)` tail. A separate eligibility
+    // vector would only restate that invariant.
+    //
+    // The guard skips the whole pass for cells with no group-of GT — the common
+    // case, since group-of is a minority annotation — which otherwise costs a full
+    // `d x g` scan per threshold for a guaranteed-empty result.
+    if is_oid && gt.is_group_of_sorted.iter().any(|&x| x) {
         for (t_idx, &iou_thr) in ctx.match_floors.iter().enumerate() {
             for di in 0..d {
                 if dt_matched[t_idx][di] {
                     continue;
                 }
-                let base = di * g;
-                for gi in gt.num_not_ignored..g {
-                    if !gt.is_group_of_sorted[gi] {
-                        continue;
-                    }
-                    if iou_flat[base + gi] >= iou_thr {
-                        // Record which group-of box absorbed it and flag it ignored
-                        // — the same pairing pycocotools uses for a detection
-                        // matched to a crowd GT (`dtm` set, `dtIg` set). Every
-                        // consumer tests `dt_ignore` first, so the pair reads as
-                        // "matched, but not scored".
-                        dt_matches[t_idx][di] = gt.id_at(gi);
-                        dt_matched[t_idx][di] = true;
-                        dt_ignore[t_idx][di] = true;
-                        break;
-                    }
+                // Best enclosing group-of box. The reference does
+                // `np.argmax(ioa, axis=1)` then tests the threshold, which is the
+                // same selection and the same first-wins tie-break that
+                // `best_above_floor` owns — see its docs for why the tie matters.
+                let row = &iou_flat[di * g..(di + 1) * g];
+                let Some(gi) = crate::primitives::greedy::best_above_floor(
+                    row,
+                    &gt.is_group_of_sorted,
+                    iou_thr,
+                ) else {
+                    continue;
+                };
+
+                dt_matches[t_idx][di] = gt.id_at(gi);
+                dt_matched[t_idx][di] = true;
+                // `gt_matched` *is* the "already credited" flag: group-of boxes are
+                // excluded from both greedy phases, so it is false on entry here and
+                // only this loop ever sets it. A separate `credited` vector would be
+                // a second copy of the same bit, free to drift from the one
+                // `EvalImg` reports.
+                if gt_matched[t_idx][gi] {
+                    // The box already has its true positive; absorb this one.
+                    dt_ignore[t_idx][di] = true;
+                } else {
+                    // First (highest-scoring) detection inside this box scores it.
+                    dt_ignore[t_idx][di] = false;
+                    gt_matches[t_idx][gi] = dt.anns[di].id;
+                    gt_matched[t_idx][gi] = true;
                 }
             }
         }
@@ -389,6 +443,7 @@ pub(super) fn evaluate_img(
         gt_matched: outcome.gt_matched,
         dt_scores: dt.scores,
         gt_ignore: gt.ignore_sorted,
+        gt_in_denominator: gt.in_denominator_sorted,
         dt_ignore: outcome.dt_ignore,
     })
 }
@@ -397,7 +452,12 @@ pub(super) fn evaluate_img(
 pub(in crate::detection) type IouMatrix = Vec<Vec<f64>>;
 
 /// Per-image, per-category evaluation result.
+///
+/// `#[non_exhaustive]`: evaluation families added later (panoptic, tracking) will
+/// need fields here, and this keeps that additive rather than breaking. Construct
+/// via evaluation, not by struct literal.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EvalImg {
     pub image_id: u64,
     pub category_id: u64,
@@ -422,10 +482,40 @@ pub struct EvalImg {
     pub gt_matched: Vec<Vec<bool>>,
     /// Detection scores
     pub dt_scores: Vec<f64>,
-    /// Whether each GT is ignored
+    /// Whether each GT is ignored *for matching*
     pub gt_ignore: Vec<bool>,
+    /// Whether each GT counts toward the recall denominator.
+    ///
+    /// Equal to `!gt_ignore` in every mode except Open Images, where a group-of
+    /// box is held out of matching yet still counts as one ground truth — the
+    /// protocol scores an undetected group-of box as a single false negative.
+    /// Consumers computing `num_gt` must read this, not `gt_ignore`.
+    pub gt_in_denominator: Vec<bool>,
     /// Whether each detection is ignored per IoU threshold
     pub dt_ignore: Vec<Vec<bool>>,
+}
+
+impl EvalImg {
+    /// How many ground truths in this cell count toward recall.
+    ///
+    /// Use this rather than counting `!gt_ignore`. The two agree in every mode but
+    /// Open Images, where a group-of box is excluded from matching yet still counts
+    /// as one ground truth — see [`gt_in_denominator`](Self::gt_in_denominator).
+    /// Having the rule in a method rather than repeated at each call site is what
+    /// stops the next consumer from reaching for the wrong field.
+    pub fn num_gt_in_denominator(&self) -> usize {
+        self.gt_in_denominator.iter().filter(|&&x| x).count()
+    }
+
+    /// Whether ground truth `gi` is a *scored* miss when unmatched.
+    ///
+    /// The false-negative counterpart of [`num_gt_in_denominator`](Self::num_gt_in_denominator):
+    /// a ground truth that counts in the denominator and went unmatched is a miss.
+    /// Consumers tallying false negatives should ask this instead of `!gt_ignore`,
+    /// or they will disagree with the recall the same evaluation reports.
+    pub fn counts_as_miss(&self, gi: usize) -> bool {
+        self.gt_in_denominator.get(gi).copied().unwrap_or(false)
+    }
 }
 
 /// Read-only context shared across all [`COCOeval::evaluate_img_static`] calls

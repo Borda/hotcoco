@@ -5,6 +5,27 @@ use crate::types::Rle;
 
 use super::{COCOeval, EvalMode};
 
+/// Whether this ground truth's similarity column uses intersection-over-area.
+///
+/// IoA — intersection divided by the *detection's* area — is how both COCO and
+/// Open Images express "this ground truth is a region, not an instance". They just
+/// flag it differently: COCO with `iscrowd`, Open Images with `is_group_of`. The
+/// protocol wording is "a detection is inside a group-of box if the area of
+/// intersection of the detection and the box divided by the area of the detection
+/// is greater than 0.5".
+///
+/// One function rather than the same branch in each of the three similarity
+/// kernels: hardcoding `false` for Open Images made the group-of pass unreachable
+/// for any detection smaller than the group box — the normal case — and it was
+/// wrong in all three places at once, because there were three places.
+fn uses_ioa(ann: &crate::types::Annotation, eval_mode: EvalMode) -> bool {
+    if eval_mode == EvalMode::OpenImages {
+        ann.is_group_of.unwrap_or(false)
+    } else {
+        ann.iscrowd
+    }
+}
+
 impl COCOeval {
     /// Compute the IoU/OKS matrix for a given image and category.
     pub(super) fn compute_iou_static(
@@ -73,12 +94,7 @@ impl COCOeval {
             .iter()
             .filter_map(|&id| {
                 let ann = coco_gt.get_ann(id)?;
-                // OID: iscrowd is irrelevant — always use standard IoU
-                let crowd = if eval_mode == EvalMode::OpenImages {
-                    false
-                } else {
-                    ann.iscrowd
-                };
+                let crowd = uses_ioa(ann, eval_mode);
                 Some((coco_gt.ann_to_rle(ann)?, crowd))
             })
             .unzip();
@@ -102,12 +118,7 @@ impl COCOeval {
             .iter()
             .filter_map(|&id| {
                 let ann = coco_gt.get_ann(id)?;
-                // OID: iscrowd is irrelevant — always use standard IoU
-                let crowd = if eval_mode == EvalMode::OpenImages {
-                    false
-                } else {
-                    ann.iscrowd
-                };
+                let crowd = uses_ioa(ann, eval_mode);
                 Some((ann.bbox?, crowd))
             })
             .unzip();
@@ -174,11 +185,7 @@ impl COCOeval {
             .iter()
             .filter_map(|&id| {
                 let ann = coco_gt.get_ann(id)?;
-                let crowd = if eval_mode == EvalMode::OpenImages {
-                    false
-                } else {
-                    ann.iscrowd
-                };
+                let crowd = uses_ioa(ann, eval_mode);
                 Some((ann.obb?, crowd))
             })
             .unzip();

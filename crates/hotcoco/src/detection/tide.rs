@@ -281,8 +281,7 @@ impl COCOeval {
                 num_gt: 0,
             });
 
-            // Accumulate non-ignored GT count
-            entry.num_gt += eval_img.gt_ignore.iter().filter(|&&x| !x).count();
+            entry.num_gt += eval_img.num_gt_in_denominator();
 
             // Classify each DT
             for di in 0..d {
@@ -380,8 +379,12 @@ impl COCOeval {
             let g = eval_img.gt_ids.len();
             let n = (0..g)
                 .filter(|&gi| {
+                    // `counts_as_miss`, not `!gt_ignore`: `num_gt` above already
+                    // counts an Open Images group-of box, so excluding it here
+                    // would make Miss disagree with the denominator it is a
+                    // fraction of, inside this one function.
                     !eval_img.gt_matched[t_idx][gi]
-                        && !eval_img.gt_ignore[gi]
+                        && eval_img.counts_as_miss(gi)
                         && !covered_gt_ann_ids.contains(&eval_img.gt_ids[gi])
                 })
                 .count();
