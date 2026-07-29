@@ -186,6 +186,14 @@ jobs:
           source .venv/bin/activate
           .venv/bin/python scripts/parity_mask.py --cases 200
 
+      # Frozen fixtures from the TensorFlow Object Detection API, the reference the
+      # official Open Images protocol page points at. Checked in, so this needs
+      # neither network nor TensorFlow — regenerate with `just gen-oid-fixtures`.
+      - name: Open Images vs TensorFlow Object Detection API
+        run: |
+          source .venv/bin/activate
+          .venv/bin/python scripts/parity_oid.py
+
       # Compares per-(image, category) matching *decisions* against pycocotools,
       # annotation by annotation, over a tracked corpus of 18 curated edge cases.
       # Metrics cannot replace this: two detections swapped between images can

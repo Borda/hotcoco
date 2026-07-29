@@ -130,7 +130,12 @@ pub fn compare(
     let metrics = build_metric_defs(&eval_a.params, eval_a.eval_mode);
     let metric_keys: Vec<&str> = metrics.iter().map(|m| m.name).collect();
 
-    let acc_a = accumulate_impl(&eval_a.eval_imgs, &eval_a.params, Some(&shared_set));
+    let acc_a = accumulate_impl(
+        &eval_a.eval_imgs,
+        &eval_a.params,
+        Some(&shared_set),
+        eval_a.eval_mode,
+    );
     let stats_a = summarize_impl(
         &acc_a,
         &eval_a.params,
@@ -139,7 +144,12 @@ pub fn compare(
         &metrics,
     );
 
-    let acc_b = accumulate_impl(&eval_b.eval_imgs, &eval_b.params, Some(&shared_set));
+    let acc_b = accumulate_impl(
+        &eval_b.eval_imgs,
+        &eval_b.params,
+        Some(&shared_set),
+        eval_b.eval_mode,
+    );
     let stats_b = summarize_impl(
         &acc_b,
         &eval_b.params,
@@ -169,7 +179,7 @@ pub fn compare(
             .cat_ids
             .iter()
             .copied()
-            .zip(per_cat_ap_static(acc, &ev.params))
+            .zip(per_cat_ap_static(acc, &ev.params, ev.eval_mode))
             .collect()
     };
     let per_cat_a = by_cat(eval_a, &acc_a);
@@ -269,7 +279,12 @@ fn bootstrap_compare(
         opts.seed,
         opts.confidence,
         |sample| {
-            let acc_a = accumulate_impl(&eval_a.eval_imgs, &eval_a.params, Some(sample));
+            let acc_a = accumulate_impl(
+                &eval_a.eval_imgs,
+                &eval_a.params,
+                Some(sample),
+                eval_a.eval_mode,
+            );
             let stats_a = summarize_impl(
                 &acc_a,
                 &eval_a.params,
@@ -278,7 +293,12 @@ fn bootstrap_compare(
                 metrics,
             );
 
-            let acc_b = accumulate_impl(&eval_b.eval_imgs, &eval_b.params, Some(sample));
+            let acc_b = accumulate_impl(
+                &eval_b.eval_imgs,
+                &eval_b.params,
+                Some(sample),
+                eval_b.eval_mode,
+            );
             let stats_b = summarize_impl(
                 &acc_b,
                 &eval_b.params,

@@ -103,6 +103,14 @@ py-lint:
 parity-lvis: build
     uv run python scripts/parity_lvis.py
 
+# Verify Open Images parity vs the TensorFlow Object Detection API (frozen fixtures)
+parity-oid: build
+    uv run python scripts/parity_oid.py
+
+# Regenerate the Open Images fixtures from the TF reference (needs network)
+gen-oid-fixtures: build
+    uv run python scripts/gen_oid_fixtures.py
+
 # Verify TIDE error-type parity vs tidecv (needs data/)
 parity-tide: build
     uv run python scripts/parity_tide.py
@@ -124,6 +132,7 @@ parity-all: build
     uv run pytest scripts/test_parity.py -q
     uv run pytest scripts/test_adversarial.py -q
     uv run python scripts/parity_lvis.py
+    uv run python scripts/parity_oid.py
     uv run python scripts/parity_mask.py --cases 200
 
 # Diff per-(image, category) matching decisions against pycocotools across the

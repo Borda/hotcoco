@@ -85,6 +85,33 @@ COCO_KPT_OKS_SIGMAS = [
 
 
 @contextlib.contextmanager
+def suppress_output():
+    """Suppress stdout *and* stderr at the file-descriptor level.
+
+    `suppress_stdout` covers fd 1, which is enough for pycocotools' chatter. It is
+    not enough for hotcoco: `summarize()` writes comparability warnings to fd 2,
+    deliberately bypassing `sys.stderr` so they survive redirection. A script that
+    evaluates in a loop — `parity_oid.py` runs 70 cases — otherwise buries its own
+    result under one warning per case.
+    """
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved = [os.dup(1), os.dup(2)]
+    os.dup2(devnull_fd, 1)
+    os.dup2(devnull_fd, 2)
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    try:
+        yield
+    finally:
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        for fd in saved:
+            os.close(fd)
+        os.close(devnull_fd)
+        sys.stdout, sys.stderr = old_out, old_err
+
+
+@contextlib.contextmanager
 def suppress_stdout():
     """Suppress stdout at the file-descriptor level (catches Rust println! too)."""
     devnull_fd = os.open(os.devnull, os.O_WRONLY)

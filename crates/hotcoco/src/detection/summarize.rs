@@ -25,23 +25,51 @@ pub(super) fn mean_or_missing(sum: f64, count: usize) -> f64 {
     if count == 0 { -1.0 } else { sum / count as f64 }
 }
 
-pub(super) fn per_cat_ap_static(eval: &AccumulatedEval, params: &Params) -> Vec<f64> {
+/// The AP samples for one `(t, k, a, m)` cell, `-1.0` sentinels already dropped.
+///
+/// Which integration applies is a property of the *mode*, not of the caller. COCO
+/// and LVIS average the precision envelope over the 101 recall thresholds, so a
+/// cell yields `r` samples; Open Images takes the exact area under that same
+/// envelope, so it yields one. Every AP path routes through here — `summarize_impl`
+/// and `per_cat_ap_static`, the latter also serving `report` and `compare` — so a
+/// mode check at only some of them cannot silently split the two integrations.
+///
+/// Returns an iterator rather than filling an out-param so callers keep the shape
+/// that suits them: `summarize_impl` extends a shared `Vec`, `per_cat_ap_static`
+/// folds into a running `(sum, count)` with no allocation at all.
+fn ap_samples(
+    eval: &AccumulatedEval,
+    eval_mode: EvalMode,
+    t_idx: usize,
+    k_idx: usize,
+    a_idx: usize,
+    m_idx: usize,
+) -> impl Iterator<Item = f64> + '_ {
+    let all_points = eval_mode == EvalMode::OpenImages;
+    let n = if all_points { 1 } else { eval.shape.r };
+    (0..n)
+        .map(move |r_idx| {
+            if all_points {
+                eval.ap_all_points[eval.recall_idx(t_idx, k_idx, a_idx, m_idx)]
+            } else {
+                eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
+            }
+        })
+        .filter(|&v| v >= 0.0)
+}
+
+pub(super) fn per_cat_ap_static(
+    eval: &AccumulatedEval,
+    params: &Params,
+    eval_mode: EvalMode,
+) -> Vec<f64> {
     let a_idx = params.all_area_idx();
     let m_idx = eval.shape.m - 1;
     (0..eval.shape.k)
         .map(|k_idx| {
-            let mut sum = 0.0;
-            let mut count = 0_usize;
-            for t_idx in 0..eval.shape.t {
-                for r_idx in 0..eval.shape.r {
-                    let idx = eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
-                    let v = eval.precision[idx];
-                    if v >= 0.0 {
-                        sum += v;
-                        count += 1;
-                    }
-                }
-            }
+            let (sum, count) = (0..eval.shape.t)
+                .flat_map(|t_idx| ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx))
+                .fold((0.0, 0usize), |(s, c), v| (s + v, c + 1));
             mean_or_missing(sum, count)
         })
         .collect()
@@ -75,17 +103,11 @@ pub(super) fn summarize_impl(
             (0..eval.shape.t).collect()
         };
 
-        let mut vals = Vec::new();
+        let mut vals = Vec::with_capacity(t_indices.len() * eval.shape.k * eval.shape.r);
         for &t_idx in &t_indices {
             for k_idx in 0..eval.shape.k {
                 if ap {
-                    for r_idx in 0..eval.shape.r {
-                        let idx = eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
-                        let v = eval.precision[idx];
-                        if v >= 0.0 {
-                            vals.push(v);
-                        }
-                    }
+                    vals.extend(ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx));
                 } else {
                     let idx = eval.recall_idx(t_idx, k_idx, a_idx, m_idx);
                     let v = eval.recall[idx];
@@ -100,7 +122,7 @@ pub(super) fn summarize_impl(
     };
 
     let per_cat_ap = if eval_mode == EvalMode::Lvis || eval_mode == EvalMode::OpenImages {
-        Some(per_cat_ap_static(eval, params))
+        Some(per_cat_ap_static(eval, params, eval_mode))
     } else {
         None
     };

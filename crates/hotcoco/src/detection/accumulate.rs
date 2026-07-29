@@ -5,17 +5,27 @@ use rayon::prelude::*;
 use crate::params::Params;
 
 use super::COCOeval;
+use super::EvalMode;
 use super::matching::EvalImg;
 
 /// Accumulate per-image eval results into precision/recall arrays.
 ///
 /// When `img_filter` is `Some`, only eval_imgs whose `image_id` is in the set
 /// are included. Pass `None` to include all images (standard behavior).
+///
+/// `eval_mode` decides only whether [`AccumulatedEval::ap_all_points`] is filled.
+/// Open Images is the one mode that reads it, and computing it costs about as much
+/// again as the gridded curve beside it — measured at +32% on `accumulate` for COCO
+/// val2017 bbox — so every other mode gets the `-1.0` "not computed" sentinel
+/// rather than paying for a value it discards. `compare::bootstrap_ci` calls this
+/// once per resample, which multiplies the saving.
 pub(super) fn accumulate_impl(
     eval_imgs: &[Option<EvalImg>],
     params: &Params,
     img_filter: Option<&HashSet<u64>>,
+    eval_mode: EvalMode,
 ) -> AccumulatedEval {
+    let want_all_points = eval_mode == EvalMode::OpenImages;
     let t = params.iou_thrs.len();
     let r = params.rec_thrs.len();
     let k = if params.use_cats {
@@ -77,9 +87,14 @@ pub(super) fn accumulate_impl(
     // Each work item produces a set of (index, value) writes for precision, recall, scores
     /// Intermediate results from a single (category, area_range, max_det) work item.
     /// Each field is a list of (flat_index, value) pairs to write into the output arrays.
+    #[derive(Default)]
     struct AccResult {
         precision_writes: Vec<(usize, f64)>,
-        recall_writes: Vec<(usize, f64)>,
+        /// `(flat_index, max_recall, all_points_ap)`. The AP rides along with the
+        /// recall it was computed from rather than in a parallel vector, so the two
+        /// cannot be written at different indices or one forgotten on an early
+        /// return. Carries `-1.0` when the mode does not want it.
+        recall_writes: Vec<(usize, f64, f64)>,
         scores_writes: Vec<(usize, f64)>,
     }
 
@@ -109,7 +124,7 @@ pub(super) fn accumulate_impl(
                     all_dt_ignore[t_idx].extend_from_slice(&eval_img.dt_ignore[t_idx][..nd]);
                 }
 
-                num_gt += eval_img.gt_ignore.iter().filter(|&&x| !x).count();
+                num_gt += eval_img.num_gt_in_denominator();
             }
 
             let mut precision_writes = Vec::new();
@@ -117,11 +132,7 @@ pub(super) fn accumulate_impl(
             let mut scores_writes = Vec::new();
 
             if num_gt == 0 {
-                return AccResult {
-                    precision_writes,
-                    recall_writes,
-                    scores_writes,
-                };
+                return AccResult::default();
             }
 
             // Initialize precision, recall, and scores to 0.0 (distinct from -1.0 which
@@ -147,10 +158,14 @@ pub(super) fn accumulate_impl(
             let nd = inds.len();
 
             if nd == 0 {
-                // GT exists but no detections — recall is 0.0 (not -1.0 "missing").
+                // GT exists but no detections — recall and AP are 0.0, not -1.0
+                // "missing". The metric *is* computable here and the answer is that
+                // nothing was found; reporting "not computed" would drop the
+                // category from the mean and quietly raise mAP.
                 for t_idx in 0..t {
                     let recall_idx = shape.recall_idx(t_idx, k_idx, a_idx, m_idx);
-                    recall_writes.push((recall_idx, 0.0));
+                    let ap = if want_all_points { 0.0 } else { -1.0 };
+                    recall_writes.push((recall_idx, 0.0, ap));
                 }
                 return AccResult {
                     precision_writes,
@@ -195,8 +210,17 @@ pub(super) fn accumulate_impl(
                     &params.rec_thrs,
                 );
 
+                // The all-points AP is the exact area under the same envelope the
+                // grid samples. It has to be computed here, where `tp`/`fp` are
+                // already score-ordered and cumulative — it cannot be recovered
+                // from the 101 samples afterwards.
+                let all_points_ap = if want_all_points {
+                    crate::metrics::counts::average_precision_all_points(&tp, &fp, num_gt)
+                } else {
+                    -1.0
+                };
                 let recall_idx = shape.recall_idx(t_idx, k_idx, a_idx, m_idx);
-                recall_writes.push((recall_idx, final_recall));
+                recall_writes.push((recall_idx, final_recall, all_points_ap));
 
                 for (r_idx, pr_val, rc_ptr) in curve {
                     let p_idx = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
@@ -219,13 +243,15 @@ pub(super) fn accumulate_impl(
     let mut scores = vec![-1.0f64; total];
     let total_recall = t * k * a * m;
     let mut recall = vec![-1.0f64; total_recall];
+    let mut ap_all_points = vec![-1.0f64; total_recall];
 
     for result in results {
         for (idx, val) in result.precision_writes {
             precision[idx] = val;
         }
-        for (idx, val) in result.recall_writes {
-            recall[idx] = val;
+        for (idx, rec, ap) in result.recall_writes {
+            recall[idx] = rec;
+            ap_all_points[idx] = ap;
         }
         for (idx, val) in result.scores_writes {
             scores[idx] = val;
@@ -235,6 +261,7 @@ pub(super) fn accumulate_impl(
     AccumulatedEval {
         precision,
         recall,
+        ap_all_points,
         scores,
         shape,
     }
@@ -243,7 +270,12 @@ pub(super) fn accumulate_impl(
 impl COCOeval {
     /// Accumulate per-image results into precision/recall arrays.
     pub fn accumulate(&mut self) {
-        self.eval = Some(accumulate_impl(&self.eval_imgs, &self.params, None));
+        self.eval = Some(accumulate_impl(
+            &self.eval_imgs,
+            &self.params,
+            None,
+            self.eval_mode,
+        ));
     }
 }
 
@@ -283,11 +315,23 @@ impl EvalShape {
 /// Recall is a flat 4-D array with shape `[T x K x A x M]`. Values of -1.0 indicate
 /// that no data was available for that combination (e.g. a category with no GT instances).
 #[derive(Debug, Clone)]
+/// `#[non_exhaustive]` for the same reason as [`EvalImg`]: `ap_all_points` was
+/// added here after 0.5.0, and the families still to come will want more. Added
+/// while pre-1.0, when it is free.
+#[non_exhaustive]
 pub struct AccumulatedEval {
     /// Interpolated precision at each (iou_thr, recall_thr, category, area_range, max_det).
     pub precision: Vec<f64>,
     /// Maximum recall at each (iou_thr, category, area_range, max_det).
     pub recall: Vec<f64>,
+    /// VOC 2010 all-points AP — same shape and indexing as
+    /// [`recall`](Self::recall), so `recall_idx` works for both. The exact area
+    /// under the precision envelope that [`precision`](Self::precision) holds
+    /// sampled at 101 points; see
+    /// [`average_precision_all_points`](crate::metrics::counts::average_precision_all_points)
+    /// for why Open Images wants the former. `-1.0` in every other mode, which
+    /// does not compute it.
+    pub ap_all_points: Vec<f64>,
     /// Detection score at each precision threshold, same shape as `precision`.
     pub scores: Vec<f64>,
     /// Array dimensions — use to interpret the flat precision/recall/scores vectors.

@@ -125,6 +125,61 @@ pub fn average_precision(
     curve.iter().map(|&(_, prec, _)| prec).sum::<f64>() / rec_thrs.len() as f64
 }
 
+/// Average precision by the VOC 2010 "all-points" rule — the exact area under the
+/// interpolated precision-recall curve, with no recall grid.
+///
+/// This is the integration COCO does *not* use. COCO samples the same envelope at
+/// [`crate::params::default_rec_thrs`]'s 101 points and averages, which quantizes
+/// the result: a class with 2 ground truths and 1 true positive scores 0.504950 on
+/// the grid against an exact 0.500000. The error is bounded by roughly `1/101` per
+/// class, so it matters most where classes have few instances.
+///
+/// Open Images specifies this rule — "evaluated as in the PASCAL VOC 2010
+/// protocol" — and both reference implementations follow it: TensorFlow's
+/// `object_detection.utils.metrics.compute_average_precision` and FiftyOne's
+/// `_compute_AP`. Notably FiftyOne uses the 101-point grid for its COCO evaluation
+/// and this rule for Open Images, so the split is deliberate, not an oversight.
+///
+/// Takes cumulative counts because that is what the caller already has; deriving
+/// them here would duplicate the score-ordering the accumulator has done.
+/// `tp_cum` and `fp_cum` must be in score-descending order and the same length.
+/// Returns `0.0` for an empty curve or `num_gt == 0`.
+///
+/// Runs in one reverse pass with no allocation. The reference builds padded
+/// `recall`/`precision` arrays first, but both sentinels turn out to be inert: the
+/// leading `precision = 0` is never a summation term, and the trailing
+/// `(recall = 1, precision = 0)` contributes `(1 - max_recall) * 0`. They collapse
+/// into the loop bounds and the initial envelope value. Sweeping right to left also
+/// means the envelope is simply the running maximum, so it needs no second pass.
+pub fn average_precision_all_points(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize) -> f64 {
+    let nd = tp_cum.len();
+    if nd == 0 || num_gt == 0 {
+        return 0.0;
+    }
+
+    let n = num_gt as f64;
+    let mut ap = 0.0;
+    // Best precision at this recall or beyond. Starts at 0 — the reference's
+    // trailing sentinel, which nothing to the right can beat.
+    let mut envelope = 0.0f64;
+
+    for i in (0..nd).rev() {
+        let denom = tp_cum[i] + fp_cum[i];
+        let precision = if denom > 0.0 { tp_cum[i] / denom } else { 0.0 };
+        envelope = envelope.max(precision);
+
+        // Divide before subtracting, as the reference does — it builds the recall
+        // array first and differences it, so matching that order keeps the
+        // arithmetic bit-comparable.
+        let recall_prev = if i == 0 { 0.0 } else { tp_cum[i - 1] / n };
+        // A step where recall does not move contributes exactly zero, so the
+        // reference's explicit filter on that is unnecessary here.
+        ap += (tp_cum[i] / n - recall_prev) * envelope;
+    }
+
+    ap
+}
+
 /// The F-beta score for one precision/recall pair.
 ///
 /// `beta` weights recall relative to precision: `beta = 1` is the harmonic mean
@@ -253,6 +308,48 @@ mod tests {
                 curve.len()
             );
         }
+    }
+
+    /// All-points AP, derived by hand rather than recorded from our own output.
+    ///
+    /// Each case is small enough to integrate on paper, which is the point: the
+    /// end-to-end check against TensorFlow lives in `scripts/parity_oid.py`, and
+    /// this pins the arithmetic so a failure there localises to the reference
+    /// rather than to this function.
+    #[test]
+    fn all_points_ap_matches_hand_derived_values() {
+        // 2 GT, 1 found. Envelope is precision 1.0 over recall [0, 0.5], then 0.
+        //   AP = (0.5 - 0.0) * 1.0 + (1.0 - 0.5) * 0.0 = 0.5
+        assert_eq!(average_precision_all_points(&[1.0], &[0.0], 2), 0.5);
+
+        // 2 GT, both found, no false positives — precision 1.0 across the board.
+        //   AP = 0.5 * 1.0 + 0.5 * 1.0 = 1.0
+        assert_eq!(
+            average_precision_all_points(&[1.0, 2.0], &[0.0, 0.0], 2),
+            1.0
+        );
+
+        // 1 GT, a false positive ranked above the true positive.
+        //   raw:      recall [0.0, 1.0], precision [0.0, 0.5]
+        //   envelope: precision 0.5 everywhere to the left of full recall
+        //   AP = (1.0 - 0.0) * 0.5 = 0.5
+        assert_eq!(
+            average_precision_all_points(&[0.0, 1.0], &[1.0, 1.0], 1),
+            0.5
+        );
+
+        // The quantisation this function exists to avoid: the 101-point grid
+        // reports 51/101 for the first case above, not 0.5.
+        let grid = average_precision(&[0.9], &[true], None, 2, &crate::params::default_rec_thrs());
+        assert!((grid - 51.0 / 101.0).abs() < 1e-12);
+        assert!(
+            (grid - 0.5).abs() > 1e-3,
+            "the two integrations must actually differ"
+        );
+
+        // Degenerate inputs agree with the empty-set convention in the module note.
+        assert_eq!(average_precision_all_points(&[], &[], 5), 0.0);
+        assert_eq!(average_precision_all_points(&[1.0], &[0.0], 0), 0.0);
     }
 
     /// `f_beta` is a weighted harmonic mean, so it is bounded by its inputs and

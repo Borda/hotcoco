@@ -52,7 +52,7 @@ impl COCOeval {
         let metric_keys: Vec<&str> = metrics.iter().map(|m| m.name).collect();
 
         // Compute overall (no filter)
-        let overall_acc = accumulate_impl(&self.eval_imgs, &self.params, None);
+        let overall_acc = accumulate_impl(&self.eval_imgs, &self.params, None, self.eval_mode);
         let overall_stats = summarize_impl(
             &overall_acc,
             &self.params,
@@ -80,7 +80,7 @@ impl COCOeval {
             let filter: HashSet<u64> = img_ids.iter().copied().collect();
             let num_images = filter.len();
 
-            let acc = accumulate_impl(&self.eval_imgs, &self.params, Some(&filter));
+            let acc = accumulate_impl(&self.eval_imgs, &self.params, Some(&filter), self.eval_mode);
             let stats = summarize_impl(
                 &acc,
                 &self.params,
