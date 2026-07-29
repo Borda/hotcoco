@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::params::{IouType, Params};
+use crate::report::Provenance;
 
 use super::EvalMode;
 
@@ -35,10 +36,24 @@ pub struct EvalParams {
 ///
 /// Use [`save`](EvalResults::save) to write JSON to a file, or
 /// [`to_json`](EvalResults::to_json) to get a JSON string.
+///
+/// `#[non_exhaustive]`: this is an output DTO that grows as families report more
+/// about a run, and callers read it rather than construct it.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct EvalResults {
     /// hotcoco version that produced these results.
     pub hotcoco_version: String,
+    /// Whether these numbers are comparable to a reference implementation's
+    /// published output, or a hotcoco extension.
+    ///
+    /// Carried here, and not only on [`EvalReport`](crate::EvalReport), because
+    /// this is the struct that gets archived: `save()` writes it, the CLI's
+    /// `--json` emits it, and the PDF report renders from it. Provenance that
+    /// exists only inside a live process is provenance nobody can audit later —
+    /// and a saved metrics file whose comparability has to be reconstructed from
+    /// memory is the exact situation the marker exists to prevent.
+    pub provenance: Provenance,
     /// Evaluation parameters used to produce these metrics.
     pub params: EvalParams,
     /// Summary metrics (AP, AP50, AP75, AR1, AR10, AR100, etc.).

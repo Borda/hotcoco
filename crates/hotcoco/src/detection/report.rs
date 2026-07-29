@@ -20,6 +20,12 @@ use super::{COCOeval, EvalMode};
 impl COCOeval {
     /// Ways this run's parameters depart from the reference configuration.
     ///
+    /// Public because [`Provenance`] is a single bit and the *reason* is what a
+    /// caller can act on: "extension" alone leaves someone re-deriving which of
+    /// half a dozen conditions fired. The Python bindings turn each entry into a
+    /// `warnings.warn`, which is also how these reach a notebook — `summarize()`
+    /// writes them to fd 2, and that bypasses `sys.stderr` entirely.
+    ///
     /// Empty means the numbers are directly comparable to the reference
     /// implementation's published output. Non-empty means they are not, and it is
     /// the *same* fact that drives both the `summarize()` warnings and
@@ -33,7 +39,7 @@ impl COCOeval {
     /// printed no warning at all. Those are the two *largest* comparability breaks,
     /// and they were the silent ones. Anything that can make a run incomparable
     /// belongs in this list.
-    pub(super) fn reference_deviations(&self) -> Vec<String> {
+    pub fn reference_deviations(&self) -> Vec<String> {
         let mut out = Vec::new();
 
         // No reference implementation exists for these at all, at any parameters.
@@ -452,6 +458,7 @@ impl COCOeval {
 
         Ok(EvalResults {
             hotcoco_version: env!("CARGO_PKG_VERSION").to_string(),
+            provenance: report.provenance,
             params: EvalParams::from_params(&self.params, self.eval_mode),
             metrics: report.metrics.into_iter().collect(),
             per_class: per_class_map,

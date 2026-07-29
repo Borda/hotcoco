@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`EvalResults` carries `provenance`.** It reaches the CLI's `--json`, the PDF
+  report, and `ev.results()` in Python - the artifacts users archive and come
+  back to. Previously the marker existed only on `EvalReport`, which nothing that
+  writes a file uses, so comparability died with the process.
+
+
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
   JSON:
@@ -253,6 +259,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `pycocotools`/LVIS drop-in surface are permanent.
 
 ### Fixed
+
+- **`ev.params.imgIds = [...]` was a silent no-op.** The `params` getter cloned
+  into a fresh object on every access, so pycocotools' canonical configuration
+  idiom - the one in its own demo - mutated a temporary and evaluation proceeded
+  over the whole dataset anyway. `params` is now a persistent object, pulled into
+  the evaluator at `evaluate()` and pushed back afterwards so a caller reading
+  `ev.params.imgIds` sees the resolved list, as pycocotools leaves it.
+
+- **Comparability warnings are now real Python warnings.** `summarize()` writes
+  them with `eprintln!`, which goes to file descriptor 2 and bypasses
+  `sys.stderr` - invisible in a Jupyter cell, invisible to `capsys`, uncatchable
+  by `warnings.catch_warnings`. Notebook users are the primary audience and never
+  saw them. `COCOeval::reference_deviations()` is public for the same reason:
+  `Provenance` is one bit, and the reason is what a caller can act on.
+
+- **`ImageSummary.ap` had no assertion anywhere in the repo**, despite surfacing
+  in `coco eval --diagnostics`, the browse viewer, and the dashboard. Now pinned
+  by closed-form cases, including the `n_gt == 0` convention that is deliberately
+  the opposite of TIDE's.
 
 - **`load_res()` rejects NaN detection scores.** Ranking sorts with
   `partial_cmp(..).unwrap_or(Equal)`, which is not transitive once NaN is present:

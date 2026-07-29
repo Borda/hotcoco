@@ -11,10 +11,12 @@ Usage:
     just test
 """
 
+import contextlib
 import json
 import os
 import sys
 import tempfile
+import warnings
 
 import pytest
 from helpers import COCO_KEYPOINT_NAMES, COCO_SKELETON, suppress_stdout
@@ -29,6 +31,23 @@ TOLERANCE = 1e-10
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _written(gt_dataset, dt_results):
+    """Write a GT/DT pair to temp files and yield their paths."""
+    gt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    dt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    try:
+        json.dump(gt_dataset, gt_file)
+        gt_file.close()
+        json.dump(dt_results, dt_file)
+        dt_file.close()
+        with suppress_stdout():
+            yield gt_file.name, dt_file.name
+    finally:
+        os.unlink(gt_file.name)
+        os.unlink(dt_file.name)
 
 
 def run_both(gt_dataset, dt_results, iou_type):
@@ -625,3 +644,93 @@ def test_report_curves_are_plottable():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "-x", "--tb=short"]))
+
+
+# ---------------------------------------------------------------------------
+# Drop-in behaviours that are not about metric values
+# ---------------------------------------------------------------------------
+
+
+def test_params_in_place_mutation_takes_effect():
+    """`ev.params.imgIds = [...]` must configure the run, as it does in pycocotools.
+
+    This is the canonical idiom — it appears in pycocotools' own demo — and it
+    used to be a silent no-op here: the `params` getter cloned into a fresh object
+    each access, so the assignment mutated a temporary and evaluation proceeded
+    over the whole dataset.
+
+    Asserted through a *result*, not just the attribute, because reading the
+    attribute back would also pass if params were a persistent object the
+    evaluator never consulted.
+    """
+    anns = [_make_bbox_ann(1, img_id=1, bbox=[10, 10, 50, 50]), _make_bbox_ann(2, img_id=2, bbox=[10, 10, 50, 50])]
+    images = [
+        {"id": 1, "width": 640, "height": 480, "file_name": "a.jpg"},
+        {"id": 2, "width": 640, "height": 480, "file_name": "b.jpg"},
+    ]
+    gt = _make_minimal_gt("bbox", images=images, annotations=anns)
+    dts = [
+        _make_bbox_det(img_id=1, bbox=[10, 10, 50, 50], score=0.9),
+        _make_bbox_det(img_id=2, bbox=[500, 400, 20, 20], score=0.9),
+    ]
+
+    with _written(gt, dts) as (gt_path, dt_path):
+        coco_gt = COCO(gt_path)
+        coco_dt = coco_gt.load_res(dt_path)
+
+        both = COCOeval(coco_gt, coco_dt, "bbox")
+        both.evaluate()
+        both.accumulate()
+        both.summarize()
+
+        only_good = COCOeval(coco_gt, coco_dt, "bbox")
+        only_good.params.imgIds = [1]
+        assert list(only_good.params.imgIds) == [1], "params did not retain the assignment"
+        only_good.evaluate()
+        only_good.accumulate()
+        only_good.summarize()
+
+    # Image 1 is a perfect detection, image 2 is a total miss. Restricting to
+    # image 1 must therefore score strictly higher.
+    assert only_good.stats[0] > both.stats[0], (
+        f"restricting to imgIds=[1] changed nothing: {only_good.stats[0]} vs {both.stats[0]} "
+        "- params mutation is not reaching the evaluator"
+    )
+
+
+def test_non_reference_params_warn_and_downgrade_provenance():
+    """Off-reference configuration is visible from Python, both ways.
+
+    `summarize()` writes its warnings with `eprintln!`, straight to file
+    descriptor 2 — which bypasses `sys.stderr`, so they are invisible in a
+    notebook, invisible to `capsys`, and uncatchable by `warnings.catch_warnings`.
+    They are re-raised as real Python warnings for that reason.
+    """
+    gt = _make_minimal_gt("bbox", annotations=[_make_bbox_ann(1, bbox=[10, 10, 50, 50])])
+    dts = [_make_bbox_det(bbox=[10, 10, 50, 50], score=0.9)]
+
+    with _written(gt, dts) as (gt_path, dt_path):
+        coco_gt = COCO(gt_path)
+        coco_dt = coco_gt.load_res(dt_path)
+
+        ref = COCOeval(coco_gt, coco_dt, "bbox")
+        ref.evaluate()
+        ref.accumulate()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ref.summarize()
+        assert not caught, f"default params should not warn, got {[str(w.message) for w in caught]}"
+        assert ref.results()["provenance"] == "parity_verified"
+
+        off = COCOeval(coco_gt, coco_dt, "bbox")
+        off.params.recThrs = [i / 10 for i in range(11)]
+        off.evaluate()
+        off.accumulate()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            off.summarize()
+
+    messages = [str(w.message) for w in caught]
+    assert any("rec_thrs" in m for m in messages), f"expected a rec_thrs warning catchable from Python, got {messages}"
+    # Provenance has to survive into the archived artifact, not just the report.
+    assert off.results()["provenance"] == "extension"

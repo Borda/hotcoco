@@ -1196,6 +1196,22 @@ Open Images workflow::
 #[pyclass(name = "COCOeval")]
 struct PyCOCOeval {
     inner: hotcoco_core::COCOeval,
+    /// The `params` object handed to Python, held so every access returns the
+    /// *same* object.
+    ///
+    /// The getter used to clone `inner.params` into a fresh `PyParams`, which
+    /// made pycocotools' canonical idiom a silent no-op:
+    ///
+    /// ```python
+    /// E = COCOeval(gt, dt, "bbox")
+    /// E.params.imgIds = img_ids   # mutated a temporary, then dropped it
+    /// E.evaluate()                # evaluated the whole dataset anyway
+    /// ```
+    ///
+    /// That is the documented way to restrict evaluation to a subset — it is in
+    /// pycocotools' own demo — so a drop-in replacement has to honour it.
+    /// `sync_params` copies this object's state into `inner` before evaluation.
+    params: Py<PyParams>,
 }
 
 #[pymethods]
@@ -1232,14 +1248,37 @@ impl PyCOCOeval {
         } else {
             hotcoco_core::COCOeval::new(gt, dt, iou)
         };
-        Ok(PyCOCOeval { inner })
+        let params = Python::attach(|py| {
+            Py::new(
+                py,
+                PyParams {
+                    inner: inner.params.clone(),
+                },
+            )
+        })?;
+        Ok(PyCOCOeval { inner, params })
     }
 
     fn evaluate(&mut self, py: Python<'_>) {
+        // Pull the Python-visible object in first, so in-place mutation of
+        // `ev.params` configures the run the way pycocotools' does.
+        self.inner.params = self.params.borrow(py).inner.clone();
+
         py.detach(|| self.inner.evaluate());
+
+        // Push back afterwards. `evaluate()` resolves empty `img_ids`/`cat_ids` to
+        // the whole dataset and sorts them, and pycocotools likewise leaves the
+        // resolved lists on `params` — so a caller reading `ev.params.imgIds`
+        // after evaluating sees what was actually evaluated. Syncing in the other
+        // direction later would undo exactly this.
+        self.params
+            .borrow_mut(py)
+            .inner
+            .clone_from(&self.inner.params);
     }
 
     fn accumulate(&mut self, py: Python<'_>) {
+        let _ = py;
         if self.inner.eval_imgs().is_empty() {
             eprintln!(
                 "hotcoco: accumulate() called before evaluate(). \
@@ -1249,14 +1288,35 @@ impl PyCOCOeval {
         py.detach(|| self.inner.accumulate());
     }
 
-    fn summarize(&mut self) {
+    fn summarize(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.inner.accumulated().is_none() {
             eprintln!(
                 "hotcoco: summarize() called before accumulate(). \
                  Call evaluate() then accumulate() first."
             );
         }
+
+        // Re-raise the comparability warnings as real Python warnings.
+        //
+        // `COCOeval::summarize` writes them with `eprintln!`, which goes straight
+        // to file descriptor 2 and therefore bypasses `sys.stderr`: invisible in a
+        // Jupyter cell, invisible to `capsys`, and uncatchable by
+        // `warnings.catch_warnings`. Notebook users are the primary audience for
+        // this library and never saw them. Emitting here means the usual controls
+        // — filters, -W flags, pytest.warns — all work.
+        for w in self.inner.reference_deviations() {
+            let msg = std::ffi::CString::new(format!("hotcoco: {w}"))
+                .unwrap_or_else(|_| c"hotcoco: run is not reference-comparable".to_owned());
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &msg,
+                1,
+            )?;
+        }
+
         self.inner.summarize();
+        Ok(())
     }
 
     #[doc = "Return summary metric lines as a list of strings without printing.
@@ -1528,15 +1588,20 @@ Examples
     }
 
     #[getter]
-    fn params(&self) -> PyParams {
-        PyParams {
-            inner: self.inner.params.clone(),
-        }
+    fn params(&self, py: Python<'_>) -> Py<PyParams> {
+        self.params.clone_ref(py)
     }
 
     #[setter]
-    fn set_params(&mut self, params: &PyParams) {
+    fn set_params(&mut self, py: Python<'_>, params: &PyParams) -> PyResult<()> {
         self.inner.params = params.inner.clone();
+        self.params = Py::new(
+            py,
+            PyParams {
+                inner: params.inner.clone(),
+            },
+        )?;
+        Ok(())
     }
 
     #[getter]

@@ -5336,8 +5336,21 @@ fn test_eval_results_json_shape_is_stable() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["hotcoco_version", "metrics", "params", "per_class"],
+        [
+            "hotcoco_version",
+            "metrics",
+            "params",
+            "per_class",
+            "provenance"
+        ],
         "EvalResults gained or lost a top-level key"
+    );
+
+    // Provenance has to survive into the archived artifact, not just the live
+    // process: this is the file users keep, diff, and come back to.
+    assert_eq!(
+        parsed["provenance"], "parity_verified",
+        "default bbox params on the standard fixture are reference-comparable"
     );
 
     let mut param_keys: Vec<&str> = parsed["params"]
@@ -5773,4 +5786,79 @@ fn nan_detection_score_is_rejected() {
             .is_ok(),
         "finite scores must still load"
     );
+}
+
+/// The five FP error types partition every unmatched, non-ignored detection.
+///
+/// `classify_fp` is total — it returns one of Cls/Loc/Both/Dupe/Bkg for every
+/// false positive — so their counts must sum to exactly the number of FPs, and
+/// `counts` must hold no sixth key. That second half matters because `counts` is a
+/// `HashMap<String, u64>` keyed by a stringified enum: a typo'd or renamed key
+/// would silently create a new bucket rather than fail to compile, and every
+/// existing test asserts individual counts, which cannot see an extra one.
+#[test]
+fn tide_fp_types_partition_the_false_positives() {
+    const FP_TYPES: [&str; 5] = ["Cls", "Loc", "Both", "Dupe", "Bkg"];
+
+    let gt = COCO::new(&fixtures_dir().join("edge_gt.json")).unwrap();
+    let dt = gt.load_res(&fixtures_dir().join("edge_dt.json")).unwrap();
+    let mut ev = COCOeval::new(gt, dt, IouType::Bbox);
+    ev.evaluate();
+    let te = ev.tide_errors(0.5, 0.1).expect("tide_errors");
+
+    // No key outside the documented set. `Miss` is a false *negative* and is
+    // counted separately, so it is allowed but not part of the FP partition.
+    let mut allowed: Vec<&str> = FP_TYPES.to_vec();
+    allowed.push("Miss");
+    for key in te.counts.keys() {
+        assert!(
+            allowed.contains(&key.as_str()),
+            "unexpected error-type key {key:?} in counts; the enum and the map have drifted"
+        );
+    }
+
+    // Count the detections that are genuinely false positives at this threshold:
+    // not matched, not ignored. OID's group-of absorption and LVIS's
+    // not-exhaustive rule both work by setting `dt_ignore`, so this stays correct
+    // for those modes too.
+    let t_idx = ev
+        .params
+        .iou_thrs
+        .iter()
+        .position(|&t| (t - 0.5).abs() < 1e-9)
+        .expect("0.5 is in the default grid");
+    let target_area = ev.params.area_ranges[ev.params.all_area_idx()].range;
+
+    let mut expected_fps = 0u64;
+    for e in ev.eval_imgs().iter().flatten() {
+        if e.area_rng != target_area {
+            continue;
+        }
+        for d in 0..e.dt_ids.len() {
+            if !e.dt_matched[t_idx][d] && !e.dt_ignore[t_idx][d] {
+                expected_fps += 1;
+            }
+        }
+    }
+
+    let classified: u64 = FP_TYPES
+        .iter()
+        .map(|k| te.counts.get(*k).copied().unwrap_or(0))
+        .sum();
+
+    assert_eq!(
+        classified, expected_fps,
+        "FP types sum to {classified} but there are {expected_fps} unmatched, \
+         non-ignored detections; counts = {:?}",
+        te.counts
+    );
+
+    // `FN` and `Miss` are the same quantity computed once and reported twice; the
+    // day one of them is recomputed independently, this is what notices.
+    if let (Some(fnv), Some(miss)) = (te.delta_ap.get("FN"), te.delta_ap.get("Miss")) {
+        assert_eq!(
+            fnv, miss,
+            "delta_ap[FN] and delta_ap[Miss] must be the same value"
+        );
+    }
 }
