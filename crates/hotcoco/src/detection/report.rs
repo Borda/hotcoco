@@ -51,9 +51,16 @@ impl COCOeval {
             );
         }
         if self.eval_mode == EvalMode::OpenImages {
+            // `scripts/parity_oid.py` matches the TensorFlow reference on group-of
+            // handling, IoA containment and all-points AP. What remains unimplemented
+            // is the Challenge's non-exhaustive image-level-label rule — detections
+            // of an unverified class are ignored, and of a negatively-labelled class
+            // are false positives — which needs per-image label data COCO JSON
+            // cannot carry. So a real challenge submission would still differ.
             out.push(
-                "Open Images evaluation has no reference implementation checked against; \
-                 these numbers are a hotcoco extension, not leaderboard-comparable."
+                "Open Images evaluation matches the TensorFlow reference for group-of \
+                 handling and AP, but does not implement the challenge's non-exhaustive \
+                 image-level-label rule, so these numbers are not leaderboard-comparable."
                     .to_string(),
             );
         }
@@ -262,7 +269,7 @@ impl COCOeval {
     /// at area="all" and the last max_dets setting). Returns one value per `params.cat_ids`
     /// entry; -1.0 for categories with no valid precision data.
     pub(super) fn per_cat_ap(&self, eval: &AccumulatedEval) -> Vec<f64> {
-        per_cat_ap_static(eval, &self.params)
+        per_cat_ap_static(eval, &self.params, self.eval_mode)
     }
 
     /// Return summary metrics as a `HashMap<metric_name, value>`.

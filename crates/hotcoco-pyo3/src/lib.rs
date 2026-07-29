@@ -1455,9 +1455,11 @@ Returns a dict with:
 - ``provenance``: ``'parity_verified'`` only when this exact run is comparable to a
   reference implementation — bbox/segm/keypoints against pycocotools, or LVIS
   against lvis-api, **at reference parameters**. Everything else is
-  ``'extension'``: oriented boxes and Open Images (no reference exists for
-  either), and any run with non-default ``iou_thrs``, ``rec_thrs``, ``max_dets``,
-  area-range labels or bounds, ``use_cats=False``, or custom ``kpt_oks_sigmas``.
+  ``'extension'``: oriented boxes (no reference protocol exists), Open Images
+  (checked against the TensorFlow reference for group-of handling and AP, but
+  missing the challenge's image-level-label rule), and any run with non-default
+  ``iou_thrs``, ``rec_thrs``, ``max_dets``, area-range labels or bounds,
+  ``use_cats=False``, or custom ``kpt_oks_sigmas``.
   Check this before presenting numbers as comparable to a published leaderboard.
 - ``metrics``: summary metrics (AP, AP50, AP75, ...)
 - ``per_class``: ``{class_name: {metric: value}}``
@@ -2099,6 +2101,7 @@ fn eval_img_to_py(py: Python<'_>, e: &hotcoco_core::EvalImg) -> PyResult<Py<PyAn
     // dt_ignore: Vec<Vec<bool>> [T x D] → list of lists
     dict.set_item("dtIgnore", &e.dt_ignore)?;
     dict.set_item("gtIgnore", e.gt_ignore.clone())?;
+    dict.set_item("gtInDenominator", e.gt_in_denominator.clone())?;
     Ok(dict.into_any().unbind())
 }
 

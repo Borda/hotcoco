@@ -346,7 +346,7 @@ report["per_class"]["person"]["AP"]  # 0.521
 | Value | Meaning |
 |-------|---------|
 | `"parity_verified"` | Checked against the reference implementation. bbox, segm, and keypoints match pycocotools. |
-| `"extension"` | A real metric or configuration with nothing checked against it: oriented boxes and Open Images (no reference exists), or any run with non-default `iou_thrs`, `rec_thrs`, `max_dets`, area ranges, `use_cats`, or `kpt_oks_sigmas`. Fine for comparing your own models; not a leaderboard number. |
+| `"extension"` | A real metric or configuration that is not leaderboard-comparable: oriented boxes (no reference protocol exists), Open Images (checked against the TensorFlow reference for group-of handling and AP, but missing the challenge's image-level-label rule), or any run with non-default `iou_thrs`, `rec_thrs`, `max_dets`, area ranges, `use_cats`, or `kpt_oks_sigmas`. Fine for comparing your own models; not a leaderboard number. |
 
 ```python
 if report["provenance"] != "parity_verified":

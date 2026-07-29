@@ -411,12 +411,21 @@ ev.run()
 
 ### Group-of annotations
 
-OID uses `is_group_of: true` on annotations that represent a cluster of objects rather than a single instance. These are handled differently from `iscrowd`:
+OID uses `is_group_of: true` on annotations covering a *cluster* of objects — five or more instances of the same class, occluding each other, where no individual box can be drawn. A cluster is one thing you either found or didn't:
 
-- **Ignored for false negatives** — a group-of GT that goes undetected does not count as a miss.
-- **Matching detections are ignored** — any number of detections overlapping a group-of GT at IoU ≥ 0.5 are absorbed by it and score as neither true positives nor false positives. A cluster costs nothing and earns nothing. This matches the reference `OpenImagesChallengeEvaluator`.
+- **A group-of box is worth exactly one ground truth.** The best-scoring detection inside it is a true positive. Every other detection inside it is ignored — neither true positive nor false positive. Detecting the pile twice earns nothing extra.
+- **Missing it costs one false negative.** An undetected group-of box counts once against recall.
+- **"Inside" is IoA, not IoU** — intersection divided by the *detection's* area. A detection wholly inside the box qualifies however small it is, which is the point: individual objects are much smaller than the cluster that contains them.
 
-The two rules go together. Because a group-of GT carries no false-negative penalty, it never enters the recall denominator — so crediting its detections as true positives would grow the numerator against a denominator that cannot grow, and recall could exceed 1.0. Absorbing them keeps the metric coherent.
+This is the [Open Images Challenge protocol](https://storage.googleapis.com/openimages/web/evaluation.html), equivalently TensorFlow's `group_of_weight = 1.0`, and it is what FiftyOne implements. It is checked against the TensorFlow Object Detection API on every commit — see [verification](#verification) below.
+
+Open Images AP also uses **VOC 2010 all-points integration** — the exact area under the precision-recall curve — rather than COCO's 101-point recall grid. The protocol specifies it and both reference implementations do it, so an OID number here is not directly comparable to a COCO number computed on the same data.
+
+!!! note "Not the same as the Open Images V2 metric"
+
+    The older V2 detection metric ignored group-of boxes entirely — they contributed to neither the numerator nor the denominator (`group_of_weight = 0.0`). Both are real published protocols. hotcoco implements the Challenge metric, so **numbers here will not match a V2-era leaderboard**. hotcoco versions before 0.6.0 implemented V2 semantics.
+
+Mechanically this is COCO's `iscrowd` with the scoring changed: same intersection-over-area measure, same "many detections may fall inside one region", but where a crowd region is dropped from the denominator, a group-of box is counted once and can be found.
 
 Your annotations need `"is_group_of": true` in the JSON for this to take effect. Standard annotations without this field default to `false`.
 
@@ -429,6 +438,20 @@ Your annotations need `"is_group_of": true` in the JSON for this to take effect.
 | **AP** | 0.50 | all | 100 |
 
 `get_results()` returns `{"AP": <float>}`.
+
+### Verification
+
+Open Images evaluation is compared against the [TensorFlow Object Detection API](https://github.com/tensorflow/models/tree/master/research/object_detection) — the reference the official protocol page points to — over 70 cases covering group-of absorption, IoA containment at and around the 0.5 boundary, undetected group-of boxes, overlapping group-of boxes, and randomised multi-class scenes. Both mAP and per-class AP are compared, and **every case agrees to within one ulp** (worst difference 1.11e-16). It runs in CI on every commit.
+
+Two things that comparison does **not** cover, and why `provenance` still reports `"extension"`:
+
+- **Non-exhaustive image-level labels.** The challenge ignores detections of a class not verified on an image, and counts detections of a negatively-labelled class as false positives. hotcoco does not implement this — it needs per-image label data that COCO-format JSON cannot carry. A real challenge submission would score differently.
+- **Hierarchy expansion** is applied to annotations before evaluation rather than inside it, so it sits outside the compared surface.
+
+```bash
+just parity-oid          # run the comparison
+just gen-oid-fixtures    # regenerate fixtures from the reference (needs network)
+```
 
 See [Hierarchy](../api/hierarchy.md) in the API reference for full construction and query methods.
 
@@ -588,6 +611,27 @@ coco eval --gt instances_val2017.json --dt bbox_results.json --tide
 coco eval --gt instances_val2017.json --dt bbox_results.json \
     --tide --tide-pos-thr 0.75 --tide-bg-thr 0.2
 ```
+
+### Coming from tidecv
+
+If you have used [tidecv](https://github.com/dbolya/tide), the reference implementation, expect the five false-positive types to agree closely and `Miss` to read higher here. On COCO val2017 at `pos_thr=0.5`:
+
+| Error | hotcoco ΔAP | tidecv ΔAP | hotcoco count | tidecv count |
+|---|---|---|---|---|
+| Cls | 0.0002 | 0.0000 | 13 | 13 |
+| Loc | 0.1115 | 0.1135 | 3,121 | 3,738 |
+| Both | 0.0007 | 0.0001 | 726 | 766 |
+| Dupe | 0.0001 | 0.0000 | 27 | 37 |
+| Bkg | 0.0109 | 0.0105 | 6,039 | 6,414 |
+| Miss | 0.0242 | 0.0075 | 1,102 | 529 |
+
+The ranking — which error type is costing you the most AP — is the same, and that is what the metric is for.
+
+The `Miss` difference is not a `Miss` bug. In both implementations a ground-truth box counts as `Miss` only if no `Loc` or `Cls` false positive already *covers* it, so `Miss` is the residue left after those two types claim their ground truth. Any disagreement upstream lands there.
+
+The upstream disagreement is **crowd handling**, and it is deliberate. hotcoco builds TIDE on the same matching as its AP, which follows the COCO convention: a `iscrowd` region takes part in matching, and a detection that lands on one is ignored — neither true positive nor false positive. tidecv removes crowd regions from matching entirely and only ignores a detection afterward if it went unmatched *and* has the same class *and* clears IoA 0.5. tidecv therefore counts as false positives some detections that COCO-style evaluation ignores, which is why its false-positive counts run higher and its `Miss` runs lower.
+
+We keep the COCO convention on purpose. Adopting tidecv's would make `tide_errors()` disagree with `ev.stats` about which detections exist in the same evaluator — a worse property than differing from tidecv. TIDE is a diagnostic for ranking where to spend effort, not a leaderboard metric, so internal consistency wins.
 
 ## Confidence calibration
 

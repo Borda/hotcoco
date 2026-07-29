@@ -191,8 +191,10 @@ implementation — bbox, segm, and keypoints match pycocotools **at reference
 parameters**. `"extension"` means a real metric or configuration with no reference implementation checked against
 it. That covers more than geometry:
 
-- oriented bounding boxes, and Open Images — no reference implementation exists
-  for either
+- oriented bounding boxes — no reference protocol exists to check against
+- Open Images — group-of handling and AP *are* checked against the TensorFlow
+  Object Detection API, but the challenge's non-exhaustive image-level-label rule
+  is not implemented, so a real challenge submission would still differ
 - any run with non-default `iou_thrs`, `rec_thrs`, `max_dets`, area-range labels
   or bounds, `use_cats=False`, or custom `kpt_oks_sigmas` — the metric is real,
   but nobody checked *that* configuration against a reference

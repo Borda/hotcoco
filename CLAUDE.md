@@ -87,7 +87,10 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - Verified on val2017: keypoints exact, bbox within 0.0001, segm within 0.0002.
 - When in doubt, run differential tests against pycocotools on real COCO data before declaring a task complete.
 - After any change to evaluation logic, run `/parity` — it holds the full verification sequence and the expected tolerances.
-- **Not everything has a reference.** `scripts/parity.py` covers pycocotools (bbox/segm/keypoints), `parity_lvis.py` covers LVIS, `parity_tide.py` covers tidecv. Open Images and oriented boxes have **no reference implementation**, which is why `report()` marks them `Provenance::Extension` — that downgrade is correct, not a bug to fix.
+- **Not everything has a *checked* reference.** `scripts/parity.py` covers pycocotools (bbox/segm/keypoints), `parity_lvis.py` covers LVIS, `parity_tide.py` covers tidecv, `parity_mask.py` covers `pycocotools.mask`. Open Images and oriented boxes have **no parity script**, which is why `report()` marks them `Provenance::Extension`.
+
+  Say *no parity script*, not *no reference implementation* — the distinction matters. Open Images has two reference implementations (the TF Object Detection API, which the official protocol page points to, and FiftyOne). We simply do not compare against them, and a group-of defect went unnoticed for the life of the feature partly because the "no reference exists" framing made a comparison look impossible rather than merely unwritten. Oriented boxes genuinely have no reference protocol, but their IoU kernel is checked against Shapely.
+- **Open Images follows the Challenge protocol**, not V2: a group-of box counts as one ground truth, its best-scoring enclosed detection is a TP, surplus detections are ignored, and an undetected group-of box is a miss. "Inside" is IoA (intersection ÷ *detection* area), the same measure as COCO `iscrowd`. Equivalent to TF `group_of_weight = 1.0`. Both protocols are real — see `docs/guide/evaluation.md` — so name which one before changing anything here.
 
 ## Testing
 

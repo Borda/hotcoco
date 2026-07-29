@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Open Images group-of boxes now follow the Challenge protocol.** A group-of box
+  is worth exactly one ground truth: the best-scoring detection inside it is a true
+  positive, surplus detections inside it are ignored, and an undetected group-of box
+  is a single false negative. Previously they were ignored entirely, contributing to
+  neither the numerator nor the denominator.
+
+  Both behaviours are real published protocols — the old one is the Open Images
+  **V2** detection metric, the new one is the **Challenge** metric (2018/2019), i.e.
+  TensorFlow's `group_of_weight = 1.0` and what FiftyOne implements. **OID AP values
+  will change.** If you need V2 semantics, open an issue; the two differ by a single
+  parameter and an enum is easy to add.
+
+- **Open Images AP now uses VOC 2010 all-points integration.** The protocol says
+  detections are "evaluated as in the PASCAL VOC 2010 protocol", and both reference
+  implementations follow it — TensorFlow's `compute_average_precision` and
+  FiftyOne's `_compute_AP`, the latter alongside a separate 101-point path for its
+  COCO evaluation. hotcoco was reusing COCO's 101-point recall grid, which quantizes
+  the result by up to ~`1/101` per class. **OID AP values change**; COCO and LVIS are
+  untouched and keep the 101-point grid.
+
+- **Open Images is now parity-checked against the TensorFlow Object Detection API.**
+  `scripts/parity_oid.py` compares 70 cases — mAP *and* per-class AP — against
+  frozen output from `OpenImagesDetectionEvaluator(group_of_weight=1.0)`. Worst
+  difference **1.11e-16**, one ulp. Runs in CI; needs neither network nor
+  TensorFlow. Regenerate fixtures with `just gen-oid-fixtures`.
+
+  Open Images stays `Provenance::Extension`, but the warning now names the real gap:
+  the challenge's non-exhaustive image-level-label rule is not implemented (it needs
+  per-image label data COCO JSON cannot carry). It previously claimed no reference
+  implementation existed, which was untrue.
+
+### Fixed
+
+- **Open Images group-of matching used IoU instead of IoA.** The protocol says a
+  detection is inside a group-of box when intersection divided by the *detection's*
+  area exceeds 0.5. hotcoco forced the plain-IoU formula for every OID ground truth,
+  so a detection smaller than the group box — an individual object inside a cluster,
+  the normal case — was never absorbed and leaked out as a false positive. An 80×80
+  detection wholly inside a 200×200 group-of box scores IoA 1.00 but IoU 0.16, and
+  was counted as an error.
+
+  The tests that should have caught this used geometry below the threshold, so the
+  group-of code path never ran; they passed on interpolation instead. They now assert
+  the measure, and place the false positive before full recall where AP can see it.
+
+- **Group-of tie-breaking disagreed with the reference.** When a detection sat
+  inside two overlapping group-of boxes at equal IoA — which containment makes
+  common, since it saturates at 1.0 — hotcoco credited the later box and left the
+  earlier one permanently unmatched, converting a true positive into a miss. The
+  reference's `np.argmax` takes the first maximum. The rule now lives in
+  `primitives::greedy::best_above_floor` so a second caller cannot re-derive it.
+  Found by the new Open Images parity check.
+
+- **`AccumulatedEval` gained `ap_all_points`**, the exact area under the precision
+  envelope, shaped and indexed like `recall`. `precision` holds that same envelope
+  sampled at the 101 recall thresholds. `AccumulatedEval` is now `#[non_exhaustive]`
+  so later fields are additive — done while still pre-1.0, when it is free.
+
+- **`EvalImg` gained `gt_in_denominator`** (`gtInDenominator` in Python) and is now
+  `#[non_exhaustive]`. `gt_ignore` means "excluded from matching", which for group-of
+  boxes is no longer the same as "excluded from the recall denominator". Code
+  computing `num_gt` should read the new field.
+
 ### Added
 
 - **`EvalResults` carries `provenance`.** It reaches the CLI's `--json`, the PDF
