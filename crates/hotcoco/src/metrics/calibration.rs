@@ -130,6 +130,52 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
+    /// ECE must equal `netcal.metrics.ECE`, the field's reference implementation.
+    ///
+    /// Every quantitative test in this module is hand-derived, which checks the
+    /// arithmetic but not that hotcoco bins the way everyone else does. An ECE
+    /// computed over subtly different bin edges would satisfy all of them and
+    /// still not be comparable to a number in a paper.
+    ///
+    /// The fixture's scores are deliberately lopsided (beta-distributed, bimodal),
+    /// because a uniform draw fills every bin about equally and makes the
+    /// occupancy weighting unobservable.
+    ///
+    /// Regenerate with
+    /// `uv run --with scikit-learn --with netcal python scripts/gen_metrics_fixtures.py`.
+    #[test]
+    fn ece_matches_netcal() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            n_bins: usize,
+            style: String,
+            scores: Vec<f64>,
+            matched: Vec<bool>,
+            ece: f64,
+        }
+
+        let data = include_str!("testdata/calibration_netcal.json");
+        let cases: Vec<Case> = serde_json::from_str(data).expect("parse fixture");
+        assert!(cases.len() > 150, "fixture looks truncated");
+
+        let mut worst = 0.0f64;
+        for (i, c) in cases.iter().enumerate() {
+            let bins = calibration_curve(&c.scores, &c.matched, c.n_bins);
+            let (ece, _) = calibration_error(&bins);
+            let diff = (ece - c.ece).abs();
+            worst = worst.max(diff);
+            assert!(
+                diff < 1e-12,
+                "case {i} ({}, n_bins={}, n={}): ECE {ece} vs netcal {} (diff {diff:.3e})",
+                c.style,
+                c.n_bins,
+                c.scores.len(),
+                c.ece
+            );
+        }
+        println!("ECE worst deviation from netcal: {worst:.3e}");
+    }
+
     /// The binning contract, over scores that honour the documented `[0, 1]`
     /// precondition.
     ///

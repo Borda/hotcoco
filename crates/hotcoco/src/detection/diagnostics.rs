@@ -660,3 +660,69 @@ mod tests {
         assert_eq!(bbox_iou_plain(a, b), 0.0);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod image_ap_tests {
+    use super::compute_image_ap;
+
+    /// `ImageSummary.ap` had no assertion anywhere in the repo, despite surfacing
+    /// in `coco eval --diagnostics`, the browse viewer, and the dashboard.
+    ///
+    /// The values below are closed-form on the 101-point grid, not recordings.
+    /// With `n_gt` ground truths and detections in score order, recall after `k`
+    /// true positives is `k / n_gt`, and the interpolated precision at a recall
+    /// threshold is the best precision achieved at or beyond it. Averaging over
+    /// the 101 thresholds gives a number that can be written down in advance.
+    #[test]
+    fn image_ap_matches_closed_form() {
+        let rec_thrs = crate::params::default_rec_thrs();
+        let n_thr = rec_thrs.len() as f64; // 101
+
+        // Perfect: one GT, one matching detection. Precision is 1.0 at every
+        // reachable threshold, and recall reaches 1.0, so every threshold is
+        // reachable.
+        assert_eq!(compute_image_ap(&[(0.9, true)], 1), 1.0);
+
+        // All false positives against one GT: recall never leaves 0, so only the
+        // r=0 threshold is reachable and precision there is 0.
+        assert_eq!(compute_image_ap(&[(0.9, false), (0.8, false)], 1), 0.0);
+
+        // One TP out of two GT, listed first. Recall tops out at 0.5, so the
+        // reachable thresholds are r <= 0.5 — 51 of the 101 — each at precision
+        // 1.0. AP = 51/101.
+        let ap = compute_image_ap(&[(0.9, true), (0.8, false)], 2);
+        let reachable = rec_thrs.iter().filter(|&&t| t <= 0.5 + 1e-12).count() as f64;
+        assert!(
+            (ap - reachable / n_thr).abs() < 1e-12,
+            "expected {}/{n_thr} = {}, got {ap}",
+            reachable,
+            reachable / n_thr
+        );
+
+        // FP ranked *above* the TP. Recall still tops out at 0.5, but precision at
+        // that recall is 1/2 — VOC interpolation cannot rescue it, because there is
+        // no higher-precision point further right.
+        let ap_fp_first = compute_image_ap(&[(0.9, false), (0.8, true)], 2);
+        assert!(
+            (ap_fp_first - 0.5 * reachable / n_thr).abs() < 1e-12,
+            "expected half the previous AP, got {ap_fp_first}"
+        );
+
+        // Ranking matters, and in the direction one would expect.
+        assert!(
+            ap_fp_first < ap,
+            "a false positive ranked above the true positive must not score higher"
+        );
+    }
+
+    /// The `n_gt == 0` convention is deliberately the *opposite* of TIDE's, which
+    /// makes it exactly the kind of thing a copy-paste would silently invert.
+    #[test]
+    fn empty_image_is_perfect_only_when_nothing_was_predicted() {
+        assert_eq!(compute_image_ap(&[], 0), 1.0);
+        assert_eq!(compute_image_ap(&[(0.9, false)], 0), 0.0);
+        // No detections against real ground truth is a total miss, not a pass.
+        assert_eq!(compute_image_ap(&[], 3), 0.0);
+    }
+}

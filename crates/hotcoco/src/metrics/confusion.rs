@@ -140,6 +140,69 @@ mod tests {
     /// truths of that class, and each column to the predictions of that class. A
     /// flipped rematchable flag upstream, or a length drift between the two label
     /// arrays, shows up here and nowhere else.
+    /// The matched-pair block must equal `sklearn.metrics.confusion_matrix`.
+    ///
+    /// The in-crate tests are hand-derived, which verifies the author's arithmetic
+    /// rather than agreement with the field — a matrix that transposed rows and
+    /// columns, say, would reproduce a symmetric fixture perfectly.
+    ///
+    /// Scoped to records where both labels are present, which is sklearn's whole
+    /// domain: it has no way to express "this detection matched nothing". The
+    /// background row and column are the part sklearn cannot check, and are covered
+    /// by [`confusion_marginals_account_for_every_record`].
+    ///
+    /// Regenerate with
+    /// `uv run --with scikit-learn --with netcal python scripts/gen_metrics_fixtures.py`.
+    #[test]
+    fn matched_pairs_match_sklearn() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            num_classes: usize,
+            gt: Vec<usize>,
+            dt: Vec<usize>,
+            matrix: Vec<Vec<u64>>,
+        }
+
+        let data = include_str!("testdata/confusion_sklearn.json");
+        let cases: Vec<Case> = serde_json::from_str(data).expect("parse fixture");
+        assert!(cases.len() > 150, "fixture looks truncated");
+
+        for (i, c) in cases.iter().enumerate() {
+            let gt: Vec<Option<usize>> = c.gt.iter().map(|&v| Some(v)).collect();
+            let dt: Vec<Option<usize>> = c.dt.iter().map(|&v| Some(v)).collect();
+            let ours = confusion_matrix(&gt, &dt, c.num_classes);
+            let side = c.num_classes + 1;
+
+            for g in 0..c.num_classes {
+                for d in 0..c.num_classes {
+                    assert_eq!(
+                        ours[g * side + d],
+                        c.matrix[g][d],
+                        "case {i}: cell [{g}][{d}] is {} but sklearn says {}",
+                        ours[g * side + d],
+                        c.matrix[g][d]
+                    );
+                }
+            }
+
+            // Every record had both labels, so nothing may land in the background
+            // lane. This is what catches a case landing in the wrong lane entirely
+            // rather than the wrong cell.
+            for k in 0..side {
+                assert_eq!(
+                    ours[c.num_classes * side + k],
+                    0,
+                    "case {i}: background row"
+                );
+                assert_eq!(
+                    ours[k * side + c.num_classes],
+                    0,
+                    "case {i}: background col"
+                );
+            }
+        }
+    }
+
     #[test]
     fn confusion_marginals_account_for_every_record() {
         let mut rng = StdRng::seed_from_u64(0xC0F5);

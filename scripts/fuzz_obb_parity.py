@@ -149,53 +149,45 @@ def obb_strategy(draw, min_size=10.0, max_size=500.0):
 @given(obb_a=obb_strategy(), obb_b=obb_strategy())
 @settings(max_examples=200, deadline=30000, suppress_health_check=[HealthCheck.too_slow])
 def test_obb_eval_consistency_with_shapely(obb_a, obb_b):
-    """Verify hotcoco OBB eval behavior is consistent with Shapely IoU.
+    """Verify hotcoco's OBB *evaluation* agrees with Shapely about the threshold.
 
-    If Shapely says IoU >= 0.5, hotcoco should report AP@50 = 1.0.
-    If Shapely says IoU < 0.5, hotcoco should report AP@50 = 0.0.
-    We use a margin to avoid borderline cases.
+    This checks the eval pipeline, not the IoU kernel. The kernel is compared to
+    Shapely by value, at 1e-9, in `primitives::sim::tests::obb_iou_matches_shapely`
+    against a frozen fixture — which is where a systematic offset would show up.
+    This test exists to catch the pipeline *around* it: area ranges, matching,
+    accumulation.
+
+    The dead band used to be +/-0.02, wide enough that a systematic IoU error of
+    0.02 passed 200 examples. Measured kernel agreement with Shapely is 1.2e-14,
+    so the band only needs to absorb the boundary itself.
     """
     iou = shapely_obb_iou(obb_a, obb_b)
 
-    # Skip borderline cases where IoU is very close to a threshold
-    if abs(iou - 0.5) < 0.02:
-        return  # Too close to threshold, skip
+    # Only genuinely-on-the-boundary cases are ambiguous now.
+    if abs(iou - 0.5) < 1e-6:
+        return
 
     stats = hotcoco_eval_obb(obb_a, obb_b)
 
     # stats[1] is AP@IoU=0.50
     ap50 = stats[1]
 
-    if iou >= 0.52:
+    if iou > 0.5 + 1e-6:
         assert ap50 == 1.0, (
-            f"Shapely IoU = {iou:.6f} >= 0.52, but hotcoco AP@50 = {ap50:.4f}. OBBs: GT={obb_a}, DT={obb_b}"
+            f"Shapely IoU = {iou:.9f} > 0.5, but hotcoco AP@50 = {ap50:.4f}. OBBs: GT={obb_a}, DT={obb_b}"
         )
-    elif iou < 0.48:
+    elif iou < 0.5 - 1e-6:
         assert ap50 <= 0.0, (
-            f"Shapely IoU = {iou:.6f} < 0.48, but hotcoco AP@50 = {ap50:.4f}. OBBs: GT={obb_a}, DT={obb_b}"
+            f"Shapely IoU = {iou:.9f} < 0.5, but hotcoco AP@50 = {ap50:.4f}. OBBs: GT={obb_a}, DT={obb_b}"
         )
 
 
-@pytest.mark.parametrize(
-    "obb_a,obb_b,expected_iou",
-    [
-        # Identical boxes
-        ((0, 0, 100, 100, 0), (0, 0, 100, 100, 0), 1.0),
-        # Non-overlapping
-        ((0, 0, 100, 100, 0), (1000, 1000, 100, 100, 0), 0.0),
-        # 90° rotated square (should be 1.0)
-        ((0, 0, 100, 100, 0), (0, 0, 100, 100, math.pi / 2), 1.0),
-        # Half overlap axis-aligned
-        ((0, 0, 100, 100, 0), (50, 0, 100, 100, 0), 50 * 100 / (2 * 100 * 100 - 50 * 100)),
-        # 180° rotation (same box)
-        ((50, 50, 200, 100, 0.7), (50, 50, 200, 100, 0.7 + math.pi), 1.0),
-    ],
-    ids=["identical", "non_overlapping", "90deg_square", "half_overlap", "180deg_rotation"],
-)
-def test_obb_iou_known_values(obb_a, obb_b, expected_iou):
-    """Known geometric cases: Shapely must agree with expected values."""
-    shapely_iou = shapely_obb_iou(obb_a, obb_b)
-    assert abs(shapely_iou - expected_iou) < 1e-6, f"Shapely IoU {shapely_iou:.8f} != expected {expected_iou:.8f}"
+# `test_obb_iou_known_values` used to live here. It asserted Shapely against
+# hand-derived constants and never called hotcoco, so it verified the oracle
+# rather than the subject and contributed no coverage. The cases it covered
+# (identical, non-overlapping, quarter-turn square, half overlap, pi rotation)
+# are all represented in the frozen fixture that
+# `primitives::sim::tests::obb_iou_matches_shapely` checks by value.
 
 
 @pytest.mark.parametrize(

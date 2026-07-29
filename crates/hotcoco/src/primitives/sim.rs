@@ -499,6 +499,64 @@ mod tests {
         assert!((self_iou - 1.0).abs() < 1e-8);
     }
 
+    /// Rotated-box IoU against frozen Shapely/GEOS values.
+    ///
+    /// Oriented boxes have no reference *evaluator* — which is why `report()`
+    /// marks them `Provenance::Extension` — but the geometry underneath is a
+    /// solved problem, and Shapely is an independent implementation of it. So the
+    /// AP cannot be validated while the kernel it rests on can.
+    ///
+    /// Values, not threshold sides. `scripts/fuzz_obb_parity.py` previously
+    /// asserted only which side of 0.5 the resulting AP@50 landed on, skipping a
+    /// ±0.02 dead band — a systematic IoU error of 0.02 passed 200 examples — and
+    /// it computed corners with a Python reimplementation of `crate::geometry`,
+    /// so a shared corner-math bug was invisible to both sides. The oracle here
+    /// derives corners from the OBB definition independently, and is frozen so no
+    /// Python runs at test time.
+    ///
+    /// Regenerate with `uv run python scripts/gen_obb_fixtures.py`.
+    #[test]
+    fn obb_iou_matches_shapely() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            kind: String,
+            a: [f64; 5],
+            b: [f64; 5],
+            iou: f64,
+        }
+
+        let data = include_str!("testdata/obb_iou_shapely.json");
+        let cases: Vec<Case> = serde_json::from_str(data).expect("parse fixture");
+        assert!(cases.len() > 500, "fixture looks truncated");
+
+        let mut worst = 0.0f64;
+        let mut worst_case = String::new();
+        for (i, c) in cases.iter().enumerate() {
+            let got = obb_iou(&[c.a], &[c.b], &[false])[0][0];
+            let diff = (got - c.iou).abs();
+            if diff > worst {
+                worst = diff;
+                worst_case = format!(
+                    "case {i} ({}): a={:?} b={:?} shapely={} hotcoco={got}",
+                    c.kind, c.a, c.b, c.iou
+                );
+            }
+            assert!(
+                diff < 1e-9,
+                "case {i} ({}): IoU {got} vs Shapely {} (diff {diff:.3e})\n  a={:?}\n  b={:?}",
+                c.kind,
+                c.iou,
+                c.a,
+                c.b
+            );
+        }
+        // Surfaced on success too: a silent creep toward the tolerance is worth
+        // seeing before it becomes a failure.
+        if worst > 0.0 {
+            println!("obb_iou worst deviation from Shapely: {worst:.3e} — {worst_case}");
+        }
+    }
+
     /// `rows()` switches to rayon at `MIN_PARALLEL_WORK`; both branches must agree.
     ///
     /// Straddles the threshold rather than testing one side of it, because the
