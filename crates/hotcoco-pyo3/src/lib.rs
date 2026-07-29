@@ -1214,6 +1214,36 @@ struct PyCOCOeval {
     params: Py<PyParams>,
 }
 
+impl PyCOCOeval {
+    /// Run `f` against the evaluator with `ev.params` reconciled on both sides.
+    ///
+    /// `PyCOCOeval` keeps the Python-visible `Params` in a separate object so that
+    /// `ev.params.imgIds = [...]` — pycocotools' canonical idiom, and the one in
+    /// its own demo — configures the run instead of mutating a temporary. That
+    /// only works if *every* entry point syncs: patching `evaluate()` alone left
+    /// `run()` ignoring params entirely, and left a post-`evaluate()` mutation
+    /// invisible to `summarize()`, which then reported `parity_verified` for an
+    /// off-reference configuration. One owner for the sync, not one call site.
+    ///
+    /// Pull in, run, push back. The push-back matters: `evaluate()` resolves empty
+    /// `img_ids`/`cat_ids` to the whole dataset and sorts them, and pycocotools
+    /// likewise leaves the resolved lists on `params`, so a caller reading
+    /// `ev.params.imgIds` afterwards sees what actually ran.
+    fn with_params<R>(
+        &mut self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut hotcoco_core::COCOeval) -> R,
+    ) -> R {
+        self.inner.params.clone_from(&self.params.borrow(py).inner);
+        let out = f(&mut self.inner);
+        self.params
+            .borrow_mut(py)
+            .inner
+            .clone_from(&self.inner.params);
+        out
+    }
+}
+
 #[pymethods]
 impl PyCOCOeval {
     #[new]
@@ -1260,25 +1290,10 @@ impl PyCOCOeval {
     }
 
     fn evaluate(&mut self, py: Python<'_>) {
-        // Pull the Python-visible object in first, so in-place mutation of
-        // `ev.params` configures the run the way pycocotools' does.
-        self.inner.params = self.params.borrow(py).inner.clone();
-
-        py.detach(|| self.inner.evaluate());
-
-        // Push back afterwards. `evaluate()` resolves empty `img_ids`/`cat_ids` to
-        // the whole dataset and sorts them, and pycocotools likewise leaves the
-        // resolved lists on `params` — so a caller reading `ev.params.imgIds`
-        // after evaluating sees what was actually evaluated. Syncing in the other
-        // direction later would undo exactly this.
-        self.params
-            .borrow_mut(py)
-            .inner
-            .clone_from(&self.inner.params);
+        self.with_params(py, |ev| py.detach(|| ev.evaluate()));
     }
 
     fn accumulate(&mut self, py: Python<'_>) {
-        let _ = py;
         if self.inner.eval_imgs().is_empty() {
             eprintln!(
                 "hotcoco: accumulate() called before evaluate(). \
@@ -1304,7 +1319,11 @@ impl PyCOCOeval {
         // `warnings.catch_warnings`. Notebook users are the primary audience for
         // this library and never saw them. Emitting here means the usual controls
         // — filters, -W flags, pytest.warns — all work.
-        for w in self.inner.reference_deviations() {
+        // Syncing here, not only in `evaluate()`: mutating `ev.params` afterwards
+        // must still reach the comparability check, or `ev.params` and the
+        // provenance marker end up describing different runs.
+        let deviations = self.with_params(py, |ev| ev.reference_deviations());
+        for w in &deviations {
             let msg = std::ffi::CString::new(format!("hotcoco: {w}"))
                 .unwrap_or_else(|_| c"hotcoco: run is not reference-comparable".to_owned());
             PyErr::warn(
@@ -1315,7 +1334,13 @@ impl PyCOCOeval {
             )?;
         }
 
-        self.inner.summarize();
+        // `summarize_lines()` rather than `summarize()`: the latter also prints the
+        // same warnings with `eprintln!`, and emitting them on fd 2 *and* as Python
+        // warnings would be duplicate output — the fd-2 copy being invisible to
+        // notebook users is the whole reason for the block above.
+        self.with_params(py, |ev| {
+            let _ = ev.summarize_lines();
+        });
         Ok(())
     }
 
@@ -1343,7 +1368,7 @@ Use this instead of ``summarize()`` when you need to capture or restyle the outp
 Equivalent to calling the three methods in sequence. Primarily used with
 LVIS pipelines (Detectron2, MMDetection) that expect a single ``run()`` call."]
     fn run(&mut self, py: Python<'_>) {
-        py.detach(|| self.inner.run());
+        self.with_params(py, |ev| py.detach(|| ev.run()));
     }
 
     #[getter]
@@ -1733,18 +1758,15 @@ Example\n\
             .detach(|| self.inner.tide_errors(pos_thr, bg_thr))
             .map_err(to_pyerr)?;
 
-        // Sorted for the same reason as `get_results` above.
+        // `TideErrors` uses `BTreeMap`, so iteration is already key-ordered and
+        // the dict comes out byte-stable without sorting here.
         let delta_ap = PyDict::new(py);
-        let mut da: Vec<_> = te.delta_ap.iter().collect();
-        da.sort_by(|a, b| a.0.cmp(b.0));
-        for (k, v) in da {
+        for (k, v) in &te.delta_ap {
             delta_ap.set_item(k, v)?;
         }
 
         let counts = PyDict::new(py);
-        let mut ct: Vec<_> = te.counts.iter().collect();
-        ct.sort_by(|a, b| a.0.cmp(b.0));
-        for (k, v) in ct {
+        for (k, v) in &te.counts {
             counts.set_item(k, v)?;
         }
 
@@ -1810,9 +1832,7 @@ Example\n\
 
         // Map category IDs to names for per_category
         let per_cat = PyDict::new(py);
-        let mut pc: Vec<_> = cal.per_category.iter().collect();
-        pc.sort_by_key(|&(&cat_id, _)| cat_id);
-        for (&cat_id, &ece) in pc {
+        for (&cat_id, &ece) in &cal.per_category {
             let name = self
                 .inner
                 .coco_gt
@@ -1885,16 +1905,12 @@ Example\n\
 
         let to_dict = |sr: &hotcoco_core::SliceResult, py: Python<'_>| -> PyResult<Py<PyAny>> {
             let d = PyDict::new(py);
-            let mut ms: Vec<_> = sr.metrics.iter().collect();
-            ms.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in ms {
+            for (k, v) in &sr.metrics {
                 d.set_item(k, v)?;
             }
             d.set_item("num_images", sr.num_images)?;
             let delta_dict = PyDict::new(py);
-            let mut ds: Vec<_> = sr.delta.iter().collect();
-            ds.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in ds {
+            for (k, v) in &sr.delta {
                 delta_dict.set_item(k, v)?;
             }
             d.set_item("delta", delta_dict)?;

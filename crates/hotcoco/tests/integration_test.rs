@@ -8,6 +8,7 @@ use hotcoco::convert::{
     yolo_to_coco,
 };
 use hotcoco::params::IouType;
+use hotcoco::report::Provenance;
 use hotcoco::types::{Annotation, Category, Dataset, Image};
 use hotcoco::{COCO, COCOeval, Hierarchy, quality};
 
@@ -3929,10 +3930,9 @@ fn test_oid_group_of_multi_match() {
         .flat_map(|e| {
             e.dt_ids
                 .iter()
-                .enumerate()
-                .filter(|&(d, _)| e.dt_ignore[0][d])
-                .map(|(_, &id)| id)
-                .collect::<Vec<_>>()
+                .zip(&e.dt_ignore[0])
+                .filter(|&(_, &ignored)| ignored)
+                .map(|(&id, _)| id)
         })
         .collect();
     assert_eq!(
@@ -5477,21 +5477,14 @@ fn assert_eval_invariants(ev: &COCOeval, label: &str) {
         .unwrap_or_else(|| panic!("{label}: accumulate() must have been called"));
     let a_idx = ev.params.all_area_idx();
 
-    for t in 0..acc.shape.t {
-        for k in 0..acc.shape.k {
-            for a in 0..acc.shape.a {
-                for m in 0..acc.shape.m {
-                    let r = acc.recall[acc.shape.recall_idx(t, k, a, m)];
-                    // -1.0 is "not computed for this configuration" and is not a
-                    // low score. Compare against it exactly: a `>= 0.0` guard
-                    // would let a genuine sign bug hide behind the sentinel.
-                    assert!(
-                        r == -1.0 || (0.0..=1.0).contains(&r),
-                        "{label}: recall {r} outside [0,1] at (t={t}, k={k}, a={a}, m={m})"
-                    );
-                }
-            }
-        }
+    for (i, &r) in acc.recall.iter().enumerate() {
+        // -1.0 is "not computed for this configuration" and is not a low score.
+        // Compare against it exactly: a `>= 0.0` guard would let a genuine sign
+        // bug hide behind the sentinel.
+        assert!(
+            r == -1.0 || (0.0..=1.0).contains(&r),
+            "{label}: recall {r} outside [0,1] at flat index {i}"
+        );
     }
 
     for (i, &p) in acc.precision.iter().enumerate() {
@@ -5533,9 +5526,7 @@ fn eval_invariants_hold_across_fixtures() {
         let gt = COCO::new(&fixtures_dir().join(gt_name)).unwrap();
         let dt = gt.load_res(&fixtures_dir().join(dt_name)).unwrap();
         let mut ev = COCOeval::new(gt, dt, IouType::Bbox);
-        ev.evaluate();
-        ev.accumulate();
-        ev.summarize();
+        ev.run();
 
         assert_eval_invariants(&ev, gt_name);
 
@@ -5574,9 +5565,7 @@ fn eval_invariants_hold_for_open_images() {
     );
 
     let mut ev = COCOeval::new_oid(COCO::from_dataset(gt), COCO::from_dataset(dt), None);
-    ev.evaluate();
-    ev.accumulate();
-    ev.summarize();
+    ev.run();
 
     assert_eval_invariants(&ev, "open images group-of");
 }
@@ -5598,37 +5587,33 @@ fn bbox_eval_for_provenance() -> COCOeval {
 }
 
 /// Run to completion and report whether `report()` calls the result comparable.
-fn provenance_of(mut ev: COCOeval) -> String {
-    ev.evaluate();
-    ev.accumulate();
-    ev.summarize();
-    let report = ev.report().expect("report() succeeds");
-    serde_json::to_value(report.provenance)
-        .expect("provenance serializes")
-        .as_str()
-        .expect("provenance is a string")
-        .to_string()
+fn provenance_of(mut ev: COCOeval) -> Provenance {
+    ev.run();
+    ev.report().expect("report() succeeds").provenance
 }
 
 #[test]
 fn default_params_are_parity_verified() {
     // The control. Without this, every assertion below could pass because
     // `report()` downgrades unconditionally.
-    assert_eq!(provenance_of(bbox_eval_for_provenance()), "parity_verified");
+    assert_eq!(
+        provenance_of(bbox_eval_for_provenance()),
+        Provenance::ParityVerified
+    );
 }
 
 #[test]
 fn custom_iou_thrs_downgrade_to_extension() {
     let mut ev = bbox_eval_for_provenance();
     ev.params.iou_thrs = vec![0.5, 0.75];
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
 fn custom_max_dets_downgrade_to_extension() {
     let mut ev = bbox_eval_for_provenance();
     ev.params.max_dets = vec![1, 10, 50];
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
@@ -5637,7 +5622,7 @@ fn custom_area_range_labels_downgrade_to_extension() {
     for (i, ar) in ev.params.area_ranges.iter_mut().enumerate() {
         ar.label = format!("bucket{i}");
     }
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 /// The gap the audit found: the Python `areaRng` setter preserves labels, so a
@@ -5670,7 +5655,7 @@ fn custom_area_range_bounds_downgrade_even_with_default_labels() {
         "the point of this test is that labels are unchanged"
     );
 
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
@@ -5678,32 +5663,35 @@ fn custom_rec_thrs_downgrade_to_extension() {
     let mut ev = bbox_eval_for_provenance();
     // The 11-point VOC grid instead of COCO's 101 points.
     ev.params.rec_thrs = (0..=10).map(|i| f64::from(i) / 10.0).collect();
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
 fn class_agnostic_pooling_downgrades_to_extension() {
     let mut ev = bbox_eval_for_provenance();
     ev.params.use_cats = false;
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
 fn custom_kpt_oks_sigmas_downgrade_to_extension() {
-    let gt = COCO::new(&fixtures_dir().join("kpt_gt.json"))
-        .or_else(|_| COCO::new(&fixtures_dir().join("gt.json")))
-        .unwrap();
+    // The bbox fixture is fine here: the guard is `iou_type == Keypoints &&
+    // sigmas != default`, which does not consult the annotations.
+    let gt = COCO::new(&fixtures_dir().join("gt.json")).unwrap();
     let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
     let mut ev = COCOeval::new(gt, dt, IouType::Keypoints);
     ev.params.kpt_oks_sigmas = vec![0.05; ev.params.kpt_oks_sigmas.len()];
-    assert_eq!(provenance_of(ev), "extension");
+    assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
 fn open_images_downgrades_to_extension() {
     let gt = COCO::new(&fixtures_dir().join("gt.json")).unwrap();
     let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
-    assert_eq!(provenance_of(COCOeval::new_oid(gt, dt, None)), "extension");
+    assert_eq!(
+        provenance_of(COCOeval::new_oid(gt, dt, None)),
+        Provenance::Extension
+    );
 }
 
 /// Evaluation must be independent of the rayon thread count, bitwise.
@@ -5808,11 +5796,10 @@ fn tide_fp_types_partition_the_false_positives() {
 
     // No key outside the documented set. `Miss` is a false *negative* and is
     // counted separately, so it is allowed but not part of the FP partition.
-    let mut allowed: Vec<&str> = FP_TYPES.to_vec();
-    allowed.push("Miss");
+    const ALL_KEYS: [&str; 6] = ["Cls", "Loc", "Both", "Dupe", "Bkg", "Miss"];
     for key in te.counts.keys() {
         assert!(
-            allowed.contains(&key.as_str()),
+            ALL_KEYS.contains(&key.as_str()),
             "unexpected error-type key {key:?} in counts; the enum and the map have drifted"
         );
     }
@@ -5823,9 +5810,7 @@ fn tide_fp_types_partition_the_false_positives() {
     // for those modes too.
     let t_idx = ev
         .params
-        .iou_thrs
-        .iter()
-        .position(|&t| (t - 0.5).abs() < 1e-9)
+        .iou_thr_idx(0.5)
         .expect("0.5 is in the default grid");
     let target_area = ev.params.area_ranges[ev.params.all_area_idx()].range;
 

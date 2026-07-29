@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::COCOeval;
 use super::accumulate::accumulate_impl;
@@ -13,9 +13,9 @@ pub struct SliceResult {
     /// Number of images in this slice.
     pub num_images: usize,
     /// All summary metrics (AP, AP50, AR100, etc.) for this slice.
-    pub metrics: HashMap<String, f64>,
+    pub metrics: BTreeMap<String, f64>,
     /// Per-metric delta vs the overall baseline. Empty for the `_overall` entry.
-    pub delta: HashMap<String, f64>,
+    pub delta: BTreeMap<String, f64>,
 }
 
 /// Results across all slices plus the overall baseline.
@@ -61,7 +61,7 @@ impl COCOeval {
             &metrics,
         );
 
-        let overall_metrics: HashMap<String, f64> = metric_keys
+        let overall_metrics: BTreeMap<String, f64> = metric_keys
             .iter()
             .zip(overall_stats.iter())
             .map(|(&k, &v): (&&str, &f64)| (k.to_string(), v))
@@ -71,7 +71,7 @@ impl COCOeval {
             name: "_overall".to_string(),
             num_images: self.params.img_ids.len(),
             metrics: overall_metrics.clone(),
-            delta: HashMap::new(),
+            delta: BTreeMap::new(),
         };
 
         // Compute each slice
@@ -89,13 +89,13 @@ impl COCOeval {
                 &metrics,
             );
 
-            let metrics: HashMap<String, f64> = metric_keys
+            let metrics: BTreeMap<String, f64> = metric_keys
                 .iter()
                 .zip(stats.iter())
                 .map(|(&k, &v): (&&str, &f64)| (k.to_string(), v))
                 .collect();
 
-            let delta: HashMap<String, f64> = metric_keys
+            let delta: BTreeMap<String, f64> = metric_keys
                 .iter()
                 .map(|&k| {
                     let slice_val = metrics.get(k).copied().unwrap_or(-1.0);

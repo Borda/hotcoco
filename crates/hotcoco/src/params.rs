@@ -187,6 +187,27 @@ impl Params {
         self.area_range_idx("all").unwrap_or(0)
     }
 
+    /// Index of the IoU threshold nearest `thr`, or `None` if none is within 1e-9.
+    ///
+    /// The one owner of this lookup. It had three independent copies — calibration,
+    /// summarize, and a test — which is fine until they disagree, and they did:
+    /// two took the *first* threshold within tolerance and one took the *nearest*,
+    /// so a params list holding two thresholds that close would resolve
+    /// `iou_thr = 0.5` differently depending on which path asked.
+    ///
+    /// The tolerance is not a fudge. `thr` is a caller-supplied `f64` compared
+    /// against a grid built by [`linspace`] to match `numpy.linspace` bit-for-bit,
+    /// so exact equality would reject values that are 0.5 in every sense a caller
+    /// means. Nearest-wins makes the answer single-valued regardless.
+    pub fn iou_thr_idx(&self, thr: f64) -> Option<usize> {
+        self.iou_thrs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &t)| (t - thr).abs() < 1e-9)
+            .min_by(|&(_, &a), &(_, &b)| (a - thr).abs().total_cmp(&(b - thr).abs()))
+            .map(|(i, _)| i)
+    }
+
     /// Create default parameters for the given evaluation type.
     ///
     /// Keypoint evaluation uses 3 area ranges (all/medium/large) and a single

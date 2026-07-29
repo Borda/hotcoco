@@ -566,8 +566,11 @@ mod tests {
     fn bbox_iou_parallel_and_sequential_agree() {
         let mut rng = StdRng::seed_from_u64(0x9E37_79B9);
 
-        // (d, g) pairs on both sides of MIN_PARALLEL_WORK == 1024.
-        for &(d, g) in &[(4, 4), (32, 31), (32, 32), (33, 32), (64, 40)] {
+        // Straddle the threshold rather than hardcoding its current value: raising
+        // MIN_PARALLEL_WORK would otherwise leave every pair on the sequential
+        // side and silently stop covering the rayon branch.
+        let n = (MIN_PARALLEL_WORK as f64).sqrt().ceil() as usize;
+        for &(d, g) in &[(2, 2), (n - 1, n - 1), (n, n - 1), (n, n), (n + 1, n)] {
             let dt: Vec<[f64; 4]> = (0..d).map(|_| rand_box(&mut rng)).collect();
             let gt: Vec<[f64; 4]> = (0..g).map(|_| rand_box(&mut rng)).collect();
             let iscrowd: Vec<bool> = (0..g).map(|_| rng.random_bool(0.2)).collect();

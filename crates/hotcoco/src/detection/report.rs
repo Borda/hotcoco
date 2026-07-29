@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::params::{IouType, Params, default_iou_thrs, default_rec_thrs};
+use crate::params::{IouType, Params};
 use crate::report::{EvalReport, Provenance};
 
 use super::accumulate::AccumulatedEval;
@@ -73,7 +73,7 @@ impl COCOeval {
 
         let defaults = Params::new(self.params.iou_type);
 
-        if self.params.iou_thrs != default_iou_thrs() {
+        if self.params.iou_thrs != defaults.iou_thrs {
             out.push(
                 "iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines may show -1.000."
                     .to_string(),
@@ -132,11 +132,11 @@ impl COCOeval {
         // The 101-point recall grid defines what AP *means*: it is the x-axis the
         // precision curve is averaged over. A different grid is a different metric
         // wearing the same name.
-        if self.params.rec_thrs != default_rec_thrs() {
+        if self.params.rec_thrs != defaults.rec_thrs {
             out.push(format!(
                 "rec_thrs differ from the default {}-point grid. AP is averaged over a \
                  different recall axis than the reference.",
-                default_rec_thrs().len()
+                defaults.rec_thrs.len()
             ));
         }
 
@@ -480,7 +480,8 @@ impl COCOeval {
     ///
     /// - oriented boxes, which are a real metric with no reference to be standard against
     /// - Open Images, whose protocol hotcoco implements but has no checked reference for
-    /// - any run with custom `iou_thrs`, `max_dets`, or area-range labels
+    /// - any run with custom `iou_thrs`, `rec_thrs`, `max_dets`, area-range labels or
+    ///   bounds, `use_cats = false`, or `kpt_oks_sigmas`
     ///
     /// That last case is the one worth stating plainly: parity is a property of a
     /// *configuration*, not of an `iou_type`. Deriving it from the type alone

@@ -52,35 +52,24 @@ def _written(gt_dataset, dt_results):
 
 def run_both(gt_dataset, dt_results, iou_type):
     """Run evaluation through both pycocotools and hotcoco, return stats."""
-    gt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    dt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    try:
-        json.dump(gt_dataset, gt_file)
-        gt_file.close()
-        json.dump(dt_results, dt_file)
-        dt_file.close()
+    with _written(gt_dataset, dt_results) as (gt_path, dt_path):
+        py_gt = PyCOCO(gt_path)
+        py_dt = py_gt.loadRes(dt_path)
+        py_ev = PyCOCOeval(py_gt, py_dt, iou_type)
+        py_ev.evaluate()
+        py_ev.accumulate()
+        py_ev.summarize()
+        py_stats = py_ev.stats.tolist()
 
-        with suppress_stdout():
-            py_gt = PyCOCO(gt_file.name)
-            py_dt = py_gt.loadRes(dt_file.name)
-            py_ev = PyCOCOeval(py_gt, py_dt, iou_type)
-            py_ev.evaluate()
-            py_ev.accumulate()
-            py_ev.summarize()
-            py_stats = py_ev.stats.tolist()
+        rs_gt = RsCOCO(gt_path)
+        rs_dt = rs_gt.load_res(dt_path)
+        rs_ev = RsCOCOeval(rs_gt, rs_dt, iou_type)
+        rs_ev.evaluate()
+        rs_ev.accumulate()
+        rs_ev.summarize()
+        rs_stats = rs_ev.stats
 
-            rs_gt = RsCOCO(gt_file.name)
-            rs_dt = rs_gt.load_res(dt_file.name)
-            rs_ev = RsCOCOeval(rs_gt, rs_dt, iou_type)
-            rs_ev.evaluate()
-            rs_ev.accumulate()
-            rs_ev.summarize()
-            rs_stats = rs_ev.stats
-
-        return py_stats, rs_stats
-    finally:
-        os.unlink(gt_file.name)
-        os.unlink(dt_file.name)
+    return py_stats, rs_stats
 
 
 def _metric_names_for(iou_type):

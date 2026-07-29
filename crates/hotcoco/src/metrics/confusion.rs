@@ -130,16 +130,6 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    /// The marginals — every other test here asserts individual cells, and a cell
-    /// test cannot see a record that was dropped, double-counted, or landed in the
-    /// wrong lane.
-    ///
-    /// Two facts follow from the construction: every in-range record increments
-    /// exactly one cell, and which cell is fixed by the `(gt, dt)` pair. So the
-    /// grand total is the number of in-range records, each row sums to the ground
-    /// truths of that class, and each column to the predictions of that class. A
-    /// flipped rematchable flag upstream, or a length drift between the two label
-    /// arrays, shows up here and nowhere else.
     /// The matched-pair block must equal `sklearn.metrics.confusion_matrix`.
     ///
     /// The in-crate tests are hand-derived, which verifies the author's arithmetic
@@ -203,6 +193,16 @@ mod tests {
         }
     }
 
+    /// The marginals — every other test here asserts individual cells, and a cell
+    /// test cannot see a record that was dropped, double-counted, or landed in the
+    /// wrong lane.
+    ///
+    /// Two facts follow from the construction: every in-range record increments
+    /// exactly one cell, and which cell is fixed by the `(gt, dt)` pair. So the
+    /// grand total is the number of in-range records, each row sums to the ground
+    /// truths of that class, and each column to the predictions of that class. A
+    /// flipped rematchable flag upstream, or a length drift between the two label
+    /// arrays, shows up here and nowhere else.
     #[test]
     fn confusion_marginals_account_for_every_record() {
         let mut rng = StdRng::seed_from_u64(0xC0F5);

@@ -164,20 +164,16 @@ pub fn compare(
     // evaluators may carry different category lists — different GT files, or the
     // same file filtered differently — and a positional read would pair A's
     // category with whatever B happened to evaluate in that slot, under A's name.
-    let per_cat_a: HashMap<u64, f64> = eval_a
-        .params
-        .cat_ids
-        .iter()
-        .copied()
-        .zip(per_cat_ap_static(&acc_a, &eval_a.params))
-        .collect();
-    let per_cat_b: HashMap<u64, f64> = eval_b
-        .params
-        .cat_ids
-        .iter()
-        .copied()
-        .zip(per_cat_ap_static(&acc_b, &eval_b.params))
-        .collect();
+    let by_cat = |ev: &COCOeval, acc: &_| -> HashMap<u64, f64> {
+        ev.params
+            .cat_ids
+            .iter()
+            .copied()
+            .zip(per_cat_ap_static(acc, &ev.params))
+            .collect()
+    };
+    let per_cat_a = by_cat(eval_a, &acc_a);
+    let per_cat_b = by_cat(eval_b, &acc_b);
 
     // Union, so a category only one side evaluated is reported rather than dropped.
     let mut all_cat_ids: Vec<u64> = eval_a

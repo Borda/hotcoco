@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -223,7 +223,7 @@ impl COCOeval {
         }
 
         let mut cat_data: HashMap<u64, CatData> = HashMap::new();
-        let mut counts: HashMap<String, u64> = [
+        let mut counts: BTreeMap<String, u64> = [
             ("Cls", 0u64),
             ("Loc", 0u64),
             ("Both", 0u64),
@@ -499,7 +499,7 @@ impl COCOeval {
         let ap_base = mean_ap(&baseline_aps);
         let miss_mean = mean_ap(&d_miss);
 
-        let mut delta_ap: HashMap<String, f64> = HashMap::new();
+        let mut delta_ap: BTreeMap<String, f64> = BTreeMap::new();
         delta_ap.insert("Cls".to_string(), mean_ap(&d_cls));
         delta_ap.insert("Loc".to_string(), mean_ap(&d_loc));
         delta_ap.insert("Both".to_string(), mean_ap(&d_both));
@@ -617,10 +617,10 @@ mod tests {
 pub struct TideErrors {
     /// ΔAP for each error type (fixing all errors of that type).
     /// Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`, `"FP"`, `"FN"`.
-    pub delta_ap: HashMap<String, f64>,
+    pub delta_ap: BTreeMap<String, f64>,
     /// Count of each error type across all categories and images.
     /// Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`.
-    pub counts: HashMap<String, u64>,
+    pub counts: BTreeMap<String, u64>,
     /// Baseline AP at `pos_thr` (mean over categories with GT).
     pub ap_base: f64,
     /// IoU threshold for TP/FP classification.

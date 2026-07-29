@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
@@ -26,7 +26,7 @@ pub struct CalibrationResult {
     /// Per-bin breakdown.
     pub bins: Vec<CalibrationBin>,
     /// Per-category ECE, keyed by category ID.
-    pub per_category: HashMap<u64, f64>,
+    pub per_category: BTreeMap<u64, f64>,
     /// IoU threshold used to define "correct" (TP).
     pub iou_threshold: f64,
     /// Number of bins.
@@ -76,17 +76,12 @@ impl COCOeval {
         }
 
         // Find the IoU threshold index
-        let t_idx = self
-            .params
-            .iou_thrs
-            .iter()
-            .position(|&t| (t - iou_threshold).abs() < 1e-9)
-            .ok_or_else(|| {
-                format!(
-                    "iou_threshold={iou_threshold} not found in params.iou_thrs={:?}",
-                    self.params.iou_thrs
-                )
-            })?;
+        let t_idx = self.params.iou_thr_idx(iou_threshold).ok_or_else(|| {
+            format!(
+                "iou_threshold={iou_threshold} not found in params.iou_thrs={:?}",
+                self.params.iou_thrs
+            )
+        })?;
 
         // Use the "all" area range, matching standard COCO evaluation semantics.
         // Fallback to first area range if "all" label is absent (consistent with tide.rs).
@@ -137,8 +132,14 @@ impl COCOeval {
         // exporting logits lands here; failing loudly beats a plausible-looking
         // number nobody can interpret. Checking `all` covers the per-category
         // vectors too, since every detection is pushed to both.
-        if let Some(&bad) = all.0.iter().find(|&&s| !(0.0..=1.0).contains(&s)) {
-            let n_bad = all.0.iter().filter(|&&s| !(0.0..=1.0).contains(&s)).count();
+        let out_of_range: Vec<f64> = all
+            .0
+            .iter()
+            .copied()
+            .filter(|s| !(0.0..=1.0).contains(s))
+            .collect();
+        if let Some(&bad) = out_of_range.first() {
+            let n_bad = out_of_range.len();
             return Err(format!(
                 "calibration() requires detection scores in [0, 1], found {bad} \
                  ({n_bad} of {} detections out of range). Raw logits or unnormalized \
@@ -152,7 +153,7 @@ impl COCOeval {
         let bins = calibration_curve(&all.0, &all.1, n_bins);
         let (ece, mce) = calibration_error(&bins);
 
-        let per_category: HashMap<u64, f64> = per_cat
+        let per_category: BTreeMap<u64, f64> = per_cat
             .iter()
             .map(|(&cat_id, (scores, matched))| {
                 let cat_bins = calibration_curve(scores, matched, n_bins);

@@ -263,9 +263,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`ev.params.imgIds = [...]` was a silent no-op.** The `params` getter cloned
   into a fresh object on every access, so pycocotools' canonical configuration
   idiom - the one in its own demo - mutated a temporary and evaluation proceeded
-  over the whole dataset anyway. `params` is now a persistent object, pulled into
-  the evaluator at `evaluate()` and pushed back afterwards so a caller reading
-  `ev.params.imgIds` sees the resolved list, as pycocotools leaves it.
+  over the whole dataset anyway. `params` is now a persistent object, reconciled
+  with the evaluator by a single `with_params` helper that `evaluate()`, `run()`
+  and `summarize()` all route through: pulled in before, pushed back after, so a
+  caller reading `ev.params.imgIds` sees the resolved list as pycocotools leaves
+  it.
+
+  One helper rather than one call site, because the first attempt patched
+  `evaluate()` alone and left two holes: `run()` - the path the docstring points
+  LVIS/Detectron2/MMDetection users at - still ignored `params` entirely, and a
+  mutation *after* `evaluate()` stayed invisible to `summarize()`, which then
+  reported `parity_verified` for an off-reference configuration. That is the
+  silent downgrade `reference_deviations()` exists to prevent, arriving from the
+  other direction.
 
 - **Comparability warnings are now real Python warnings.** `summarize()` writes
   them with `eprintln!`, which goes to file descriptor 2 and bypasses
