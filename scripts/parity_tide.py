@@ -8,8 +8,31 @@ Requires: uv pip install tidecv
 
 Tolerances (ΔAP in [0,1] scale):
   Cls, Loc, Both, Dupe, Bkg: ±0.005
-  Miss: best-effort (known ~3x discrepancy due to COCO per-category eval vs
-        tidecv global top-100 per image; directional correctness verified)
+  Miss: ±0.10 — a documented deviation, not a parity target. See below.
+
+Why Miss is not held to +/-0.005
+--------------------------------
+A previous version blamed "COCO per-category eval vs tidecv global top-100 per
+image". That explanation is FALSE and was never measured: the largest image in
+bbox_val2017_results.json holds 76 detections, so neither cap drops any of the
+43,715. Recorded here because this is where someone comes to relax the tolerance.
+
+The real cause is crowd handling, and it is deliberate. hotcoco follows COCO -- an
+iscrowd region takes part in matching and a detection landing on one is ignored.
+tidecv removes crowd regions from the GT and ignores a detection afterwards only if
+it is unmatched AND same-class AND clears IoA 0.5, so it books as false positives
+some detections COCO-style evaluation ignores.
+
+Measured on val2017: 4,305 detections sit over a same-class crowd region; tidecv
+reports 1,042 more FPs across the five types, 617 more Loc, and 573 fewer Miss.
+Miss is the residue after Loc/Cls claim their GT, so it inherits all of it.
+
+Note what this tolerance does NOT cover: the FP counts differ by ~10% on Loc and
+Bkg while both pass at +/-0.005, because a low-ranked error barely moves the AP
+integral. ΔAP parity is not count parity.
+
+Full write-up, including why matching tidecv would be worse: the "Coming from
+tidecv" section of docs/guide/evaluation.md.
 
 tidecv API notes (v1.0.1):
   tide.run_thresholds[key] is a list of TIDERun objects (one per threshold).
@@ -78,13 +101,11 @@ try:
     tc_counts = {name: len(r50.error_dict.get(err_type, [])) for err_type, name in err_map}
 
     print("\n=== Comparison (hotcoco vs tidecv) ===")
-    # Known architectual difference: hotcoco uses COCO per-category eval (up to
-    # 100 DTs/category × 80 categories), while tidecv uses global top-100 DTs
-    # per image. This causes a systematic ~3x difference in Miss ΔAP. All other
-    # error types are within the ±0.005 tolerance.
-    miss_known_gap = True
+    # Miss is a documented deviation from crowd handling, not a parity target --
+    # see the module docstring for the measurement that killed the previous
+    # (false) explanation. The five FP types are held to real parity.
     tol = 0.005
-    tol_miss = 0.10  # relaxed for Miss due to known architectural difference
+    tol_miss = 0.10  # bounded, not pinned: crowd-handling deviation (see docstring)
     all_ok = True
 
     for name in ["Cls", "Loc", "Both", "Dupe", "Bkg", "Miss"]:
@@ -97,7 +118,7 @@ try:
         status = "OK" if diff <= cur_tol else "FAIL"
         if status == "FAIL":
             all_ok = False
-        note = " (known gap)" if name == "Miss" and miss_known_gap else ""
+        note = " (crowd-handling deviation)" if name == "Miss" else ""
         print(
             f"  {name:4s}: hc={hc_v:.4f} (n={hc_cnt:5d})  "
             f"tc={tc_v:.4f} (n={tc_cnt:5d})  diff={diff:.4f}  {status}{note}"
