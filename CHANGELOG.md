@@ -347,6 +347,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and numpy arrays of either, matching what the crate already does when
   deserializing annotations. Non-numeric entries still raise, naming the type.
 
+- **The adversarial corpus is tracked and actually runs.** 18 hand-curated edge
+  cases (all-crowd, area boundaries, 1x1 images, boxes outside the frame) were
+  gitignored, so they verified nothing on any machine but the author's, and
+  nothing iterated them. `scripts/test_adversarial.py` runs them under pytest and
+  in CI, comparing per-(image, category) matching *decisions* against
+  pycocotools annotation by annotation — a check metrics cannot replace, since
+  two detections swapped between images can leave AP identical to fifteen decimal
+  places. Level 2 also runs unconditionally now; it used to be gated on level 1
+  having already failed, which made it unreachable in exactly the case it is good
+  at.
+
+- **A pinned val2017 baseline** (`scripts/fixtures/val2017_expected.json`),
+  produced by pycocotools rather than by hotcoco. `parity.py` checks it alongside
+  the live comparison, which catches what the live run structurally cannot:
+  hotcoco and the reference drifting *together*, as a pycocotools upgrade that
+  silently changed a metric would.
+
+- **The fuzzer checks invariants, not only parity.** It was purely differential,
+  so its ~10,000 generated datasets only ever exercised surfaces pycocotools also
+  computes — leaving Open Images, oriented boxes, LVIS frequency groups, TIDE,
+  calibration, and the confusion matrix with no fuzz coverage at all, which are
+  precisely the surfaces marked `Provenance::Extension` because no reference
+  exists.
+
 - **New: `scripts/parity_mask.py`,** a differential test of every `hotcoco.mask`
   operation against `pycocotools.mask` — encode, decode, round-trip, area, toBbox,
   iou across crowd modes, merge, the string codec, and `frPyObjects` for both

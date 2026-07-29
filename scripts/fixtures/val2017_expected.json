@@ -1,0 +1,49 @@
+{
+  "_comment": "Expected COCO val2017 metrics, produced by PYCOCOTOOLS (not hotcoco) on the published ppwwyyxx/cocoapi fake-result files. A second, standing check alongside the live comparison in parity.py: the live run catches hotcoco drifting from the reference, this catches BOTH of them drifting together - a pycocotools upgrade that silently changes a metric would otherwise keep the live comparison green. Regenerate with scripts/gen_val2017_baseline.py.",
+  "reference": {
+    "pycocotools": "2.0.11",
+    "numpy": "2.4.3"
+  },
+  "metrics": {
+    "bbox": [
+      0.5779306500224052,
+      0.8605271953954372,
+      0.6000374527522228,
+      0.3272376317093886,
+      0.7068450743245817,
+      0.9175166146364394,
+      0.4270892555147667,
+      0.6869053539941242,
+      0.7012776533369695,
+      0.4371261161345577,
+      0.8063777787238388,
+      0.9595672014416428
+    ],
+    "segm": [
+      0.6576311660804643,
+      0.9231546105140015,
+      0.7014113395760591,
+      0.460562903700045,
+      0.7718211257311751,
+      0.9343191868706853,
+      0.4545744750042779,
+      0.7455610140716076,
+      0.7616777245112979,
+      0.5457078305125128,
+      0.85891624659505,
+      0.9810316967300378
+    ],
+    "keypoints": [
+      0.41255450707760605,
+      0.6063120638112021,
+      0.4291642776145079,
+      0.4033719693951877,
+      0.88304294160725,
+      0.7664200251889168,
+      0.9748110831234257,
+      0.806360201511335,
+      0.6219065829008468,
+      0.9633593459680416
+    ]
+  }
+}

@@ -287,10 +287,58 @@ def run_both(gt_dataset, dt_results, iou_type):
             rs_ev.summarize()
             rs_stats = rs_ev.stats
 
-        return py_stats, rs_stats
+        return py_stats, rs_stats, rs_ev
     finally:
         os.unlink(gt_file.name)
         os.unlink(dt_file.name)
+
+
+def assert_hotcoco_invariants(rs_ev, iou_type):
+    """Properties that must hold regardless of what pycocotools says.
+
+    The fuzzer is otherwise purely differential, which means its ~10,000 generated
+    datasets only ever check the surfaces pycocotools also computes. Everything
+    hotcoco adds — Open Images, oriented boxes, LVIS frequency groups, TIDE,
+    calibration, the confusion matrix — gets no fuzz coverage at all, and those are
+    exactly the surfaces `report()` marks `Provenance::Extension` *because* no
+    reference exists. Invariants are the only check available there.
+
+    Cheap to run on every case, and they generalise: the same assertions hold for
+    a family that has no reference at all.
+    """
+    stats = rs_ev.stats
+    names = _metric_names_for(iou_type)
+    assert len(stats) == len(names), f"{len(stats)} metrics for {len(names)} names"
+
+    for name, v in zip(names, stats):
+        # -1.0 is "not computed for this configuration" and is not a low score.
+        # Compare against it exactly: a `>= 0.0` guard lets a genuine sign bug
+        # hide behind the sentinel.
+        assert v == -1.0 or 0.0 <= v <= 1.0, f"{name} = {v} is neither the -1.0 sentinel nor in [0, 1]"
+
+    by_name = dict(zip(names, stats))
+
+    # Larger maxDets keeps a superset of each image's detections while num_gt is
+    # unchanged, so recall cannot fall.
+    ar_ladder = [k for k in ("AR1", "AR10", "AR100") if k in by_name]
+    live = [(k, by_name[k]) for k in ar_ladder if by_name[k] != -1.0]
+    for (lo_name, lo), (hi_name, hi) in zip(live, live[1:]):
+        assert hi >= lo - 1e-12, f"{hi_name}={hi} below {lo_name}={lo}: raising maxDets lost recall"
+
+    # AP50 is one slice of the IoU sweep; AP averages over all ten, so the max
+    # cannot be below the mean.
+    if by_name.get("AP", -1.0) != -1.0 and by_name.get("AP50", -1.0) != -1.0:
+        assert by_name["AP50"] >= by_name["AP"] - 1e-12, f"AP50={by_name['AP50']} below AP={by_name['AP']}"
+
+    # Recall never exceeds 1.0. Not hypothetical: Open Images returned 4.0, by
+    # crediting group-of detections against a denominator that excluded them.
+    acc = rs_ev.eval
+    if acc is not None:
+        recall = acc.get("recall") if isinstance(acc, dict) else None
+        if recall is not None:
+            flat = recall.ravel().tolist() if hasattr(recall, "ravel") else list(recall)
+            for v in flat:
+                assert v == -1.0 or 0.0 <= v <= 1.0, f"recall {v} outside [0, 1]"
 
 
 def _metric_names_for(iou_type):
@@ -362,7 +410,8 @@ HYPOTHESIS_SETTINGS = dict(
 @settings(**HYPOTHESIS_SETTINGS)
 def test_bbox_parity(data):
     gt_dataset, dt_results = data.draw(coco_eval_data("bbox"))
-    py_stats, rs_stats = run_both(gt_dataset, dt_results, "bbox")
+    py_stats, rs_stats, rs_ev = run_both(gt_dataset, dt_results, "bbox")
+    assert_hotcoco_invariants(rs_ev, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox", gt_dataset, dt_results)
 
 
@@ -370,7 +419,8 @@ def test_bbox_parity(data):
 @settings(**HYPOTHESIS_SETTINGS)
 def test_segm_parity(data):
     gt_dataset, dt_results = data.draw(coco_eval_data("segm"))
-    py_stats, rs_stats = run_both(gt_dataset, dt_results, "segm")
+    py_stats, rs_stats, rs_ev = run_both(gt_dataset, dt_results, "segm")
+    assert_hotcoco_invariants(rs_ev, "segm")
     assert_metrics_match(py_stats, rs_stats, "segm", gt_dataset, dt_results)
 
 
@@ -378,7 +428,8 @@ def test_segm_parity(data):
 @settings(**HYPOTHESIS_SETTINGS)
 def test_kpt_parity(data):
     gt_dataset, dt_results = data.draw(coco_eval_data("keypoints"))
-    py_stats, rs_stats = run_both(gt_dataset, dt_results, "keypoints")
+    py_stats, rs_stats, rs_ev = run_both(gt_dataset, dt_results, "keypoints")
+    assert_hotcoco_invariants(rs_ev, "keypoints")
     assert_metrics_match(py_stats, rs_stats, "keypoints", gt_dataset, dt_results)
 
 

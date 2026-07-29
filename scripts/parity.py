@@ -18,7 +18,9 @@ Usage:
     just parity
 """
 
+import json
 import sys
+from pathlib import Path
 
 from helpers import DATA_DIR, suppress_stdout
 from hotcoco import COCO, COCOeval
@@ -72,6 +74,20 @@ def run_hotcoco(gt_file, dt_file, iou_type):
     return ev.stats, ev.metric_keys()
 
 
+# A pinned baseline alongside the live comparison.
+#
+# The live run catches hotcoco drifting away from pycocotools. It cannot catch
+# both of them drifting *together*: a pycocotools upgrade that changed a metric
+# would move the reference and the comparison would stay green. The baseline was
+# produced by pycocotools itself (see scripts/gen_val2017_baseline.py), so a
+# mismatch means the reference moved and someone has to decide whether that is
+# intended.
+BASELINE_PATH = Path(__file__).parent / "fixtures" / "val2017_expected.json"
+BASELINE = {}
+if BASELINE_PATH.exists():
+    with open(BASELINE_PATH) as _f:
+        BASELINE = json.load(_f)
+
 all_pass = True
 
 for bench in BENCHMARKS:
@@ -95,6 +111,28 @@ for bench in BENCHMARKS:
             all_pass = False
         status = "PASS" if ok else "FAIL"
         print(f"  {name:<8} {py[i]:>14.8f} {rs[i]:>14.8f} {diff:>12.2e}  {status}")
+
+    # Compare against the pinned reference values as well.
+    expected = BASELINE.get("metrics", {}).get(bench["name"])
+    if expected is not None:
+        if len(expected) != len(py):
+            print(f"\n  BASELINE: expected {len(expected)} metrics, reference produced {len(py)} — FAIL")
+            type_pass = False
+            all_pass = False
+        else:
+            drift = [
+                (metric_names[i], expected[i], py[i]) for i in range(len(expected)) if abs(expected[i] - py[i]) > tol
+            ]
+            if drift:
+                ref = BASELINE.get("reference", {})
+                print(f"\n  BASELINE DRIFT — pinned values were produced by {ref}:")
+                for nm, want, got in drift:
+                    print(f"    {nm:<8} pinned={want:.8f}  reference now={got:.8f}  diff={abs(want - got):.2e}")
+                print("    The reference implementation moved. Confirm intended, then regenerate.")
+                type_pass = False
+                all_pass = False
+            else:
+                print(f"  {'(baseline)':<8} {len(expected)} pinned reference values match")
 
     result_label = "ALL PASS" if type_pass else "SOME METRICS FAILED"
     print(f"\n  {result_label}")

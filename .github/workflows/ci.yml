@@ -186,6 +186,15 @@ jobs:
           source .venv/bin/activate
           .venv/bin/python scripts/parity_mask.py --cases 200
 
+      # Compares per-(image, category) matching *decisions* against pycocotools,
+      # annotation by annotation, over a tracked corpus of 18 curated edge cases.
+      # Metrics cannot replace this: two detections swapped between images can
+      # leave AP identical to fifteen decimal places.
+      - name: Matching decisions vs pycocotools
+        run: |
+          source .venv/bin/activate
+          pytest scripts/test_adversarial.py -q
+
       - name: Type stubs track the extension module
         run: |
           source .venv/bin/activate

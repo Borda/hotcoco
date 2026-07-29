@@ -242,6 +242,47 @@ def _boundary_note(hc_ei, py_ei, hc_dt_idx, py_dt_idx, hc_gt_idx, py_gt_idx, dt_
     return None
 
 
+def _is_inert(ei):
+    """True when this eval_img cannot influence any metric.
+
+    hotcoco drives evaluation from the annotation index and skips (image,
+    category, area) pairs with nothing to score, where pycocotools emits an entry
+    regardless. Those entries are not always *empty* — a detection outside the
+    area range still appears, with `dtIgnore` set — but they are inert: an ignored
+    detection is neither a TP nor an FP, and an ignored GT never enters `num_gt`.
+    Accumulation reaches the same numbers either way.
+
+    So "present in pycocotools, missing from hotcoco" is only a divergence when
+    the entry could actually have contributed. Flagging every skipped pair made
+    level 2 fire on three fixtures whose metrics agree exactly, which is the kind
+    of noise that gets a check switched off.
+    """
+    if ei is None:
+        return True
+
+    # pycocotools hands back numpy arrays here, so `or []` and bare truthiness
+    # both raise "truth value of an empty array is ambiguous". Normalise first.
+    def flatten(value):
+        if value is None:
+            return []
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        out = []
+        for v in value:
+            out.extend(v if isinstance(v, (list, tuple)) else [v])
+        return out
+
+    gt_ids = flatten(ei.get("gtIds"))
+    gt_ignore = flatten(ei.get("gtIgnore"))
+    has_live_gt = any(not bool(g) for g in gt_ignore) if gt_ignore else bool(gt_ids)
+
+    dt_ids = flatten(ei.get("dtIds"))
+    dt_ignore = flatten(ei.get("dtIgnore"))
+    has_live_dt = any(not bool(v) for v in dt_ignore) if dt_ignore else bool(dt_ids)
+
+    return not (has_live_gt or has_live_dt)
+
+
 def compare_eval_imgs(hc_ev, py_ev):
     """
     Compare eval_imgs from both tools. Returns list of dicts describing each
@@ -272,8 +313,8 @@ def compare_eval_imgs(hc_ev, py_ev):
 
         if in_py and not in_hc:
             py_ei = py_idx[key]
-            # Only flag if it's non-trivial (has DTs or GTs)
-            if py_ei and (py_ei.get("dtIds") or py_ei.get("gtIds")):
+            # Only a divergence if the entry could have contributed — see _is_inert.
+            if not _is_inert(py_ei):
                 divergences.append(
                     {
                         "image_id": image_id,
@@ -330,7 +371,14 @@ def main():
     ap.add_argument(
         "--metric-thr", type=float, default=1e-4, help="Metric diff threshold to flag (default 1e-4; use 2e-4 for segm)"
     )
-    ap.add_argument("--eval-imgs-only", action="store_true", help="Skip metric check; always run eval_imgs comparison")
+    ap.add_argument(
+        "--eval-imgs-only", action="store_true", help="Skip metric check; run only the eval_imgs comparison"
+    )
+    ap.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help="Skip the per-match comparison (the old default when metrics passed)",
+    )
     ap.add_argument("--max-divergences", type=int, default=20, help="Max eval_img pairs to print")
     args = ap.parse_args()
 
@@ -358,8 +406,16 @@ def main():
         else:
             print("\n[LEVEL 1] Metrics OK — all within threshold")
 
-    # Level 2: run if metric diff found, or if --eval-imgs-only
-    if found_issue or args.eval_imgs_only:
+    # Level 2 runs unconditionally.
+    #
+    # It used to be gated on level 1 having already failed, which made it
+    # unreachable in the case it is uniquely good at: a matching divergence that
+    # cancels in the integral. Two detections swapped between images, or a
+    # crowd flag applied to the wrong annotation, can leave AP identical to
+    # fifteen decimal places while every per-match decision underneath is wrong.
+    # A check that only runs once something else has already noticed is not a
+    # check.
+    if not args.metrics_only:
         divergences = compare_eval_imgs(hc_ev, py_ev)
         print_eval_img_divergences(divergences, limit=args.max_divergences)
         if divergences:

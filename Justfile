@@ -122,5 +122,18 @@ adversarial fixture: build
 # Every reference comparison that does not need data/ — what CI runs
 parity-all: build
     uv run pytest scripts/test_parity.py -q
+    uv run pytest scripts/test_adversarial.py -q
     uv run python scripts/parity_lvis.py
     uv run python scripts/parity_mask.py --cases 200
+
+# Diff per-(image, category) matching decisions against pycocotools across the
+# whole adversarial corpus — the check metrics alone cannot replace
+adversarial-all: build
+    uv run pytest scripts/test_adversarial.py -v --tb=short
+
+# Regenerate frozen test oracles (needs scipy/shapely/sklearn/netcal transiently)
+gen-fixtures: build
+    uv run --with scipy python scripts/gen_assign_fixtures.py
+    uv run --with shapely python scripts/gen_obb_fixtures.py
+    uv run --with scikit-learn --with netcal python scripts/gen_metrics_fixtures.py
+    uv run python scripts/gen_val2017_baseline.py
