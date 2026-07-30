@@ -33,6 +33,17 @@ AP=$(coco eval --gt ann.json --dt det.json --json | jq '.metrics.AP')
 python -c "import sys; sys.exit(0 if $AP >= 0.50 else 1)"
 ```
 
+`coco eval --json` also carries `provenance` and `reference_deviations`, so a pipeline
+can refuse to publish numbers that are not leaderboard-comparable. The warnings
+`summarize()` prints go to stderr and do not survive a pipe — these do:
+
+```bash
+# Fail if the run is not comparable to the reference implementation
+coco eval --gt ann.json --dt det.json --json \
+  | jq -e '.provenance == "parity_verified"' > /dev/null \
+  || { echo "not benchmark-standard"; exit 1; }
+```
+
 When `--json` is set and an error occurs, the exit code is still 1 and the error
 is also JSON:
 

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Provenance now reaches everything that draws the numbers.** `report()` has
+  recorded whether a run is leaderboard-comparable since it landed, but every Python
+  rendering surface ignored it: the PDF report, the browse dashboard, and
+  `coco eval --json` presented Open Images, oriented-box, and custom-parameter
+  results formatted identically to a pycocotools-parity run. The PDF is the artifact
+  most likely to be circulated to someone who never ran the evaluation, which is
+  exactly the case `Provenance` exists for.
+
+  - The **PDF report** carries a provenance line under the run context, listing every
+    reason when the run is an extension. Drawn in both states on purpose — a caveat
+    that appears only sometimes cannot be distinguished from an older hotcoco.
+  - The **browse dashboard** states provenance in the sidebar and shows a banner
+    above the KPI tiles when the run is not parity-verified.
+  - **`coco eval --json`** gained `reference_deviations` alongside the `provenance`
+    it already carried. The `summarize()` warnings go to stderr and do not survive a
+    pipe.
+
+- **`COCOeval.provenance()` and `COCOeval.reference_deviations()`** in Python. Same
+  values as `report()["provenance"]` and the `summarize()` warnings, but read from
+  the configuration alone, so unlike `report()` and `results()` they work **before**
+  `run()` — check comparability ahead of a long evaluation instead of after it. In
+  Rust, `COCOeval::provenance()` is the single mapping from `reference_deviations()`
+  to a `Provenance`, which `report()` now calls rather than inlining.
+
+### Fixed
+
+- **A keypoints PDF report was titled "COCO Evaluation Report".** `PlotData.iou_type`
+  carried the Rust enum's spelling (`"Bbox"`, `"Keypoints"`) while `eval_mode` arrived
+  lowercase, so `iou_type == "keypoints"` was never true. Lowercased at the boundary,
+  where the field's documented contract already said it was.
+
 ### Changed
 
 - **Open Images group-of boxes now follow the Challenge protocol.** A group-of box

@@ -676,6 +676,54 @@ def test_report_provenance_distinguishes_extension_from_parity():
     assert _eval_for_report("obb").report()["provenance"] == "extension"
 
 
+def test_provenance_survives_into_the_render_layer():
+    """The marker has to reach whatever draws the numbers, not stop at the dict.
+
+    A PDF or dashboard is the artifact that gets circulated to someone who never
+    ran the eval, so an unmarked one is the failure `Provenance` exists to
+    prevent. `report()` computed it correctly for a whole release while every
+    Python renderer ignored it.
+    """
+    from hotcoco.plot.data import PlotData
+
+    verified = PlotData.from_coco_eval(_eval_for_report())
+    assert verified.provenance == "parity_verified"
+    assert verified.is_benchmark_standard
+    assert verified.deviations == []
+
+    # The sharp case. Still `iou_type="bbox"` in plain COCO mode, so a renderer
+    # deriving the marker from eval_mode or geometry — the obvious shortcut —
+    # would call this leaderboard-comparable.
+    ev = _eval_for_report()
+    ev.params.recThrs = [i / 10 for i in range(11)]
+    with suppress_stdout(), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ev.run()
+
+    extension = PlotData.from_coco_eval(ev)
+    assert extension.eval_mode == "coco" and extension.iou_type == "bbox"
+    assert extension.provenance == "extension"
+    assert not extension.is_benchmark_standard
+    assert any("rec_thrs" in d for d in extension.deviations), extension.deviations
+
+
+def test_provenance_accessor_sees_unevaluated_param_changes():
+    """`ev.params.x = ...` mutates a Python-side copy that only syncs on entry.
+
+    Reading the evaluator directly reported `parity_verified` for a run that was
+    about to be an extension — comparability answered from stale state, which is
+    worse than not answering. Checked here because the accessor's whole point is
+    working *before* a long evaluation.
+    """
+    ev = _eval_for_report()
+    assert ev.provenance() == "parity_verified"  # control
+
+    off = _eval_for_report()
+    off.params.iouThrs = [0.5]
+    assert off.provenance() == "extension"
+    assert any("iou_thrs" in d for d in off.reference_deviations())
+
+
 def test_report_curves_are_plottable():
     report = _eval_for_report().report()
     curves = report["curves"]

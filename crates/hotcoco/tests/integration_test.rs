@@ -5647,6 +5647,36 @@ fn default_params_are_parity_verified() {
     );
 }
 
+/// `provenance()` is the accessor renderers read; `report()` is what everything
+/// else reads. They must be the same bit.
+///
+/// Worth its own test because the failure is silent and asymmetric: renderers
+/// never build a report, so a drift would put a parity-verified badge on an
+/// extension run with every assertion above still green.
+#[test]
+fn provenance_accessor_agrees_with_report() {
+    let mut verified = bbox_eval_for_provenance();
+    verified.run();
+    assert_eq!(
+        verified.provenance(),
+        verified.report().expect("report() succeeds").provenance,
+        "accessor and report disagree on a default run"
+    );
+    assert_eq!(verified.provenance(), Provenance::ParityVerified);
+
+    let mut extension = bbox_eval_for_provenance();
+    extension.params.iou_thrs = vec![0.5, 0.75];
+    extension.run();
+    assert_eq!(
+        extension.provenance(),
+        extension.report().expect("report() succeeds").provenance,
+        "accessor and report disagree on a custom-parameter run"
+    );
+    // The sharp case: still `IouType::Bbox` in plain COCO mode. A renderer that
+    // derived provenance from the eval mode or geometry would call this verified.
+    assert_eq!(extension.provenance(), Provenance::Extension);
+}
+
 #[test]
 fn custom_iou_thrs_downgrade_to_extension() {
     let mut ev = bbox_eval_for_provenance();

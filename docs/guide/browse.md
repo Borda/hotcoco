@@ -257,5 +257,11 @@ The dashboard shows:
 - **Per-image F1** — histogram colored by error profile (perfect, FP-heavy, FN-heavy, mixed)
 - **Label errors** — suspected annotation mistakes; click a row to view the image
 
+The sidebar always states the run's **provenance**. When it is not
+`parity-verified` — oriented boxes, Open Images, or any non-default parameter — a
+banner above the KPI tiles says so and lists why, so numbers screenshotted out of
+the dashboard do not read as leaderboard numbers. See
+[Check provenance before you publish a number](results.md#check-provenance-before-you-publish-a-number).
+
 All charts use the same dark theme as the gallery. The layout is fully
 responsive — from narrow Jupyter panes (~400px) to wide monitors (1600px+).

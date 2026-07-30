@@ -31,6 +31,14 @@ The report includes a run context block (dataset paths, eval params, image/annot
 a full metrics table, precision-recall curves at IoU 0.50, 0.75, and the mean, F1 peak,
 and a per-category AP bar chart sorted from best to worst.
 
+Every report carries a **provenance** line stating whether its numbers are comparable
+to a published leaderboard. A parity-verified run says so quietly; anything else is
+marked as an extension and lists why — oriented boxes, Open Images, or simply a
+non-default `iou_thrs`. Since the PDF is the artifact that gets circulated to people
+who did not run the evaluation, the marker is always present, so a report *without* a
+caveat means the run was checked rather than that the caveat was omitted. See
+[Check provenance before you publish a number](results.md#check-provenance-before-you-publish-a-number).
+
 Works with all three evaluation modes — hotcoco automatically selects the right metric rows
 for each:
 

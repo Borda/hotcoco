@@ -210,6 +210,33 @@ if report["provenance"] != "parity_verified":
     print(f"note: {report['provenance']} — not benchmark-standard")
 ```
 
+It also travels into everything hotcoco draws. The PDF report carries a provenance
+line, the browse dashboard carries a banner, and `coco eval --json` carries both the
+marker and the reasons — so a chart handed to someone who never ran the evaluation
+still says what it is.
+
+#### Checking before you evaluate
+
+`provenance()` reads only the configuration, so unlike `report()` it works before
+`run()`. Worth checking ahead of a long evaluation rather than discovering afterwards
+that the numbers cannot be published:
+
+```python
+ev = hotcoco.COCOeval(gt, dt, "bbox")
+ev.params.iouThrs = [0.5]
+
+ev.provenance()             # 'extension' — already, before evaluating
+ev.reference_deviations()   # ['iou_thrs differ from default (0.50:0.05:0.95). ...']
+```
+
+`reference_deviations()` returns one sentence per reason and is empty exactly when
+the run is parity-verified. It is the same predicate behind the warnings `summarize()`
+prints, so a report cannot claim parity while the warnings disagree.
+
+Read these rather than inferring comparability from `iou_type` or the eval mode:
+parity is a property of the whole configuration, so the run above is an extension
+even though it is ordinary COCO bbox evaluation.
+
 ### Plotting precision-recall curves
 
 `curves` holds one aggregate PR curve per IoU threshold, all sharing the

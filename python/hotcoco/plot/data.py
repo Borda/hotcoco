@@ -17,6 +17,8 @@ class PlotData:
 
     eval_mode: str  # "coco" | "lvis" | "openimages"
     iou_type: str  # "bbox" | "segm" | "keypoints"
+    provenance: str  # "parity_verified" | "extension" — read from Rust, never re-derived
+    deviations: list[str]  # why, when provenance is not "parity_verified"
     iou_thresholds: list[float]  # T values — matches precision axis 0
     area_labels: list[str]  # ordered area range labels — matches precision axis 3
     area_ranges: dict[str, tuple[float, float]]
@@ -29,6 +31,16 @@ class PlotData:
     cat_names: dict[int, str]
     metric_key_order: list[str]  # canonical display order from Rust
     version: str
+
+    @property
+    def is_benchmark_standard(self) -> bool:
+        """Whether these numbers may be presented as leaderboard-comparable.
+
+        Default-deny: only the exact ``"parity_verified"`` marker qualifies, so a
+        provenance variant added later reads as *needs a caveat* until a renderer
+        is taught what it means.
+        """
+        return self.provenance == "parity_verified"
 
     # ------------------------------------------------------------------
     # Index helpers — used by plot functions to resolve axis positions
@@ -94,7 +106,16 @@ class PlotData:
 
         return cls(
             eval_mode=params_dict["eval_mode"],
-            iou_type=params_dict["iou_type"],
+            # Lowercased at the boundary: `results()` reports the Rust enum's
+            # `Debug` spelling ("Bbox", "Keypoints") while `eval_mode` arrives
+            # lowercase, and `iou_type == "keypoints"` was silently never true.
+            iou_type=params_dict["iou_type"].lower(),
+            # Read from the results dict Rust already produced, not re-derived.
+            # Provenance depends on the whole configuration, so `eval_mode ==
+            # "coco"` says nothing about it — a bbox run with custom iou_thrs is
+            # an extension too.
+            provenance=r["provenance"],
+            deviations=list(coco_eval.reference_deviations()),
             iou_thresholds=params_dict["iou_thresholds"],
             area_labels=area_labels,
             area_ranges={k: tuple(v) for k, v in params_dict["area_ranges"].items()},

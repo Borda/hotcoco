@@ -353,6 +353,9 @@ if report["provenance"] != "parity_verified":
     print(f"note: {report['provenance']} — not benchmark-standard")
 ```
 
+For the same marker without building a report — and without evaluating at all — see
+[`provenance`](#provenance) and [`reference_deviations`](#reference_deviations).
+
 #### Plotting the curves
 
 `curves` holds the aggregate precision-recall curve for each IoU threshold, averaged over
@@ -372,6 +375,51 @@ plt.legend()
 
 For the full per-category arrays use [`eval["precision"]`](#eval) instead — on COCO that
 is roughly a million floats, which is why the report carries only the aggregate.
+
+---
+
+### `provenance`
+
+```python
+provenance() -> str
+```
+
+Return `"parity_verified"` or `"extension"` — the same value as `report()["provenance"]`
+and `results()["provenance"]`, but read from the configuration alone, so **this one works
+before `run()`**. Check it ahead of a long evaluation rather than discovering afterwards
+that the numbers cannot be published.
+
+```python
+ev = hotcoco.COCOeval(gt, dt, "bbox")
+ev.params.iouThrs = [0.5]
+ev.provenance()   # 'extension' — already, before evaluating
+```
+
+Never infer comparability from `iou_type` or the eval mode instead. Parity is a property
+of the whole configuration, so the run above is an extension despite being ordinary COCO
+bbox evaluation.
+
+---
+
+### `reference_deviations`
+
+```python
+reference_deviations() -> list[str]
+```
+
+Return one human-readable sentence per way this run departs from the reference
+configuration, empty exactly when `provenance()` is `"parity_verified"`. Also works
+before `run()`.
+
+```python
+for reason in ev.reference_deviations():
+    print(reason)
+# iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines may show -1.000.
+```
+
+This is the same predicate behind the warnings `summarize()` prints, so a report cannot
+claim parity while the warnings disagree. hotcoco's own renderers — the PDF report, the
+browse dashboard, and `coco eval --json` — read these rather than recomputing them.
 
 ---
 

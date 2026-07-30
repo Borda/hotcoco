@@ -131,6 +131,8 @@ _ROW_H = 0.17
 _CAT_HDR_H = 0.16
 _CAT_ROW_H = 0.115
 _MIN_BLOCK_H = 1.8  # minimum metrics block height — keeps the PR curve legible
+_PROV_LINE_H = 0.135  # one line of the provenance strip
+_PROV_WRAP = 128  # characters per wrapped reason line at 6pt across the text column
 
 # ---------------------------------------------------------------------------
 # Report color palette
@@ -148,6 +150,10 @@ _RC = {
     "kpi_bg": "#F0EBE4",
     "legend_edge": "#E4DED7",
     "pr_tick": "#7A6E64",
+    # Rose, chart palette #7. Cold Brew defines no warning role, and the
+    # eval-semantic red (#ef4444) is scoped to the dashboard on purpose, so the
+    # caveat takes the palette's own red rather than a newly invented one.
+    "caveat": SERIES_COLORS[6],
     "pr_50": SERIES_COLORS[2],
     "pr_75": SERIES_COLORS[0],
     "pr_mean": SERIES_COLORS[1],
@@ -369,6 +375,63 @@ def _draw_context_box(
         ]
     ):
         _kpi_tile(fig.add_subplot(gs_tiles[i]), val, lbl, _RC["text"])
+
+
+def _provenance_lines(data: PlotData) -> tuple[str, list[str]]:
+    """Return the provenance headline and its wrapped supporting lines.
+
+    Split from drawing so the caller can size the grid row from the line count
+    before any axes exist — the page is variable-height and every row's height
+    has to be known up front.
+    """
+    import textwrap
+
+    if data.is_benchmark_standard:
+        return ("parity-verified — comparable to the reference implementation at these parameters", [])
+
+    headline = "extension — these numbers are NOT comparable to a published leaderboard"
+    body: list[str] = []
+    for reason in data.deviations:
+        wrapped = textwrap.wrap(" ".join(reason.split()), width=_PROV_WRAP) or [""]
+        body.append("· " + wrapped[0])
+        body.extend("  " + line for line in wrapped[1:])
+    return headline, body
+
+
+def _draw_provenance(fig, gs_cell, data: PlotData) -> None:
+    """Draw the comparability marker that every rendered number is qualified by.
+
+    Always drawn, in both states. A caveat that appears only on extension runs
+    teaches readers nothing about the reports that lack it — silence has to mean
+    "verified" explicitly, or it just means "an older hotcoco".
+    """
+    ax = fig.add_subplot(gs_cell)
+    ax.set_axis_off()
+    ax.set_facecolor("none")
+
+    headline, body = _provenance_lines(data)
+    ok = data.is_benchmark_standard
+    color = _RC["very_muted"] if ok else _RC["caveat"]
+
+    n_lines = 1 + len(body)
+    # Text is laid out from the top of the cell downwards in line-height steps, so
+    # the block stays put as the reason count changes the row's height.
+    step = 1.0 / n_lines
+    top = 1.0 - step * 0.5
+
+    ax.text(0.04, top, "PROVENANCE", fontsize=7, fontweight="bold", color=color, va="center", transform=ax.transAxes)
+    ax.text(
+        0.16,
+        top,
+        headline,
+        fontsize=6.5,
+        fontweight="bold" if not ok else "normal",
+        color=color,
+        va="center",
+        transform=ax.transAxes,
+    )
+    for i, line in enumerate(body, start=1):
+        ax.text(0.16, top - i * step, line, fontsize=6, color=_RC["muted"], va="center", transform=ax.transAxes)
 
 
 def _draw_metrics_block(
@@ -700,12 +763,17 @@ def report(
     block_h = max(n_captions * _CAP_H + (len(AP_ROWS) + len(AR_ROWS)) * _ROW_H + _GAP * 1.5, _MIN_BLOCK_H)
     cat_h = _CAT_HDR_H + rows_per_col * _CAT_ROW_H
 
+    # The provenance strip grows with the number of reasons, so its height is
+    # measured from the wrapped text rather than fixed.
+    prov_h = (1 + len(_provenance_lines(data)[1])) * _PROV_LINE_H
+
     # Single source of truth: row heights drive both page_h and height_ratios.
     # Row index names match the unpacked constants below.
     _row_heights = [
         _HEADER_H,  # _R_HEADER
         _GAP * 0.5,  # _R_GAP1
         _CTX_H,  # _R_CTX
+        prov_h,  # _R_PROV
         _GAP * 0.8,  # _R_GAP2
         _SECTION_H,  # _R_SEC1
         block_h,  # _R_METRICS
@@ -713,7 +781,7 @@ def report(
         _SECTION_H,  # _R_SEC2
         cat_h,  # _R_CATS
     ]
-    _R_HEADER, _R_GAP1, _R_CTX, _R_GAP2, _R_SEC1, _R_METRICS, _R_GAP3, _R_SEC2, _R_CATS = range(9)
+    (_R_HEADER, _R_GAP1, _R_CTX, _R_PROV, _R_GAP2, _R_SEC1, _R_METRICS, _R_GAP3, _R_SEC2, _R_CATS) = range(10)
     page_h = sum(_row_heights) + 2 * _MARGIN_V
 
     fig = plt.figure(figsize=(_PAGE_W, page_h))
@@ -736,6 +804,7 @@ def report(
             _draw_context_box(
                 fig, gs[_R_CTX], gt_path, dt_path, data.iou_type, iou_str, max_dets, n_images, n_anns, n_cats, n_dets
             )
+            _draw_provenance(fig, gs[_R_PROV], data)
             _draw_section_heading(fig.add_subplot(gs[_R_SEC1]), "SUMMARY METRICS")
             _draw_metrics_block(
                 fig,

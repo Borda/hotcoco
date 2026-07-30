@@ -1493,6 +1493,64 @@ dict
         Ok(json_mod.call_method1("loads", (json_str,))?.unbind())
     }
 
+    #[doc = "Return this run's provenance without building a full report.
+
+Identical to ``report()['provenance']`` and ``results()['provenance']`` —
+``'parity_verified'`` or ``'extension'`` — but reads only the configuration, so
+unlike those two it works **before** evaluating. Check it ahead of a long run
+rather than discovering afterwards that the numbers cannot be published.
+
+Never re-derive this from ``iou_type`` or the eval mode: parity is a property of
+the whole configuration, so a run with custom ``iou_thrs`` is an extension even
+in plain COCO bbox mode.
+
+Treat anything other than ``'parity_verified'`` as not leaderboard-comparable.
+Use ``reference_deviations()`` for the reasons.
+
+Returns
+-------
+str
+    ``'parity_verified'`` or ``'extension'``."]
+    fn provenance(&mut self, py: Python<'_>) -> PyResult<String> {
+        // Through `with_params`, so `ev.params.iouThrs = [...]` is visible here.
+        // Reading `self.inner` directly returned `parity_verified` for a run that
+        // was about to be an extension — the same defect `with_params` was
+        // written to close, one call site later.
+        let prov = self.with_params(py, |ev| ev.provenance());
+        // Serialized rather than matched, so this and ``report()['provenance']``
+        // cannot spell the same variant two ways. Falls back to the *non*-verified
+        // side: an unrecognised provenance is a reason to caveat, not to certify.
+        let value = serde_json::to_value(prov)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(value.as_str().unwrap_or("extension").to_string())
+    }
+
+    #[doc = "Ways this run's parameters depart from the reference configuration.
+
+Empty when the numbers are directly comparable to the reference implementation's
+published output — pycocotools for COCO bbox/segm/keypoints, lvis-api for LVIS —
+and non-empty otherwise, with one human-readable sentence per reason.
+
+This is the same predicate that drives ``provenance()`` and the warnings
+``summarize()`` writes to stderr, so a report cannot claim parity while the
+warnings say otherwise.
+
+Returns
+-------
+list of str
+    One sentence per deviation; empty if the run is reference-comparable.
+
+Examples
+--------
+>>> ev = COCOeval(gt, dt, 'bbox')
+>>> ev.params.iou_thrs = [0.5]
+>>> ev.run()
+>>> ev.reference_deviations()
+['iou_thrs differ from default (0.50:0.05:0.95). ...']"]
+    fn reference_deviations(&mut self, py: Python<'_>) -> Vec<String> {
+        self.with_params(py, |ev| ev.reference_deviations())
+    }
+
     #[doc = "Return evaluation results as a dict.
 
 Must be called after ``summarize()`` (or ``run()``). Returns a dict with:

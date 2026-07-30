@@ -82,6 +82,12 @@ def test_top_level_exports_covered():
         # primitives.pyi, checked by the tests below.
         "metrics",
         "primitives",
+        # Pure-Python subpackage — pyright reads its annotations from the source,
+        # so it has no .pyi to be missing from. Listed rather than left to chance:
+        # `hotcoco.plot` only becomes an attribute of `hotcoco` once something
+        # imports it, so whether this test passed depended on which other test
+        # ran first.
+        "plot",
     }
     runtime_names -= skip
 

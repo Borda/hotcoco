@@ -170,6 +170,22 @@ impl COCOeval {
         out
     }
 
+    /// Whether this run's numbers may be presented as leaderboard-comparable.
+    ///
+    /// The single mapping from [`reference_deviations`](Self::reference_deviations)
+    /// to a [`Provenance`] bit. It exists as a named method rather than an
+    /// expression inside [`report`](Self::report) because renderers need the bit
+    /// without paying for a whole report — and a renderer that recomputes it from
+    /// `iou_type` or `eval_mode` is exactly the silent downgrade `Provenance`
+    /// exists to prevent. Read it; never re-derive it.
+    pub fn provenance(&self) -> Provenance {
+        if self.reference_deviations().is_empty() {
+            Provenance::ParityVerified
+        } else {
+            Provenance::Extension
+        }
+    }
+
     /// Return the summary metric lines as strings without printing.
     ///
     /// Computes stats (setting `self.stats`) and returns each formatted line.
@@ -510,14 +526,7 @@ impl COCOeval {
                 .to_string()
         })?;
 
-        // Parity is a property of the whole configuration, and this is the same
-        // predicate `summarize()` prints its warnings from — one producer, one
-        // consumer, so the printed reason and the recorded provenance cannot drift.
-        let provenance = if !self.reference_deviations().is_empty() {
-            Provenance::Extension
-        } else {
-            Provenance::ParityVerified
-        };
+        let provenance = self.provenance();
 
         let keys = self.metric_keys();
         let mut report = EvalReport::new("detection", provenance)

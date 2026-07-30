@@ -27,6 +27,13 @@
     --dt-badge-bg: rgba(134, 148, 168, 0.12);
     --dt-badge-text: #8694A8;
 
+    /* Rose, chart palette #7 — the caveat marker on non-leaderboard-comparable
+       numbers. Kept identical to plot/report.py's `caveat` so the dashboard and
+       the PDF flag the same run the same way. */
+    --caveat: #C46070;
+    --caveat-bg: rgba(196, 96, 112, 0.10);
+    --caveat-border: rgba(196, 96, 112, 0.35);
+
     --radius-sm: 6px;
     --radius-md: 10px;
     --radius-lg: 14px;
@@ -1636,6 +1643,53 @@ main {
     font-family: var(--font-mono);
     font-size: 0.8rem;
     color: var(--text-primary);
+}
+
+.meta-value-caveat {
+    color: var(--caveat);
+}
+
+/* ── Provenance banner ── */
+.provenance-banner {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    padding: 14px 16px;
+    margin-bottom: 20px;
+    background: var(--caveat-bg);
+    border: 1px solid var(--caveat-border);
+    border-radius: var(--radius-md);
+}
+
+.provenance-tag {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--caveat);
+    border: 1px solid var(--caveat-border);
+    border-radius: var(--radius-sm);
+    padding: 3px 8px;
+}
+
+.provenance-body {
+    min-width: 0;
+}
+
+.provenance-headline {
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.provenance-reasons {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
 }
 
 /* ── Dashboard main area ── */

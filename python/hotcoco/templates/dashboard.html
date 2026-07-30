@@ -26,6 +26,12 @@
                 <span class="meta-label">Images</span>
                 <span class="meta-value">{{ num_images | number_format }}</span>
             </div>
+            <div class="meta-item">
+                <span class="meta-label">Provenance</span>
+                <span class="meta-value {% if not provenance_ok %}meta-value-caveat{% endif %}">
+                    {{ provenance | replace("_", "-") }}
+                </span>
+            </div>
         </div>
         {% endif %}
     </aside>
@@ -40,6 +46,20 @@
             <pre><code>coco explore --gt ann.json --dt results.json --images path/to/images/</code></pre>
         </div>
         {% else %}
+
+        {% if not provenance_ok %}
+        <section class="provenance-banner">
+            <span class="provenance-tag">Extension</span>
+            <div class="provenance-body">
+                <p class="provenance-headline">These numbers are not comparable to a published leaderboard.</p>
+                <ul class="provenance-reasons">
+                    {% for reason in deviations %}
+                    <li>{{ reason }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </section>
+        {% endif %}
 
         <!-- KPI tiles -->
         <section class="kpi-row">

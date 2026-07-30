@@ -510,7 +510,15 @@ def build_dashboard(coco_eval, slices=None) -> dict:
     # Grab contextual info for template card subtitles
     tide = coco_eval.tide_errors()
 
+    # Read the comparability marker from Rust rather than inferring it from
+    # iou_type or eval mode — parity is a property of the whole configuration.
+    # Default-deny: only the exact "parity_verified" marker clears the banner.
+    provenance = coco_eval.provenance()
+
     result = {
+        "provenance": provenance,
+        "provenance_ok": provenance == "parity_verified",
+        "deviations": list(coco_eval.reference_deviations()),
         "kpi": kpi_tiles(coco_eval),
         "pr_curves_html": chart_pr_curves(coco_eval),
         "per_cat_ap_html": chart_per_category_ap(coco_eval),
