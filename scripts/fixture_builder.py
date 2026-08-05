@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from helpers import COCO_KEYPOINT_NAMES
+
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "adversarial"
 FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -283,31 +285,7 @@ def scenario_disjoint_image_sets():
 def scenario_kp_zero_keypoints():
     """GT with num_keypoints=0 for keypoints eval."""
     img = make_image(1)
-    cat = {
-        "id": 1,
-        "name": "person",
-        "supercategory": "person",
-        "keypoints": [
-            "nose",
-            "left_eye",
-            "right_eye",
-            "left_ear",
-            "right_ear",
-            "left_shoulder",
-            "right_shoulder",
-            "left_elbow",
-            "right_elbow",
-            "left_wrist",
-            "right_wrist",
-            "left_hip",
-            "right_hip",
-            "left_knee",
-            "right_knee",
-            "left_ankle",
-            "right_ankle",
-        ],
-        "skeleton": [],
-    }
+    cat = {"id": 1, "name": "person", "supercategory": "person", "keypoints": COCO_KEYPOINT_NAMES, "skeleton": []}
     # GT with all keypoints invisible (v=0) → num_keypoints=0
     kps = [0.0] * 51  # 17 keypoints * 3
     gt = {

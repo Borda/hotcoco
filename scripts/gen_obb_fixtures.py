@@ -10,9 +10,10 @@ The existing check did not use it as one. `fuzz_obb_parity.py` only asserted whi
 side of 0.5 hotcoco's AP@50 landed on, skipping a +/-0.02 dead band — so a
 systematic IoU error of 0.02 passed 200 examples — and its `test_obb_iou_known_values`
 compared Shapely against hand-derived constants *without calling hotcoco at all*,
-validating the oracle rather than the subject. Worse, that script rasterizes corners
-with its own Python reimplementation of `hotcoco::geometry`, so a shared corner-math
-bug would be invisible to both sides.
+validating the oracle rather than the subject. It also carried its own copy of the
+corner math and the IoU below; that copy is gone, and the fuzzer now imports
+`corners`/`shapely_iou` from here, so the frozen fixture and the fuzzer cannot end
+up checking hotcoco against two drifting definitions of the same number.
 
 Freezing the values instead means the Rust test compares numbers, at 1e-9, with no
 Python in the loop and no reimplementation to agree with it.

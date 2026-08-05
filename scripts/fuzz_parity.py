@@ -16,27 +16,22 @@ Usage:
 import json
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
+import helpers
 import hypothesis.strategies as st
 import pytest
-from helpers import COCO_KEYPOINT_NAMES, COCO_SKELETON, suppress_stdout
-from hotcoco import COCO as RsCOCO
-from hotcoco import COCOeval as RsCOCOeval
+from helpers import COCO_KEYPOINT_NAMES, COCO_SKELETON, metric_names_for, run_both
 from hypothesis import HealthCheck, given, settings
 from hypothesis.database import DirectoryBasedExampleDatabase
-from pycocotools.coco import COCO as PyCOCO
-from pycocotools.cocoeval import COCOeval as PyCOCOeval
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-TOLERANCE = 1e-10
-_DATA_DIR = Path(__file__).resolve().parent
-FAILURE_DIR = str(_DATA_DIR / "fixtures" / "parity_failures")
+_SCRIPT_DIR = Path(__file__).resolve().parent
+FAILURE_DIR = str(_SCRIPT_DIR / "fixtures" / "parity_failures")
 
 
 # ---------------------------------------------------------------------------
@@ -258,41 +253,6 @@ def coco_eval_data(draw, iou_type):
 # ---------------------------------------------------------------------------
 
 
-def run_both(gt_dataset, dt_results, iou_type):
-    """Run evaluation through both pycocotools and hotcoco, return stats."""
-    gt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    dt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    try:
-        json.dump(gt_dataset, gt_file)
-        gt_file.close()
-        json.dump(dt_results, dt_file)
-        dt_file.close()
-
-        with suppress_stdout():
-            # pycocotools
-            py_gt = PyCOCO(gt_file.name)
-            py_dt = py_gt.loadRes(dt_file.name)
-            py_ev = PyCOCOeval(py_gt, py_dt, iou_type)
-            py_ev.evaluate()
-            py_ev.accumulate()
-            py_ev.summarize()
-            py_stats = py_ev.stats.tolist()
-
-            # hotcoco
-            rs_gt = RsCOCO(gt_file.name)
-            rs_dt = rs_gt.load_res(dt_file.name)
-            rs_ev = RsCOCOeval(rs_gt, rs_dt, iou_type)
-            rs_ev.evaluate()
-            rs_ev.accumulate()
-            rs_ev.summarize()
-            rs_stats = rs_ev.stats
-
-        return py_stats, rs_stats, rs_ev
-    finally:
-        os.unlink(gt_file.name)
-        os.unlink(dt_file.name)
-
-
 def assert_hotcoco_invariants(rs_ev, iou_type):
     """Properties that must hold regardless of what pycocotools says.
 
@@ -307,7 +267,7 @@ def assert_hotcoco_invariants(rs_ev, iou_type):
     a family that has no reference at all.
     """
     stats = rs_ev.stats
-    names = _metric_names_for(iou_type)
+    names = metric_names_for(iou_type)
     assert len(stats) == len(names), f"{len(stats)} metrics for {len(names)} names"
 
     for name, v in zip(names, stats):
@@ -341,35 +301,21 @@ def assert_hotcoco_invariants(rs_ev, iou_type):
                 assert v == -1.0 or 0.0 <= v <= 1.0, f"recall {v} outside [0, 1]"
 
 
-def _metric_names_for(iou_type):
-    """Get canonical metric names from the Rust evaluator."""
-    from hotcoco import COCO
+def assert_metrics_match(py_stats, rs_stats, iou_type, gt_dataset, dt_results):
+    """Shared differential assertion, plus a saved reproducer for any mismatch.
 
-    return RsCOCOeval(COCO(), COCO(), iou_type).metric_keys()
+    Hypothesis has already minimized the failing case by the time this fires, so
+    the JSON pair it writes is the smallest input that diverges — the reason the
+    fuzzer wants a side effect on failure and the CI suite does not. The dataset
+    is required, not optional: a caller that omitted it would get the plain
+    assertion with the reproducer silently not written, which is the one thing
+    this wrapper exists to do.
+    """
 
+    def _save(_mismatches):
+        save_failure(gt_dataset, dt_results, iou_type, py_stats, rs_stats)
 
-def assert_metrics_match(py_stats, rs_stats, iou_type, gt_dataset=None, dt_results=None):
-    """Assert all metrics match within tolerance."""
-    metric_names = _metric_names_for(iou_type)
-    expected_len = len(metric_names)
-    assert len(py_stats) == expected_len, f"pycocotools returned {len(py_stats)} metrics, expected {expected_len}"
-    assert len(rs_stats) == expected_len, f"hotcoco returned {len(rs_stats)} metrics, expected {expected_len}"
-
-    mismatches = []
-    for i in range(expected_len):
-        py_val, rs_val = py_stats[i], rs_stats[i]
-        # Both -1.0 means "not computed" — skip
-        if py_val == -1.0 and rs_val == -1.0:
-            continue
-        diff = abs(py_val - rs_val)
-        if diff > TOLERANCE:
-            mismatches.append(f"  [{i}] {metric_names[i]}: py={py_val:.15f} rs={rs_val:.15f} diff={diff:.2e}")
-
-    if mismatches:
-        if gt_dataset is not None and dt_results is not None:
-            save_failure(gt_dataset, dt_results, iou_type, py_stats, rs_stats)
-        msg = f"\n{iou_type} metric mismatch (tol={TOLERANCE}):\n" + "\n".join(mismatches)
-        raise AssertionError(msg)
+    helpers.assert_metrics_match(py_stats, rs_stats, iou_type, on_mismatch=_save)
 
 
 def save_failure(gt_dataset, dt_results, iou_type, py_stats, rs_stats):
@@ -383,7 +329,7 @@ def save_failure(gt_dataset, dt_results, iou_type, py_stats, rs_stats):
     with open(f"{prefix}_dt.json", "w") as f:
         json.dump(dt_results, f, indent=2)
 
-    metric_names = _metric_names_for(iou_type)
+    metric_names = metric_names_for(iou_type)
 
     with open(f"{prefix}_stats.txt", "w") as f:
         f.write(f"iou_type: {iou_type}\n")
@@ -402,7 +348,7 @@ HYPOTHESIS_SETTINGS = dict(
     max_examples=3334,
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
-    database=DirectoryBasedExampleDatabase(str(_DATA_DIR / "fixtures" / ".hypothesis")),
+    database=DirectoryBasedExampleDatabase(str(_SCRIPT_DIR / "fixtures" / ".hypothesis")),
 )
 
 

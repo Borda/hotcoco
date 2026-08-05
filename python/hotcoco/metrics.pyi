@@ -2,25 +2,28 @@
 
 Unlike ``detection.pyi``, these names are *not* re-exported from the top level —
 they exist only under ``hotcoco.metrics`` — so the real signatures live here.
+
+Float and bool inputs accept lists or numpy arrays. A ``float64`` / ``bool``
+ndarray takes a fast path in the bindings; anything else falls back to
+per-element extraction but still works.
 """
 
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, TypeAlias
 
 import numpy as np
 import numpy.typing as npt
 
+_Floats: TypeAlias = Sequence[float] | npt.NDArray[Any]
+_Bools: TypeAlias = Sequence[bool] | npt.NDArray[Any]
+
 def average_precision(
-    scores: Sequence[float],
-    matched: Sequence[bool],
-    num_gt: int,
-    ignored: Optional[Sequence[bool]] = None,
-    rec_thrs: Optional[Sequence[float]] = None,
+    scores: _Floats, matched: _Bools, num_gt: int, ignored: Optional[_Bools] = None, rec_thrs: Optional[_Floats] = None
 ) -> float: ...
 def precision_recall_curve(
-    tp_cum: Sequence[float], fp_cum: Sequence[float], num_gt: int, rec_thrs: Optional[Sequence[float]] = None
+    tp_cum: _Floats, fp_cum: _Floats, num_gt: int, rec_thrs: Optional[_Floats] = None
 ) -> tuple[float, list[tuple[int, float, int]]]: ...
-def calibration_curve(scores: Sequence[float], matched: Sequence[bool], n_bins: int = 10) -> list[dict[str, Any]]: ...
-def calibration_error(scores: Sequence[float], matched: Sequence[bool], n_bins: int = 10) -> tuple[float, float]: ...
+def calibration_curve(scores: _Floats, matched: _Bools, n_bins: int = 10) -> list[dict[str, Any]]: ...
+def calibration_error(scores: _Floats, matched: _Bools, n_bins: int = 10) -> tuple[float, float]: ...
 def confusion_matrix(
     gt: Sequence[Optional[int]], dt: Sequence[Optional[int]], num_classes: int
 ) -> npt.NDArray[np.uint64]: ...

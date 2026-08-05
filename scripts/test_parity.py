@@ -11,107 +11,15 @@ Usage:
     just test
 """
 
-import contextlib
-import json
-import os
-import sys
-import tempfile
 import warnings
 
 import pytest
-from helpers import COCO_KEYPOINT_NAMES, COCO_SKELETON, suppress_stdout
+from helpers import COCO_KEYPOINT_NAMES, COCO_SKELETON, assert_metrics_match, run_both, suppress_output, written_json
 from hotcoco import COCO, COCOeval, Hierarchy
-from hotcoco import COCO as RsCOCO
-from hotcoco import COCOeval as RsCOCOeval
-from pycocotools.coco import COCO as PyCOCO
-from pycocotools.cocoeval import COCOeval as PyCOCOeval
-
-TOLERANCE = 1e-10
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-@contextlib.contextmanager
-def _written(gt_dataset, dt_results):
-    """Write a GT/DT pair to temp files and yield their paths."""
-    gt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    dt_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    try:
-        json.dump(gt_dataset, gt_file)
-        gt_file.close()
-        json.dump(dt_results, dt_file)
-        dt_file.close()
-        with suppress_stdout():
-            yield gt_file.name, dt_file.name
-    finally:
-        os.unlink(gt_file.name)
-        os.unlink(dt_file.name)
-
-
-def run_both(gt_dataset, dt_results, iou_type):
-    """Run evaluation through both pycocotools and hotcoco, return stats."""
-    with _written(gt_dataset, dt_results) as (gt_path, dt_path):
-        py_gt = PyCOCO(gt_path)
-        py_dt = py_gt.loadRes(dt_path)
-        py_ev = PyCOCOeval(py_gt, py_dt, iou_type)
-        py_ev.evaluate()
-        py_ev.accumulate()
-        py_ev.summarize()
-        py_stats = py_ev.stats.tolist()
-
-        rs_gt = RsCOCO(gt_path)
-        rs_dt = rs_gt.load_res(dt_path)
-        rs_ev = RsCOCOeval(rs_gt, rs_dt, iou_type)
-        rs_ev.evaluate()
-        rs_ev.accumulate()
-        rs_ev.summarize()
-        rs_stats = rs_ev.stats
-
-    return py_stats, rs_stats
-
-
-def _metric_names_for(iou_type):
-    """Get canonical metric names from the Rust evaluator for a given iou_type."""
-    empty = RsCOCOeval(COCO(), COCO(), iou_type)
-    return empty.metric_keys()
-
-
-def assert_metrics_match(py_stats, rs_stats, iou_type, min_numeric=0):
-    """Assert all metrics match within tolerance.
-
-    Returns the number of metrics compared numerically — i.e. excluding those
-    where both sides are the -1.0 "not computed for this configuration" sentinel.
-    Agreeing that a metric is undefined is a real assertion (a hotcoco value of
-    0.5 against pycocotools' -1.0 fails here), but it exercises no arithmetic, so
-    a test whose every metric is a sentinel has verified very little. Pass
-    ``min_numeric`` to require that a test actually reached the numeric paths.
-    """
-    metric_names = _metric_names_for(iou_type)
-    expected_len = len(metric_names)
-    assert len(py_stats) == expected_len, f"pycocotools returned {len(py_stats)}, expected {expected_len}"
-    assert len(rs_stats) == expected_len, f"hotcoco returned {len(rs_stats)}, expected {expected_len}"
-
-    mismatches = []
-    numeric = 0
-    for i in range(expected_len):
-        py_val, rs_val = py_stats[i], rs_stats[i]
-        if py_val == -1.0 and rs_val == -1.0:
-            continue
-        numeric += 1
-        diff = abs(py_val - rs_val)
-        if diff > TOLERANCE:
-            mismatches.append(f"  [{i}] {metric_names[i]}: py={py_val:.15f} rs={rs_val:.15f} diff={diff:.2e}")
-
-    if mismatches:
-        raise AssertionError(f"\n{iou_type} metric mismatch (tol={TOLERANCE}):\n" + "\n".join(mismatches))
-
-    assert numeric >= min_numeric, (
-        f"{iou_type}: only {numeric} of {expected_len} metrics were compared numerically "
-        f"(the rest were -1.0 on both sides); this test asked for at least {min_numeric}"
-    )
-    return numeric
 
 
 def _make_minimal_gt(iou_type, images=None, categories=None, annotations=None):
@@ -164,17 +72,6 @@ def _make_bbox_det(img_id=1, cat_id=1, bbox=None, score=0.9):
 # ---------------------------------------------------------------------------
 
 
-def _make_coco(dataset: dict) -> COCO:
-    """Write dataset to a temp file and load as COCO."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(dataset, f)
-        path = f.name
-    try:
-        return COCO(path)
-    finally:
-        os.unlink(path)
-
-
 def _img(id: int = 1) -> dict:
     return {"id": id, "file_name": f"img{id}.jpg", "height": 640, "width": 640}
 
@@ -219,7 +116,7 @@ def test_empty_gt():
     for iou_type in ["bbox", "segm"]:
         gt = _make_minimal_gt(iou_type)
         dts = [_make_bbox_det(score=0.5)]
-        py_stats, rs_stats = run_both(gt, dts, iou_type)
+        py_stats, rs_stats, _ = run_both(gt, dts, iou_type)
         assert_metrics_match(py_stats, rs_stats, iou_type)
         assert all(s == -1.0 for s in rs_stats[:6]), f"hotcoco: expected -1.0 AP metrics, got {rs_stats[:6]}"
         assert all(s == -1.0 for s in py_stats[:6]), f"pycocotools: expected -1.0 AP metrics, got {py_stats[:6]}"
@@ -233,7 +130,7 @@ def test_all_crowd():
     ]
     gt = _make_minimal_gt("bbox", annotations=anns)
     dts = [_make_bbox_det(bbox=[10, 10, 100, 100], score=0.9), _make_bbox_det(bbox=[200, 200, 50, 50], score=0.5)]
-    py_stats, rs_stats = run_both(gt, dts, "bbox")
+    py_stats, rs_stats, _ = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
     # Crowd GTs are ignored *and* rematchable: the detections they absorb are
     # neither TPs nor FPs, and no non-crowd GT remains to measure recall against.
@@ -248,7 +145,7 @@ def test_identical_boxes():
     anns = [_make_bbox_ann(i + 1, bbox=bbox) for i in range(3)]
     gt = _make_minimal_gt("bbox", annotations=anns)
     dts = [_make_bbox_det(bbox=bbox, score=round(0.3 + i * 0.3, 1)) for i in range(3)]
-    py_stats, rs_stats = run_both(gt, dts, "bbox")
+    py_stats, rs_stats, _ = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
 
 
@@ -263,7 +160,7 @@ def test_area_at_boundaries():
         _make_bbox_det(bbox=[10.0, 10.0, 32.0, 32.0], score=0.8),
         _make_bbox_det(bbox=[100.0, 100.0, 96.0, 96.0], score=0.7),
     ]
-    py_stats, rs_stats = run_both(gt, dts, "bbox")
+    py_stats, rs_stats, _ = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
 
 
@@ -272,7 +169,7 @@ def test_single_image_single_cat():
     anns = [_make_bbox_ann(1, bbox=[100.0, 100.0, 50.0, 50.0])]
     gt = _make_minimal_gt("bbox", annotations=anns)
     dts = [_make_bbox_det(bbox=[100.0, 100.0, 50.0, 50.0], score=1.0)]
-    py_stats, rs_stats = run_both(gt, dts, "bbox")
+    py_stats, rs_stats, _ = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
 
 
@@ -289,7 +186,7 @@ def test_zero_area_boxes():
         _make_bbox_det(bbox=[50.0, 50.0, 50.0, 0.0], score=0.8),
         _make_bbox_det(bbox=[100.0, 100.0, 80.0, 80.0], score=0.7),
     ]
-    py_stats, rs_stats = run_both(gt, dts, "bbox")
+    py_stats, rs_stats, _ = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
 
 
@@ -298,7 +195,7 @@ def test_many_detections_few_gt():
     anns = [_make_bbox_ann(1, bbox=[100.0, 100.0, 50.0, 50.0])]
     gt = _make_minimal_gt("bbox", annotations=anns)
     dts = [_make_bbox_det(bbox=[100.0 + i * 2, 100.0, 50.0, 50.0], score=round(1.0 - i * 0.005, 4)) for i in range(200)]
-    py_stats, rs_stats = run_both(gt, dts, "bbox")
+    py_stats, rs_stats, _ = run_both(gt, dts, "bbox")
     assert_metrics_match(py_stats, rs_stats, "bbox")
 
 
@@ -333,7 +230,7 @@ def test_kpt_no_visible():
     ]
     gt = _make_minimal_gt("keypoints", annotations=anns)
     dts = [{"image_id": 1, "category_id": 1, "bbox": [50.0, 50.0, 200.0, 200.0], "score": 0.9, "keypoints": kpts_some}]
-    py_stats, rs_stats = run_both(gt, dts, "keypoints")
+    py_stats, rs_stats, _ = run_both(gt, dts, "keypoints")
     assert_metrics_match(py_stats, rs_stats, "keypoints")
 
 
@@ -364,7 +261,7 @@ def test_segm_polygon_rasterization():
         _make_bbox_det(bbox=[10.0, 10.0, 100.0, 100.0], score=0.95),
         _make_bbox_det(bbox=[200.0, 200.0, 50.0, 50.0], score=0.8),
     ]
-    py_stats, rs_stats = run_both(gt, dts, "segm")
+    py_stats, rs_stats, _ = run_both(gt, dts, "segm")
     assert_metrics_match(py_stats, rs_stats, "segm")
 
 
@@ -377,14 +274,14 @@ def test_basic_hierarchy():
     """Dog detection on Poodle GT: correct at Dog level, wrong at Poodle."""
     hierarchy = Hierarchy.from_parent_map({1: 2, 2: 3})
 
-    gt = _make_coco(
+    gt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000)],  # Poodle
             "categories": [_cat(1, "poodle", "dog"), _cat(2, "dog", "animal"), _cat(3, "animal")],
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 2, [10, 10, 100, 100], 10000, score=0.9)],  # Dog
@@ -412,7 +309,7 @@ def test_group_of_scores_one_tp_and_absorbs_the_rest():
     against the group box, so the group-of path never executed -- it passed on VOC
     interpolation. Both halves are fixed here.
     """
-    gt = _make_coco(
+    gt = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -422,7 +319,7 @@ def test_group_of_scores_one_tp_and_absorbs_the_rest():
             "categories": [_cat(1, "person")],
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -456,7 +353,7 @@ def test_group_of_matches_on_ioa_not_iou():
     so a regression lands its false positive *before* full recall. Reverse the
     scores and AP reads 1.0 either way, proving nothing.
     """
-    gt = _make_coco(
+    gt = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -466,7 +363,7 @@ def test_group_of_matches_on_ioa_not_iou():
             "categories": [_cat(1, "person")],
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -490,7 +387,7 @@ def test_undetected_group_of_is_a_miss():
     This previously asserted the opposite, which is the Open Images *V2* metric
     (TF `group_of_weight=0.0`), not the Challenge metric hotcoco targets.
     """
-    gt = _make_coco(
+    gt = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -500,7 +397,7 @@ def test_undetected_group_of_is_a_miss():
             "categories": [_cat(1, "person")],
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -519,14 +416,14 @@ def test_pre_expanded_idempotent():
     """Pre-expanded GTs should produce same results as unexpanded."""
     hierarchy = Hierarchy.from_parent_map({1: 2})
 
-    gt_unexpanded = _make_coco(
+    gt_unexpanded = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000)],
             "categories": [_cat(1, "dog", "animal"), _cat(2, "animal")],
         }
     )
-    gt_expanded = _make_coco(
+    gt_expanded = COCO(
         {
             "images": [_img()],
             "annotations": [
@@ -536,7 +433,7 @@ def test_pre_expanded_idempotent():
             "categories": [_cat(1, "dog", "animal"), _cat(2, "animal")],
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000, score=0.9)],
@@ -547,7 +444,7 @@ def test_pre_expanded_idempotent():
     ev1 = COCOeval(gt_unexpanded, dt, "bbox", oid_style=True, hierarchy=hierarchy)
     ev1.run()
 
-    dt2 = _make_coco(
+    dt2 = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000, score=0.9)],
@@ -566,14 +463,14 @@ def test_dt_expansion():
     """expand_dt=True: Dog prediction gets credit at Animal level."""
     hierarchy = Hierarchy.from_parent_map({1: 2})
 
-    gt = _make_coco(
+    gt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 2, [10, 10, 100, 100], 10000)],  # Animal GT
             "categories": [_cat(1, "dog", "animal"), _cat(2, "animal")],
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000, score=0.9)],  # Dog
@@ -585,14 +482,14 @@ def test_dt_expansion():
     ev1.run()
     ap_no_expand = ev1.stats[0]
 
-    gt2 = _make_coco(
+    gt2 = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 2, [10, 10, 100, 100], 10000)],
             "categories": [_cat(1, "dog", "animal"), _cat(2, "animal")],
         }
     )
-    dt2 = _make_coco(
+    dt2 = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000, score=0.9)],
@@ -612,14 +509,14 @@ def test_dt_expansion():
 
 def test_virtual_nodes():
     """Supercategory not in categories list: should still work via virtual node."""
-    gt = _make_coco(
+    gt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000)],
             "categories": [_cat(1, "chair", "furniture")],  # "furniture" → virtual node
         }
     )
-    dt = _make_coco(
+    dt = COCO(
         {
             "images": [_img()],
             "annotations": [_ann(1, 1, 1, [10, 10, 100, 100], 10000, score=0.9)],
@@ -638,11 +535,6 @@ def test_virtual_nodes():
 
 
 # ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # EvalReport
 # ---------------------------------------------------------------------------
 
@@ -652,10 +544,10 @@ def _eval_for_report(iou_type="bbox"):
         iou_type, annotations=[_make_bbox_ann(1, bbox=[10, 10, 50, 50]), _make_bbox_ann(2, bbox=[100, 100, 40, 40])]
     )
     dt = [_make_bbox_det(bbox=[10, 10, 50, 50], score=0.9), _make_bbox_det(bbox=[100, 100, 40, 40], score=0.8)]
-    coco_gt = _make_coco(gt)
+    coco_gt = COCO(gt)
     coco_dt = coco_gt.load_res(dt)
-    ev = RsCOCOeval(coco_gt, coco_dt, iou_type)
-    with suppress_stdout():
+    ev = COCOeval(coco_gt, coco_dt, iou_type)
+    with suppress_output(stderr=False):
         ev.run()
     return ev
 
@@ -696,7 +588,7 @@ def test_provenance_survives_into_the_render_layer():
     # would call this leaderboard-comparable.
     ev = _eval_for_report()
     ev.params.recThrs = [i / 10 for i in range(11)]
-    with suppress_stdout(), warnings.catch_warnings():
+    with suppress_output(stderr=False), warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ev.run()
 
@@ -737,10 +629,6 @@ def test_report_curves_are_plottable():
         assert len(curve) == len(rec_thrs), name
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v", "-x", "--tb=short"]))
-
-
 # ---------------------------------------------------------------------------
 # Drop-in behaviours that are not about metric values
 # ---------------------------------------------------------------------------
@@ -769,7 +657,7 @@ def test_params_in_place_mutation_takes_effect():
         _make_bbox_det(img_id=2, bbox=[500, 400, 20, 20], score=0.9),
     ]
 
-    with _written(gt, dts) as (gt_path, dt_path):
+    with written_json(gt, dts, quiet=True) as (gt_path, dt_path):
         coco_gt = COCO(gt_path)
         coco_dt = coco_gt.load_res(dt_path)
 
@@ -804,7 +692,7 @@ def test_non_reference_params_warn_and_downgrade_provenance():
     gt = _make_minimal_gt("bbox", annotations=[_make_bbox_ann(1, bbox=[10, 10, 50, 50])])
     dts = [_make_bbox_det(bbox=[10, 10, 50, 50], score=0.9)]
 
-    with _written(gt, dts) as (gt_path, dt_path):
+    with written_json(gt, dts, quiet=True) as (gt_path, dt_path):
         coco_gt = COCO(gt_path)
         coco_dt = coco_gt.load_res(dt_path)
 

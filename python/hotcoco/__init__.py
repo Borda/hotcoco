@@ -62,15 +62,19 @@ class COCO(_RustCOCO):
 
         dt_coco = self.load_res(dt) if isinstance(dt, str) else dt
 
-        # Build coco_eval when detections are provided
-        coco_eval = None
-        if dt_coco is not None:
-            if eval is not None:
-                coco_eval = eval
-            else:
-                ev = COCOeval(self, dt_coco, iou_type)
-                ev.evaluate()
-                coco_eval = ev
+        # A caller-supplied eval is used as given — building one only made sense
+        # when `dt` was also passed, so `browse(eval=ev)` (the documented form)
+        # used to fall through with no eval at all and render no dashboard.
+        coco_eval = eval
+        if coco_eval is None and dt_coco is not None:
+            coco_eval = COCOeval(self, dt_coco, iou_type)
+            coco_eval.evaluate()
+
+        # The overlay draws boxes from `dt_coco`, which an eval already carries;
+        # without this, `browse(eval=ev)` showed a dashboard over ground truth
+        # with no detections on the images.
+        if dt_coco is None and coco_eval is not None:
+            dt_coco = getattr(coco_eval, "coco_dt", None)
 
         # Load slices from JSON if path given
         resolved_slices = slices

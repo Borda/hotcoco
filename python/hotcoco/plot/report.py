@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .core import _import_mpl, _mask_invalid_prec, _resolve_font_family
+from .core import _f1_peak, _import_mpl, _report_curves, _resolve_font_family
 from .data import PlotData
 from .theme import CHROME, SERIES_COLORS
 
@@ -49,13 +49,8 @@ def _metric_math(key: str) -> str:
     return key
 
 
-_SIZE_LABEL = {"s": "small", "m": "medium", "l": "large"}
-_FREQ_DESC = {"r": "rare", "c": "common", "f": "frequent"}
-
-
-def _area_desc(size_key: str, area_ranges: dict) -> str:
+def _area_desc(label: str, area_ranges: dict) -> str:
     """Human-readable area range description derived from area_ranges bounds."""
-    label = _SIZE_LABEL.get(size_key.lower(), size_key)
     if label not in area_ranges:
         return label
     lo, hi = area_ranges[label]
@@ -68,51 +63,71 @@ def _area_desc(size_key: str, area_ranges: dict) -> str:
     return f"area > {lo_px}\u00b2"
 
 
-def _metric_desc(key: str, data: PlotData) -> str:
-    """Generate a human-readable description for a metric key."""
+def _metric_desc(defn: dict, data: PlotData) -> str:
+    """Describe what a metric measures, from its definition.
+
+    Every axis — IoU threshold, area range, detection cap, frequency bucket —
+    is read from the catalog entry Rust computed the number from, never
+    recovered from the metric's name. Parsing the name reported ``AR10`` as
+    "IoU 0.10" on any run whose ``iou_thrs`` contained 0.10, and had no answer
+    at all for a metric a future eval mode adds.
+    """
+    if defn.get("freq_group"):
+        return defn["freq_group"]
+
+    area = defn.get("area", "all")
+    if area != "all":
+        return _area_desc(area, data.area_ranges)
+
+    iou_thr = defn.get("iou_thr")
+    if iou_thr is not None:
+        return f"IoU {iou_thr:.2f}"
+
+    # A digit in the name says this recall row is *labelled* by its detection
+    # cap — AR1, AR10, AR100, AR@300 — while a bare "AR" (keypoints' only
+    # recall row) is the IoU sweep, like "AP". The cap itself comes from the
+    # definition either way; the name is only asked which axis it names.
+    n = defn.get("max_det")
+    if n and not defn.get("ap") and any(ch.isdigit() for ch in defn.get("name", "")):
+        return f"max {n} det{'s' if n > 1 else ''}"
+
     iou_thrs = data.iou_thresholds
-    iou_all = f"IoU {iou_thrs[0]:.2f}:{iou_thrs[-1]:.2f}" if len(iou_thrs) > 1 else f"IoU {iou_thrs[0]:.2f}"
-
-    # @N pattern
-    m = re.match(r"^AR([sml])?@(\d+)$", key, re.IGNORECASE)
-    if m:
-        size, n = m.group(1), int(m.group(2))
-        return _area_desc(size, data.area_ranges) if size else f"max {n} dets"
-
-    m = re.match(r"^(AP|AR)(\d+|[a-z])?$", key, re.IGNORECASE)
-    if not m:
-        return key
-    _, suffix = m.group(1), m.group(2)
-    if not suffix:
-        return iou_all
-    if suffix.isdigit():
-        n = int(suffix)
-        iou_val = n / 100.0
-        if iou_val in iou_thrs:
-            return f"IoU {iou_val:.2f}"
-        if n in data.max_dets:
-            return f"max {n} det{'s' if n > 1 else ''}"
-        return f"IoU {iou_val:.2f}"
-    if suffix.lower() in _SIZE_LABEL:
-        return _area_desc(suffix, data.area_ranges)
-    return _FREQ_DESC.get(suffix.lower(), suffix)
+    return f"IoU {iou_thrs[0]:.2f}:{iou_thrs[-1]:.2f}" if len(iou_thrs) > 1 else f"IoU {iou_thrs[0]:.2f}"
 
 
-def _build_metric_rows(data: PlotData) -> tuple[list, list, str]:
+def _primary_ar_key(defs: list[dict]) -> str | None:
+    """The headline recall metric: all areas, whole IoU sweep, full detection cap.
+
+    ``AR100`` on COCO, ``AR@300`` on LVIS, ``AR`` on keypoints. Taking the first
+    recall row instead put ``AR1`` — recall allowing one detection per image —
+    on the KPI tile, and the ``"AR100"`` literal it fell back to is not a metric
+    either of the other two modes reports.
+    """
+    ar = [d for d in defs if not d.get("ap") and not d.get("freq_group")]
+    if not ar:
+        return None
+    cap = max(d.get("max_det", 0) for d in ar)
+    for d in ar:
+        if d.get("area", "all") == "all" and d.get("iou_thr") is None and d.get("max_det") == cap:
+            return d["name"]
+    return ar[0]["name"]
+
+
+def _build_metric_rows(data: PlotData) -> tuple[list, list, str | None]:
     """Derive (AP_ROWS, AR_ROWS, ar_kpi_key) from PlotData.
 
     Rows are (display_key, description, metric_key) tuples. Only metrics
     present in data.metrics are included, in canonical display order from Rust.
+    Precision and recall are split on the catalog's own ``ap`` flag rather than
+    on the name starting with "AP".
     """
     present = set(data.metrics)
-    ordered = [k for k in data.metric_key_order if k in present]
+    defs = [d for d in data.metric_defs if d["name"] in present]
 
-    ap_rows = [(_k, _metric_desc(_k, data), _k) for _k in ordered if _k.startswith("AP")]
-    ar_rows = [(_k, _metric_desc(_k, data), _k) for _k in ordered if not _k.startswith("AP")]
+    ap_rows = [(d["name"], _metric_desc(d, data), d["name"]) for d in defs if d.get("ap")]
+    ar_rows = [(d["name"], _metric_desc(d, data), d["name"]) for d in defs if not d.get("ap")]
 
-    # Determine the primary AR metric key for the KPI header
-    ar_kpi_key = ar_rows[0][0] if ar_rows else "AR100"
-    return ap_rows, ar_rows, ar_kpi_key
+    return ap_rows, ar_rows, _primary_ar_key(defs)
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +250,7 @@ def _draw_metrics_table(ax, rows, metrics) -> None:
             cell.set_linewidth(0.35)
 
 
-def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, *, is_oid=False) -> None:
+def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, f1_peak_pt, *, is_oid=False) -> None:
     import numpy as np
     from matplotlib.lines import Line2D as _L2D
 
@@ -261,14 +276,11 @@ def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, *, is_oi
         ax.plot(recall_pts, pr75, color=_RC["pr_75"], lw=1.2, zorder=3)
         ax.plot(recall_pts, pr_mean, color=_RC["pr_mean"], lw=0.9, linestyle="--", zorder=3)
 
-    valid = ~np.isnan(pr50)
-    r_v, p_v = recall_pts[valid], pr50[valid]
-    if len(r_v):
-        f1 = 2 * p_v * r_v / np.maximum(p_v + r_v, 1e-8)
-        best = int(np.argmax(f1))
+    if f1_peak_pt is not None:
+        best, f1_val = f1_peak_pt
         ax.plot(
-            r_v[best],
-            p_v[best],
+            recall_pts[best],
+            pr50[best],
             "o",
             color=_RC["pr_50"],
             markersize=3.5,
@@ -276,10 +288,10 @@ def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, *, is_oi
             markeredgewidth=1.2,
             zorder=5,
         )
-        near_right = r_v[best] > 0.95
+        near_right = recall_pts[best] > 0.95
         ax.annotate(
-            f"F1 {f1[best]:.3f}",
-            (r_v[best], p_v[best]),
+            f"F1 {f1_val:.3f}",
+            (recall_pts[best], pr50[best]),
             xytext=(-5, 5) if near_right else (5, 5),
             textcoords="offset points",
             fontsize=5.5,
@@ -444,8 +456,8 @@ def _draw_metrics_block(
     pr50,
     pr75,
     pr_mean,
-    f1_peak,
-    ar_kpi_key="AR100",
+    f1_peak_pt,
+    ar_kpi_key=None,
     *,
     is_oid=False,
     block_h=0.0,
@@ -483,17 +495,19 @@ def _draw_metrics_block(
     pos = ax_pr_cur.get_position()
     ax_pr_cur.set_position([pos.x0 + 0.025, pos.y0 + 0.012, pos.width - 0.025, pos.height - 0.012])
     _draw_table_caption(ax_pr_cap, "Precision\u2013Recall")
-    _draw_report_pr_curve(ax_pr_cur, recall_pts, pr50, pr75, pr_mean, metrics, is_oid=is_oid)
+    _draw_report_pr_curve(ax_pr_cur, recall_pts, pr50, pr75, pr_mean, metrics, f1_peak_pt, is_oid=is_oid)
 
+    f1_peak = f1_peak_pt[1] if f1_peak_pt is not None else 0.0
     if is_oid:
         kpi_data = [(f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_50"]), (f"{f1_peak:.3f}", "F1", _RC["text"])]
     else:
         kpi_data = [
             (f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_mean"]),
             (f"{metrics.get('AP50', 0):.3f}", "AP50", _RC["pr_50"]),
-            (f"{metrics.get(ar_kpi_key, 0):.3f}", ar_kpi_key, _RC["pr_75"]),
-            (f"{f1_peak:.3f}", "F1", _RC["text"]),
         ]
+        if ar_kpi_key:
+            kpi_data.append((f"{metrics.get(ar_kpi_key, 0):.3f}", ar_kpi_key, _RC["pr_75"]))
+        kpi_data.append((f"{f1_peak:.3f}", "F1", _RC["text"]))
     gs_kpi = gs_met[2].subgridspec(len(kpi_data), 1, hspace=0.15)
     for i, (val, lbl, vc) in enumerate(kpi_data):
         _kpi_tile(fig.add_subplot(gs_kpi[i]), val, lbl, vc)
@@ -614,16 +628,15 @@ def _draw_category_section(
         )
 
 
-def _draw_footer(fig, page_h: float) -> None:
-    import importlib.metadata
-
+def _draw_footer(fig, page_h: float, version: str) -> None:
     from matplotlib.lines import Line2D
 
-    try:
-        ver = importlib.metadata.version("hotcoco")
-        footer_text = f"hotcoco v{ver}  \u00b7  github.com/derekallman/hotcoco"
-    except Exception:
-        footer_text = "github.com/derekallman/hotcoco"
+    # The version comes from the extension that produced the numbers
+    # (CARGO_PKG_VERSION, carried on PlotData), not from importlib.metadata \u2014
+    # that reports the *installed distribution*, which is a different thing when
+    # a development build is on the path, and it was swallowing failures into a
+    # silently version-less footer.
+    footer_text = f"hotcoco v{version}  \u00b7  github.com/derekallman/hotcoco"
 
     lx = _MARGIN_H / _PAGE_W
     fy = _MARGIN_V * 0.45 / page_h
@@ -690,18 +703,19 @@ def report(
     metrics = data.metrics
     per_class = data.per_class or {}
 
-    a_idx = data.area_idx("all")
-    m_idx = data.max_det_idx(None)
+    # The slice this panel draws — categories averaged at area="all" and the
+    # full detection cap — is exactly what `report()["curves"]` exists to hand a
+    # renderer. Re-deriving it from the 5-D tensor here made a second place that
+    # had to agree with Rust about which slice is "the" one and what -1 means.
+    curves = coco_eval.report()["curves"]
+    recall_pts, curve_iou_thrs, all_prec = _report_curves(curves)
 
-    def _mprec(t):
-        return np.nanmean(_mask_invalid_prec(data.precision[t, :, :, a_idx, m_idx]), axis=1)
+    def _nearest_curve(target: float) -> int:
+        return min(range(len(curve_iou_thrs)), key=lambda i: abs(curve_iou_thrs[i] - target))
 
-    t50 = data.nearest_iou_idx(0.50)
-    t75 = data.nearest_iou_idx(0.75)
-    all_prec = np.array([_mprec(t) for t in range(len(data.iou_thresholds))])
     pr_mean = np.nanmean(all_prec, axis=0)
-    pr50 = all_prec[t50]
-    pr75 = all_prec[t75]
+    pr50 = all_prec[_nearest_curve(0.50)]
+    pr75 = all_prec[_nearest_curve(0.75)]
 
     try:
         n_images = len(coco_eval.coco_gt.get_img_ids())
@@ -731,12 +745,9 @@ def report(
 
     has_counts = bool(ann_counts)
 
-    valid = ~np.isnan(pr50)
-    if valid.any():
-        r_v, p_v = data.recall_pts[valid], pr50[valid]
-        f1_peak = float(np.max(2 * p_v * r_v / np.maximum(p_v + r_v, 1e-8)))
-    else:
-        f1_peak = 0.0
+    # Computed once here and handed down: the PR panel marks this exact point
+    # and the KPI tile prints its value, so they cannot disagree.
+    f1_peak_pt = _f1_peak(recall_pts, pr50)
 
     is_lvis = data.eval_mode == "lvis"
     is_kpts = data.iou_type == "keypoints"
@@ -812,11 +823,11 @@ def report(
                 AP_ROWS,
                 AR_ROWS,
                 metrics,
-                data.recall_pts,
+                recall_pts,
                 pr50,
                 pr75,
                 pr_mean,
-                f1_peak,
+                f1_peak_pt,
                 ar_kpi_key=ar_kpi_key,
                 is_oid=is_oid,
                 block_h=block_h,
@@ -833,7 +844,7 @@ def report(
                 img_counts,
                 virtual_cats=virtual_cats,
             )
-            _draw_footer(fig, page_h)
+            _draw_footer(fig, page_h, data.version)
 
         with PdfPages(str(save_path)) as pdf:
             pdf.savefig(fig)

@@ -3,7 +3,9 @@
 //! Three kernels, and nothing else: [`sim`] computes similarity between two sets,
 //! [`greedy`] resolves it into COCO's rank-ordered assignment, [`assign`] resolves
 //! it optimally via rectangular LSAP. Family drivers (detection at 1.0;
-//! panoptic/tracking/concepts later) compose them.
+//! panoptic/tracking/concepts later) compose them. The one non-kernel export is
+//! [`greedy::ThreshMatrix`], the container shape of the greedy kernel's
+//! per-threshold output.
 //!
 //! Kernels here produce matches and similarities; the functions in
 //! [`metrics`](crate::metrics) turn those into numbers. Nothing here scores;

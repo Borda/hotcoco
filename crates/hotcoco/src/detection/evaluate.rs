@@ -7,23 +7,16 @@ use super::{COCOeval, EvalMode};
 
 impl COCOeval {
     /// Populate `params.img_ids` and `params.cat_ids` from the GT dataset if not already set.
+    ///
+    /// The writing half of [`COCOeval::resolved_ids`], which owns the derivation:
+    /// "which ids does this dataset cover" is one question, and `confusion_matrix`
+    /// asks it too without being allowed to mutate. Answering it separately here
+    /// meant two places to keep agreeing about it.
     fn resolve_params(&mut self) {
-        if self.params.img_ids.is_empty() {
-            let mut ids: Vec<u64> = self.coco_gt.dataset.images.iter().map(|i| i.id).collect();
-            ids.sort_unstable();
-            self.params.img_ids = ids;
-        }
-        if self.params.cat_ids.is_empty() {
-            let mut ids: Vec<u64> = self
-                .coco_gt
-                .dataset
-                .categories
-                .iter()
-                .map(|c| c.id)
-                .collect();
-            ids.sort_unstable();
-            self.params.cat_ids = ids;
-        }
+        let (img_ids, cat_ids) = self.resolved_ids();
+        let (img_ids, cat_ids) = (img_ids.into_owned(), cat_ids.into_owned());
+        self.params.img_ids = img_ids;
+        self.params.cat_ids = cat_ids;
     }
 
     /// Build the sorted list of (img_id, cat_id) pairs to evaluate.
@@ -152,6 +145,14 @@ impl COCOeval {
 
         let sparse_pairs = self.collect_sparse_pairs(&cat_ids, &neg_cats);
 
+        // Segm only: convert every in-scope mask to RLE once, up front —
+        // pycocotools' `_prepare` step. The per-cell IoU computation below and
+        // the cross-category matrices in `confusion_matrix`/`tide` all read
+        // this instead of re-rasterizing polygons per call site.
+        use crate::primitives::sim::SimKind;
+        self.segm_rles = (SimKind::from(self.params.iou_type) == SimKind::Mask)
+            .then(|| super::iou::SegmRles::prepare(&self.coco_gt, &self.coco_dt, &self.params));
+
         // Compute IoUs only for pairs where both GT and DT are non-empty.
         // Pairs with only GT or only DT produce empty IoU matrices — skip storing them.
         let iou_results: Vec<((u64, u64), IouMatrix)> = sparse_pairs
@@ -164,6 +165,7 @@ impl COCOeval {
                     img_id,
                     cat_id,
                     self.eval_mode,
+                    self.segm_rles.as_ref(),
                 );
                 if iou_matrix.is_empty() {
                     None
@@ -173,11 +175,9 @@ impl COCOeval {
             })
             .collect();
 
-        self.ious.clear();
-        self.ious.reserve(iou_results.len());
-        for (key, val) in iou_results {
-            self.ious.insert(key, val);
-        }
+        // Replaces the cache wholesale: `collect` sizes the map from the vec's
+        // exact length, where clear/reserve/insert kept the old table's capacity.
+        self.ious = iou_results.into_iter().collect();
 
         // Evaluate each (image, category, area_range) combination in parallel.
         // sparse_pairs × area_ranges replaces the old cat_ids × area_ranges × img_ids product.
@@ -185,11 +185,7 @@ impl COCOeval {
             !self.params.max_dets.is_empty(),
             "params.max_dets must not be empty"
         );
-        let max_det = *self
-            .params
-            .max_dets
-            .last()
-            .expect("asserted non-empty above");
+        let max_det = self.params.max_det();
 
         // pycocotools searches from `min(t, 1-1e-10)`, not from `t`. Inert below
         // 1.0, so the default 0.50:0.95 sweep is untouched; at t == 1.0 it admits
@@ -212,31 +208,55 @@ impl COCOeval {
             match_floors: &match_floors,
         };
 
-        // Tuple: (cat_id, area_rng, img_id, not_exhaustive_cat)
-        let mut eval_tuples: Vec<(u64, [f64; 2], u64, bool)> =
-            Vec::with_capacity(sparse_pairs.len() * self.params.area_ranges.len());
-        for &(img_id, cat_id) in &sparse_pairs {
-            let not_exhaustive_cat = self.eval_mode == EvalMode::Lvis
-                && not_exhaustive
-                    .get(&img_id)
-                    .is_some_and(|s| s.contains(&cat_id));
-            for ar in &self.params.area_ranges {
-                eval_tuples.push((cat_id, ar.range, img_id, not_exhaustive_cat));
-            }
-        }
+        // Fan out over pairs, not over (pair, area range) cells: everything the
+        // area ranges share — annotation lookup, the score sort, the IoU-matrix
+        // lookup — is resolved once per pair by `gather_pair`, and each range
+        // then only recomputes the flags that actually depend on it.
+        //
+        // Cells are written in place, one `area_ranges.len()` chunk per pair.
+        // Collecting a small `Vec` per pair and flattening it produces the same
+        // layout and is the obvious spelling, but `EvalImg` is ~360 bytes and
+        // there are 2.3M of them on Objects365, so the flatten is a
+        // single-threaded move of ~800 MB — enough to make the whole restructure
+        // a net loss (measured 2.0 s against 1.5 s for the per-cell form).
+        //
+        // Every pair gets its full chunk, including pairs that gather to nothing,
+        // so `eval_imgs` keeps exactly the length, order and `None` positions it
+        // had when the driver walked a pre-built (pair × range) tuple list.
+        // `accumulate`'s grouping walk and the public `eval_imgs()` accessor both
+        // read that order.
+        let is_lvis = self.eval_mode == EvalMode::Lvis;
+        let area_ranges = &ctx.params.area_ranges;
 
-        self.eval_imgs = eval_tuples
-            .par_iter()
-            .map(|&(cat_id, area_rng, img_id, not_exhaustive_cat)| {
-                super::matching::evaluate_img(
-                    &ctx,
-                    img_id,
-                    cat_id,
-                    area_rng,
-                    max_det,
-                    not_exhaustive_cat,
-                )
-            })
+        // `par_iter().map(..).collect()`, not `resize_with`: rayon's indexed
+        // collect writes straight into the vector's uninitialized capacity across
+        // all threads, while a sequential fill single-threads the first touch of
+        // every page in that ~800 MB buffer. Measured at 270 ms on Objects365 —
+        // more than the fan-out below saves.
+        let mut eval_imgs: Vec<Option<super::matching::EvalImg>> = (0..sparse_pairs.len()
+            * area_ranges.len())
+            .into_par_iter()
+            .map(|_| None)
             .collect();
+
+        eval_imgs
+            .par_chunks_mut(area_ranges.len())
+            .zip(sparse_pairs.par_iter())
+            .for_each(|(chunk, &(img_id, cat_id))| {
+                let Some(pair) = super::matching::gather_pair(&ctx, img_id, cat_id, max_det) else {
+                    return;
+                };
+                let not_exhaustive_cat = is_lvis
+                    && not_exhaustive
+                        .get(&img_id)
+                        .is_some_and(|s| s.contains(&cat_id));
+
+                for (slot, ar) in chunk.iter_mut().zip(area_ranges) {
+                    *slot =
+                        super::matching::evaluate_cell(&ctx, &pair, ar.range, not_exhaustive_cat);
+                }
+            });
+
+        self.eval_imgs = eval_imgs;
     }
 }

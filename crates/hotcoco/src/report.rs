@@ -59,15 +59,6 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    /// A short label for renderers to display beside the numbers.
-    pub fn label(self) -> &'static str {
-        match self {
-            Provenance::ParityVerified => "parity-verified",
-            Provenance::Extension => "extension",
-            Provenance::UserComposed => "user-composed",
-        }
-    }
-
     /// Whether these numbers may be presented as benchmark-standard.
     pub fn is_benchmark_standard(self) -> bool {
         matches!(self, Provenance::ParityVerified)

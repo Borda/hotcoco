@@ -36,14 +36,11 @@ import json
 import sys
 from pathlib import Path
 
+from gen_oid_fixtures import MIN_DISCRIMINATING
 from helpers import suppress_output
 from hotcoco import COCO, COCOeval
 
 FIXTURES = Path(__file__).parent / "fixtures" / "oid_tf_expected.json"
-
-# Must match `gen_oid_fixtures.MIN_DISCRIMINATING`. Asserted on both sides so a
-# regenerated corpus cannot quietly weaken this check.
-MIN_DISCRIMINATING = 0.3
 
 
 def hotcoco_aps(case) -> tuple[float, dict[str, float]]:
@@ -135,9 +132,10 @@ def main() -> int:
         elif args.verbose:
             print(f"  {case['name']:36s} mAP={got_map:.6f}  OK")
 
-    # A corpus that is all 0.0/1.0 agrees with a stub implementation. The generator
-    # enforces this floor too; asserting it here as well means a regenerated corpus
-    # cannot quietly weaken the consumer.
+    # A corpus that is all 0.0/1.0 agrees with a stub implementation. The floor is
+    # `gen_oid_fixtures.MIN_DISCRIMINATING`, imported rather than restated:
+    # asserting it here as well means a regenerated corpus cannot quietly weaken
+    # the consumer, and there is one number to change if the bar moves.
     discriminating = sum(1 for c in cases if 0.0 < c["expected"]["mAP"] < 1.0)
     print(f"\n  {discriminating}/{len(cases)} cases score strictly between 0 and 1")
     if discriminating < len(cases) * MIN_DISCRIMINATING:

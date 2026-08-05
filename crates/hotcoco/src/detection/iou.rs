@@ -1,9 +1,79 @@
+use std::collections::HashMap;
+
+use rayon::prelude::*;
+
 use crate::coco::COCO;
 use crate::params::Params;
 use crate::primitives::sim::{self, SimKind};
 use crate::types::Rle;
 
 use super::{COCOeval, EvalMode};
+
+/// Every in-scope annotation's mask, converted to RLE once per `evaluate()`.
+///
+/// pycocotools converts in `_prepare`, before the IoU loop; converting inside
+/// the per-cell IoU computation instead put `fr_polys` — the 5×-upsampled
+/// polygon rasterizer — at ~48% of all samples in a val2017 segm profile, and
+/// re-paid it in every cross-category matrix `confusion_matrix` and `tide`
+/// build. Rebuilt on each `evaluate()` call, exactly like the `ious` cache, so
+/// it can never go stale relative to the datasets it was drawn from.
+///
+/// Annotations without a convertible mask (no segmentation *and* no bbox) are
+/// simply absent; readers fall back to [`COCO::ann_to_rle`].
+pub(super) struct SegmRles {
+    // Private on purpose, mirroring the `ious` cache discipline ("the
+    // visibility is the enforcement"): consumers get one RLE at a time via the
+    // `*_rle_or_convert` helpers and can never iterate or retain the map.
+    gt: HashMap<u64, Rle>,
+    dt: HashMap<u64, Rle>,
+}
+
+impl SegmRles {
+    /// The cache-miss policy, in one place: a hit clones the prepared RLE, a
+    /// miss — or no cache at all — converts on the spot. Correctness never
+    /// depends on what the cache happens to hold; a miss only costs speed.
+    pub(super) fn gt_rle_or_convert(cache: Option<&Self>, coco_gt: &COCO, id: u64) -> Option<Rle> {
+        if let Some(rle) = cache.and_then(|c| c.gt.get(&id)) {
+            return Some(rle.clone());
+        }
+        coco_gt.ann_to_rle(coco_gt.get_ann(id)?)
+    }
+
+    /// Detection twin of [`gt_rle_or_convert`](Self::gt_rle_or_convert).
+    pub(super) fn dt_rle_or_convert(cache: Option<&Self>, coco_dt: &COCO, id: u64) -> Option<Rle> {
+        if let Some(rle) = cache.and_then(|c| c.dt.get(&id)) {
+            return Some(rle.clone());
+        }
+        coco_dt.ann_to_rle(coco_dt.get_ann(id)?)
+    }
+
+    /// Convert every in-scope annotation, in parallel.
+    ///
+    /// Scope is delegated to [`COCO::get_ann_ids`] — the owner of "which
+    /// annotations do these params cover" — rather than a third spelling of
+    /// the img/cat filter, so a run filtered to a handful of images does not
+    /// rasterize the whole dataset and the filter cannot drift from the one
+    /// the evaluation itself uses.
+    pub(super) fn prepare(coco_gt: &COCO, coco_dt: &COCO, params: &Params) -> Self {
+        let cat_ids: &[u64] = if params.use_cats {
+            &params.cat_ids
+        } else {
+            &[]
+        };
+
+        let convert = |coco: &COCO| -> HashMap<u64, Rle> {
+            coco.get_ann_ids(&params.img_ids, cat_ids, None, None)
+                .into_par_iter()
+                .filter_map(|id| Some((id, coco.ann_to_rle(coco.get_ann(id)?)?)))
+                .collect()
+        };
+
+        SegmRles {
+            gt: convert(coco_gt),
+            dt: convert(coco_dt),
+        }
+    }
+}
 
 /// Whether this ground truth's similarity column uses intersection-over-area.
 ///
@@ -35,6 +105,7 @@ impl COCOeval {
         img_id: u64,
         cat_id: u64,
         eval_mode: EvalMode,
+        segm_rles: Option<&SegmRles>,
     ) -> Vec<Vec<f64>> {
         let gt_anns = Self::get_anns_static(coco_gt, params, img_id, cat_id);
         let dt_anns = Self::get_anns_static(coco_dt, params, img_id, cat_id);
@@ -48,9 +119,9 @@ impl COCOeval {
         // panoptic later) branches on the same four values. The helpers below do
         // marshaling only — reshaping annotations into the kernel's input types.
         match SimKind::from(params.iou_type) {
-            SimKind::Mask => {
-                Self::compute_segm_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
-            }
+            SimKind::Mask => Self::compute_segm_iou_static(
+                coco_gt, coco_dt, dt_anns, gt_anns, eval_mode, segm_rles,
+            ),
             SimKind::Bbox => {
                 Self::compute_bbox_iou_static(coco_gt, coco_dt, dt_anns, gt_anns, eval_mode)
             }
@@ -76,26 +147,27 @@ impl COCOeval {
     }
 
     /// Compute segmentation mask IoU by converting annotations to RLE and calling `sim::mask_iou`.
+    ///
+    /// RLEs come through [`SegmRles::dt_rle_or_convert`]/[`SegmRles::gt_rle_or_convert`],
+    /// which own the cache-or-convert policy.
     pub(super) fn compute_segm_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
         dt_ids: &[u64],
         gt_ids: &[u64],
         eval_mode: EvalMode,
+        segm_rles: Option<&SegmRles>,
     ) -> Vec<Vec<f64>> {
         let dt_rles: Vec<Rle> = dt_ids
             .iter()
-            .filter_map(|&id| {
-                let ann = coco_dt.get_ann(id)?;
-                coco_dt.ann_to_rle(ann)
-            })
+            .filter_map(|&id| SegmRles::dt_rle_or_convert(segm_rles, coco_dt, id))
             .collect();
         let (gt_rles, iscrowd): (Vec<Rle>, Vec<bool>) = gt_ids
             .iter()
             .filter_map(|&id| {
                 let ann = coco_gt.get_ann(id)?;
                 let crowd = uses_ioa(ann, eval_mode);
-                Some((coco_gt.ann_to_rle(ann)?, crowd))
+                Some((SegmRles::gt_rle_or_convert(segm_rles, coco_gt, id)?, crowd))
             })
             .unzip();
 

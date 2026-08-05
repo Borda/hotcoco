@@ -23,19 +23,19 @@
 
 ## Speed benchmarks
 
-**Hardware:** Apple M1 MacBook Air, 16 GB RAM
+**Hardware:** Apple M1 MacBook Air, 8 GB RAM
 **Dataset:** COCO val2017 — 5,000 images
 **Detections:** 36,781 synthetic (seed=42; AP scores are not meaningful)
-**Timing:** Wall clock time, single run
-**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 0.3.0
+**Timing:** Wall clock time — per-cell median of 3 runs at 1×, single run at 10×
+**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 0.5.0
 
 ### Results (1x detections)
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 9.46s | 2.45s (3.9×) | **0.41s (23.0×)** |
-| segm      | 9.16s | 4.36s (2.1×) | **0.49s (18.6×)** |
-| keypoints | 2.62s | 1.78s (1.5×) | **0.21s (12.7×)** |
+| bbox      | 6.01s | 1.45s (4.1×) | **0.18s (33.4×)** |
+| segm      | 6.79s | 3.46s (2.0×) | **0.36s (18.9×)** |
+| keypoints | 2.72s | 1.73s (1.6×) | **0.16s (17.0×)** |
 
 Speedups in parentheses are vs pycocotools.
 
@@ -45,11 +45,43 @@ Scaling detections by 10x (~368,000) to test behavior under higher load:
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 34.53s | 5.72s (6.0×) | **1.91s (18.0×)** |
-| segm      | 39.91s | 11.91s (3.4×) | **3.42s (11.7×)** |
-| keypoints | 16.93s | 16.28s (1.0×) | **1.76s (9.6×)** |
+| bbox      | 27.61s | 4.32s (6.4×) | **0.81s (34.2×)** |
+| segm      | 31.26s | 9.89s (3.2×) | **2.52s (12.4×)** |
+| keypoints | 14.37s | 10.49s (1.4×) | **1.69s (8.5×)** |
 
 hotcoco scales better at higher detection counts due to multi-threaded evaluation.
+
+### Where the time goes
+
+The end-to-end numbers above blend two very different phases: **load** (JSON
+parsing and index building — `COCO()` + `loadRes`) and **eval** (`evaluate` +
+`accumulate` + `summarize`). Splitting them shows where each library spends its
+time (single run, same synthetic detections as the 1× table):
+
+| Eval type | Phase | pycocotools | faster-coco-eval | hotcoco |
+|-----------|-------|-------------|------------------|---------|
+| bbox      | load  | 0.35s | 0.32s (1.1×) | **0.07s (4.7×)** |
+|           | eval  | 4.64s | 1.03s (4.5×) | **0.10s (46.3×)** |
+| segm      | load  | 0.44s | 0.43s (1.0×) | **0.13s (3.3×)** |
+|           | eval  | 6.99s | 2.73s (2.6×) | **0.24s (29.6×)** |
+| keypoints | load  | 0.53s | 0.55s (1.0×) | **0.11s (4.9×)** |
+|           | eval  | 1.81s | 1.08s (1.7×) | **0.04s (49.7×)** |
+| bbox, bbox-only GT | load | 0.17s | 0.12s (1.4×) | **0.05s (3.4×)** |
+|           | eval  | 4.62s | 1.09s (4.2×) | **0.09s (51.8×)** |
+
+Two things this table makes visible:
+
+- **The evaluation engine itself is 30–52× faster than pycocotools.** The
+  end-to-end headline is lower only because JSON parsing is a far larger share
+  of hotcoco's total than of anyone else's — loading is the bottleneck hotcoco
+  has left, not evaluation.
+- **The official instances files carry a polygon segmentation on every
+  annotation** — about two-thirds of the file bytes — which bbox evaluation
+  never reads. The *bbox-only GT* row strips them, representing datasets that
+  never had masks (custom bbox datasets, YOLO conversions, Objects365). If
+  that's your data, the load column is the one you'll actually see.
+
+Reproduce with `uv run python scripts/bench.py --phases`.
 
 ### Objects365 scale benchmark
 
@@ -152,6 +184,7 @@ You'll need the COCO val2017 annotation files and a working hotcoco build — se
 
 ```bash
 just bench                                        # speed benchmark (1x)
+uv run python scripts/bench.py --phases          # load/eval phase breakdown
 uv run python scripts/bench.py --scale 10        # 10x stress test
 just parity                                       # metric parity vs pycocotools
 uv run python scripts/bench_objects365.py        # O365 scale (requires O365 annotations)

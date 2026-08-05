@@ -22,10 +22,9 @@ Usage:
 import argparse
 import json
 import sys
-import tempfile
-from pathlib import Path
 
 import numpy as np
+from helpers import compare_metrics, written_json
 
 # IoU thresholds used by COCO eval (np.linspace(0.5, 0.95, 10))
 IOU_THRS = np.linspace(0.5, 0.95, 10).round(2).tolist()
@@ -35,25 +34,18 @@ BOUNDARY_EPS = 1e-6
 
 
 # ---------------------------------------------------------------------------
-# Load fixture — split GT and DT, write GT to a temp file
+# Load fixture — split GT and DT
 # ---------------------------------------------------------------------------
 
 
 def load_fixture(fixture_path):
-    """
-    Returns (gt_tmp_path, detections_list, tmpfile_handle).
-    Caller must close tmpfile_handle when done.
-    """
+    """Returns (gt_dataset, detections_list). Both tools read GT from a file, so
+    the caller writes it with `helpers.written_json`."""
     with open(fixture_path) as f:
         data = json.load(f)
 
     detections = data.pop("detections", [])
-
-    # Write GT-only COCO JSON to a temp file both tools can read
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(data, tmp)
-    tmp.flush()
-    return tmp.name, detections, tmp
+    return data, detections
 
 
 # ---------------------------------------------------------------------------
@@ -61,23 +53,12 @@ def load_fixture(fixture_path):
 # ---------------------------------------------------------------------------
 
 
-def _write_tmp_json(data):
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(data, tmp)
-    tmp.flush()
-    return tmp
-
-
 def run_hotcoco(gt_path, detections, iou_type):
     import hotcoco as hc
 
     gt = hc.COCO(gt_path)
-    dt_tmp = _write_tmp_json(detections)
-    try:
-        dt = gt.load_res(dt_tmp.name)
-    finally:
-        dt_tmp.close()
-        Path(dt_tmp.name).unlink(missing_ok=True)
+    with written_json(detections) as (dt_path,):
+        dt = gt.load_res(dt_path)
     ev = hc.COCOeval(gt, dt, iou_type)
     ev.evaluate()
     ev.accumulate()
@@ -96,26 +77,6 @@ def run_pycocotools(gt_path, detections, iou_type):
     ev.accumulate()
     ev.summarize()
     return ev
-
-
-# ---------------------------------------------------------------------------
-# Level 1: metric comparison
-# ---------------------------------------------------------------------------
-
-
-def compare_metrics(hc_ev, py_ev, threshold):
-    """Return dict of metric_name → (hc_val, py_val, diff) for diffs > threshold."""
-    metric_names = hc_ev.metric_keys()
-    hc_stats = dict(zip(metric_names, hc_ev.stats))
-    py_stats = dict(zip(metric_names, py_ev.stats))
-    failures = {}
-    for k in py_stats:
-        hc_v = hc_stats.get(k, float("nan"))
-        py_v = py_stats.get(k, float("nan"))
-        diff = abs(hc_v - py_v)
-        if diff > threshold:
-            failures[k] = (hc_v, py_v, diff)
-    return failures
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +298,15 @@ def compare_eval_imgs(hc_ev, py_ev):
 # ---------------------------------------------------------------------------
 
 
-def print_metric_failures(failures):
+def print_metric_failures(mismatches):
+    """Print `helpers.MetricMismatch` records — the fields, not a dict of tuples.
+
+    The old shape round-tripped each NamedTuple through `{name: (rs, py, diff)}`,
+    which dropped `index` and reordered the pair for no gain.
+    """
     print("\n[LEVEL 1] METRIC DIVERGENCES:")
-    for name, (hc_v, py_v, diff) in failures.items():
-        print(f"  {name:6s}: hotcoco={hc_v:.6f}  pycocotools={py_v:.6f}  diff={diff:.2e}")
+    for m in mismatches:
+        print(f"  [{m.index}] {m.name:6s}: hotcoco={m.rs:.6f}  pycocotools={m.py:.6f}  diff={m.diff:.2e}")
 
 
 def print_eval_img_divergences(divergences, limit=20):
@@ -387,19 +353,19 @@ def main():
     print(f"Fixture: {fixture_path}")
     print(f"IoU type: {args.iou_type}  metric threshold: {args.metric_thr}")
 
-    gt_path, detections, tmp = load_fixture(fixture_path)
-    try:
+    gt_data, detections = load_fixture(fixture_path)
+    with written_json(gt_data) as (gt_path,):
         hc_ev = run_hotcoco(gt_path, detections, args.iou_type)
         py_ev = run_pycocotools(gt_path, detections, args.iou_type)
-    finally:
-        tmp.close()
-        Path(gt_path).unlink(missing_ok=True)
 
     found_issue = False
 
-    # Level 1
+    # Level 1. The comparison itself — the -1.0 "not computed" sentinel rule and
+    # the length check — is `helpers.compare_metrics`, shared with
+    # test_parity/fuzz_parity. Only the threshold is local: this harness is a
+    # diagnostic tool with a deliberately looser default than the CI gate.
     if not args.eval_imgs_only:
-        failures = compare_metrics(hc_ev, py_ev, args.metric_thr)
+        failures = compare_metrics(py_ev.stats, hc_ev.stats, hc_ev.metric_keys(), tolerance=args.metric_thr)
         if failures:
             print_metric_failures(failures)
             found_issue = True

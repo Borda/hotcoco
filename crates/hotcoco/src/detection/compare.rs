@@ -1,13 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
 use crate::metrics::bootstrap::bootstrap_ci;
 
 use super::COCOeval;
-use super::accumulate::accumulate_impl;
+use super::accumulate::EvalGrouping;
 use super::catalog::{MetricDef, build_metric_defs};
-use super::summarize::{per_cat_ap_static, summarize_impl};
+use super::summarize::{accumulate_and_summarize, metric_delta, per_cat_ap_static, stats_to_map};
 
 /// Options for pairwise model comparison.
 #[derive(Debug, Clone)]
@@ -57,13 +57,13 @@ pub struct ComparisonResult {
     /// Metric names in canonical display order (from the evaluation mode's MetricDef vec).
     pub metric_keys: Vec<String>,
     /// All summary metrics for model A.
-    pub metrics_a: HashMap<String, f64>,
+    pub metrics_a: BTreeMap<String, f64>,
     /// All summary metrics for model B.
-    pub metrics_b: HashMap<String, f64>,
+    pub metrics_b: BTreeMap<String, f64>,
     /// Per-metric delta (B - A).
-    pub deltas: HashMap<String, f64>,
+    pub deltas: BTreeMap<String, f64>,
     /// Bootstrap CIs on summary metric deltas. `None` if bootstrap disabled.
-    pub ci: Option<HashMap<String, BootstrapCI>>,
+    pub ci: Option<BTreeMap<String, BootstrapCI>>,
     /// Per-category AP comparison, sorted by delta ascending (worst regressions first).
     pub per_category: Vec<CategoryDelta>,
     /// Number of bootstrap samples used (0 if disabled).
@@ -130,39 +130,19 @@ pub fn compare(
     let metrics = build_metric_defs(&eval_a.params, eval_a.eval_mode);
     let metric_keys: Vec<&str> = metrics.iter().map(|m| m.name).collect();
 
-    let acc_a = accumulate_impl(
-        &eval_a.eval_imgs,
-        &eval_a.params,
-        Some(&shared_set),
-        eval_a.eval_mode,
-    );
-    let stats_a = summarize_impl(
-        &acc_a,
-        &eval_a.params,
-        eval_a.eval_mode,
-        eval_a.freq_groups(),
-        &metrics,
-    );
+    // One bucketing per evaluator for the whole comparison — the point estimate
+    // and all `n_bootstrap` resamples differ only in which images they cover.
+    let grouping_a = EvalGrouping::build(eval_a);
+    let grouping_b = EvalGrouping::build(eval_b);
 
-    let acc_b = accumulate_impl(
-        &eval_b.eval_imgs,
-        &eval_b.params,
-        Some(&shared_set),
-        eval_b.eval_mode,
-    );
-    let stats_b = summarize_impl(
-        &acc_b,
-        &eval_b.params,
-        eval_b.eval_mode,
-        eval_b.freq_groups(),
-        &metrics,
-    );
+    let (acc_a, stats_a) = accumulate_and_summarize(&grouping_a, Some(&shared_set), &metrics);
+    let (acc_b, stats_b) = accumulate_and_summarize(&grouping_b, Some(&shared_set), &metrics);
 
     // --- Metric maps ---
     let metrics_a = stats_to_map(&metric_keys, &stats_a);
     let metrics_b = stats_to_map(&metric_keys, &stats_b);
 
-    let deltas: HashMap<String, f64> = metric_keys
+    let deltas: BTreeMap<String, f64> = metric_keys
         .iter()
         .zip(stats_a.iter().zip(stats_b.iter()))
         .map(|(&k, (&a, &b))| (k.to_string(), metric_delta(a, b)))
@@ -205,11 +185,14 @@ pub fn compare(
             if ap_a < 0.0 && ap_b < 0.0 {
                 return None;
             }
-            let cat_name = eval_a
-                .coco_gt
-                .get_cat(cat_id)
-                .or_else(|| eval_b.coco_gt.get_cat(cat_id))
-                .map_or_else(|| cat_id.to_string(), |c| c.name.clone());
+            // `COCO::cat_name` owns the unnamed-category fallback, so a category
+            // neither side has a record for renders as `cat_7` here and in the
+            // confusion matrix alike — this site used to print a bare `7`.
+            let cat_name = if eval_a.coco_gt.get_cat(cat_id).is_some() {
+                eval_a.coco_gt.cat_name(cat_id)
+            } else {
+                eval_b.coco_gt.cat_name(cat_id)
+            };
             Some(CategoryDelta {
                 cat_id,
                 cat_name,
@@ -234,8 +217,8 @@ pub fn compare(
     // --- Bootstrap ---
     let ci = if opts.n_bootstrap > 0 {
         Some(bootstrap_compare(
-            eval_a,
-            eval_b,
+            &grouping_a,
+            &grouping_b,
             &shared_sorted,
             opts,
             &metrics,
@@ -266,46 +249,21 @@ pub fn compare(
 /// deltas. Missing metrics (`-1.0`) contribute a zero delta rather than a spurious
 /// swing, since a metric undefined for a subset is not evidence either way.
 fn bootstrap_compare(
-    eval_a: &COCOeval,
-    eval_b: &COCOeval,
+    grouping_a: &EvalGrouping<'_>,
+    grouping_b: &EvalGrouping<'_>,
     shared_img_ids: &[u64],
     opts: &CompareOpts,
     metrics: &[MetricDef],
     metric_keys: &[&str],
-) -> HashMap<String, BootstrapCI> {
+) -> BTreeMap<String, BootstrapCI> {
     let cis = bootstrap_ci(
         shared_img_ids,
         opts.n_bootstrap,
         opts.seed,
         opts.confidence,
         |sample| {
-            let acc_a = accumulate_impl(
-                &eval_a.eval_imgs,
-                &eval_a.params,
-                Some(sample),
-                eval_a.eval_mode,
-            );
-            let stats_a = summarize_impl(
-                &acc_a,
-                &eval_a.params,
-                eval_a.eval_mode,
-                eval_a.freq_groups(),
-                metrics,
-            );
-
-            let acc_b = accumulate_impl(
-                &eval_b.eval_imgs,
-                &eval_b.params,
-                Some(sample),
-                eval_b.eval_mode,
-            );
-            let stats_b = summarize_impl(
-                &acc_b,
-                &eval_b.params,
-                eval_b.eval_mode,
-                eval_b.freq_groups(),
-                metrics,
-            );
+            let (_, stats_a) = accumulate_and_summarize(grouping_a, Some(sample), metrics);
+            let (_, stats_b) = accumulate_and_summarize(grouping_b, Some(sample), metrics);
 
             stats_a
                 .iter()
@@ -319,25 +277,6 @@ fn bootstrap_compare(
         .iter()
         .zip(cis)
         .map(|(&name, ci)| (name.to_string(), ci))
-        .collect()
-}
-
-/// B minus A, treating a metric missing from either side as no evidence.
-///
-/// `-1.0` is the "not computed for this configuration" sentinel — APs for an area
-/// range with no ground truth, say. Subtracting it would manufacture a swing of up
-/// to 1.0 out of missing data, so the delta is zero instead. The point estimate and
-/// the bootstrap CIs must agree on this, which is why it is one function.
-#[inline]
-fn metric_delta(a: f64, b: f64) -> f64 {
-    if a >= 0.0 && b >= 0.0 { b - a } else { 0.0 }
-}
-
-fn stats_to_map(metric_keys: &[&str], stats: &[f64]) -> HashMap<String, f64> {
-    metric_keys
-        .iter()
-        .zip(stats.iter())
-        .map(|(&k, &v)| (k.to_string(), v))
         .collect()
 }
 

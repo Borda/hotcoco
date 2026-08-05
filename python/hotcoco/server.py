@@ -403,7 +403,9 @@ def create_app(
 
         from .dashboard import build_dashboard
 
-        data = build_dashboard(coco_eval, slices=slices)
+        # The 0.5 diagnostics are usually already in the LRU from the gallery;
+        # the dashboard reads the same walk rather than paying for its own.
+        data = build_dashboard(coco_eval, slices=slices, diagnostics=_get_eval_index(0.5))
         html = template.render(has_eval=True, **data)
         _dashboard_cache["html"] = html
         return HTMLResponse(html)

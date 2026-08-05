@@ -22,6 +22,7 @@ mod tide;
 
 pub use accumulate::{AccumulatedEval, EvalShape};
 pub use calibration::CalibrationResult;
+pub use catalog::MetricDef;
 pub use compare::{CategoryDelta, CompareOpts, ComparisonResult, compare};
 pub use confusion::ConfusionMatrix;
 pub use diagnostics::{
@@ -29,11 +30,12 @@ pub use diagnostics::{
     LabelErrorType,
 };
 pub use matching::EvalImg;
-pub use mode::EvalMode;
+pub use mode::{EvalMode, FreqGroup};
 pub use results::{EvalParams, EvalResults};
 pub use slice::{SliceResult, SlicedResults};
 pub use tide::TideErrors;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::coco::COCO;
@@ -60,7 +62,7 @@ use mode::FreqGroups;
 /// ```rust,ignore
 /// let mut ev = COCOeval::new_lvis(coco_gt, coco_dt, IouType::Segm);
 /// ev.run();
-/// let results = ev.get_results(None, false); // HashMap<metric_name, f64>
+/// let results = ev.get_results(None, false); // BTreeMap<metric_name, f64>
 /// ```
 pub struct COCOeval {
     pub coco_gt: COCO,
@@ -68,6 +70,9 @@ pub struct COCOeval {
     pub params: Params,
     pub(crate) eval_imgs: Vec<Option<EvalImg>>,
     ious: HashMap<(u64, u64), matching::IouMatrix>,
+    /// Per-annotation RLEs for segm runs, rebuilt by each `evaluate()` (like
+    /// `ious`) and `None` for every other geometry. See [`iou::SegmRles`].
+    segm_rles: Option<iou::SegmRles>,
     pub(crate) eval: Option<AccumulatedEval>,
     pub(crate) stats: Option<Vec<f64>>,
     /// Evaluation mode (COCO, LVIS, or OpenImages).
@@ -80,20 +85,41 @@ pub struct COCOeval {
 }
 
 impl COCOeval {
-    /// Create a new COCOeval from ground truth and detection COCO objects.
-    pub fn new(coco_gt: COCO, coco_dt: COCO, iou_type: IouType) -> Self {
+    /// The one struct literal. Everything the three public constructors differ
+    /// in is a parameter here; everything else is the same empty pre-`evaluate()`
+    /// state, and writing it out per constructor is how a field added later gets
+    /// initialized differently in two of the three.
+    fn with_mode(
+        coco_gt: COCO,
+        coco_dt: COCO,
+        params: Params,
+        eval_mode: EvalMode,
+        hierarchy: Option<Hierarchy>,
+    ) -> Self {
         COCOeval {
             coco_gt,
             coco_dt,
-            params: Params::new(iou_type),
+            params,
             eval_imgs: Vec::new(),
             ious: HashMap::new(),
+            segm_rles: None,
             eval: None,
             stats: None,
-            eval_mode: EvalMode::Coco,
+            eval_mode,
             freq_groups: FreqGroups::default(),
-            hierarchy: None,
+            hierarchy,
         }
+    }
+
+    /// Create a new COCOeval from ground truth and detection COCO objects.
+    pub fn new(coco_gt: COCO, coco_dt: COCO, iou_type: IouType) -> Self {
+        Self::with_mode(
+            coco_gt,
+            coco_dt,
+            Params::new(iou_type),
+            EvalMode::Coco,
+            None,
+        )
     }
 
     /// Per-image evaluation results (sparse — indexed by image position).
@@ -137,6 +163,57 @@ impl COCOeval {
         self.ious.get(&(img_id, cat_id))
     }
 
+    /// The evaluated cells every whole-dataset analysis reads: `area = "all"` at
+    /// the default per-image detection cap.
+    ///
+    /// TIDE, calibration and per-image diagnostics each want exactly this subset
+    /// of `eval_imgs`, and each wrote the filter out by hand — with calibration
+    /// testing only the area range. That leg is inert today (`evaluate()` stamps
+    /// one `max_det` on every cell, taken from
+    /// [`Params::max_det`](crate::Params::max_det)), so adding it changes no
+    /// number; but "inert today" is what the missing leg was too, right up until
+    /// a second cap per cell would have made calibration silently double-count
+    /// every detection.
+    ///
+    /// Both legs come from `params`, so an evaluator re-configured after
+    /// `evaluate()` yields nothing rather than a partial mixture — which is the
+    /// honest answer, and the same one the hand-written filters gave.
+    pub(in crate::detection) fn default_cells(&self) -> impl Iterator<Item = &EvalImg> {
+        let area_rng = self.params.all_area_range();
+        let max_det = self.params.max_det();
+        self.eval_imgs
+            .iter()
+            .flatten()
+            .filter(move |e| e.area_rng == area_rng && e.max_det == max_det)
+    }
+
+    /// The image and category ids this evaluation covers, without mutating anything.
+    ///
+    /// User-set `params` filters win; otherwise the ids come from `COCO`'s
+    /// unfiltered getters, which return them sorted — the order the whole
+    /// evaluation is keyed on. Borrowed when `params` already holds them, so the
+    /// common path allocates nothing.
+    ///
+    /// This is the **non-mutating** form on purpose, because it has two callers
+    /// with different needs: `evaluate()` writes the answer back into `params`,
+    /// while `confusion_matrix()` is a `&self` method that must cover the same
+    /// ids without a prior `evaluate()` and without touching state. They were two
+    /// independent derivations of one fact, free to disagree about which ids a
+    /// standalone confusion matrix spans.
+    pub(in crate::detection) fn resolved_ids(&self) -> (Cow<'_, [u64]>, Cow<'_, [u64]>) {
+        let img_ids = if self.params.img_ids.is_empty() {
+            Cow::Owned(self.coco_gt.get_img_ids(&[], &[]))
+        } else {
+            Cow::Borrowed(self.params.img_ids.as_slice())
+        };
+        let cat_ids = if self.params.cat_ids.is_empty() {
+            Cow::Owned(self.coco_gt.get_cat_ids(&[], &[], &[]))
+        } else {
+            Cow::Borrowed(self.params.cat_ids.as_slice())
+        };
+        (img_ids, cat_ids)
+    }
+
     /// LVIS frequency-group buckets, populated during `evaluate()` in LVIS mode.
     ///
     /// Driver-private: the analysis layer re-aggregates over these, but they are an
@@ -162,18 +239,7 @@ impl COCOeval {
         let mut params = Params::new(iou_type);
         params.max_dets = vec![300];
 
-        COCOeval {
-            coco_gt,
-            coco_dt,
-            params,
-            eval_imgs: Vec::new(),
-            ious: HashMap::new(),
-            eval: None,
-            stats: None,
-            eval_mode: EvalMode::Lvis,
-            freq_groups: FreqGroups::default(),
-            hierarchy: None,
-        }
+        Self::with_mode(coco_gt, coco_dt, params, EvalMode::Lvis, None)
     }
 
     /// Run the full evaluation pipeline in one call: `evaluate` → `accumulate` → `summarize`.
@@ -201,17 +267,6 @@ impl COCOeval {
         }];
         params.max_dets = vec![100];
 
-        COCOeval {
-            coco_gt,
-            coco_dt,
-            params,
-            eval_imgs: Vec::new(),
-            ious: HashMap::new(),
-            eval: None,
-            stats: None,
-            eval_mode: EvalMode::OpenImages,
-            freq_groups: FreqGroups::default(),
-            hierarchy,
-        }
+        Self::with_mode(coco_gt, coco_dt, params, EvalMode::OpenImages, hierarchy)
     }
 }

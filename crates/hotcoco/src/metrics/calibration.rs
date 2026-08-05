@@ -48,12 +48,53 @@ pub struct CalibrationBin {
     pub count: usize,
 }
 
+/// Check that every score is a confidence in `[0, 1]`.
+///
+/// **The named owner of this precondition.** [`calibration_curve`] and
+/// [`calibration_error`] deliberately accept anything — a metric function that
+/// silently rejects its input is worse than one that computes what it was asked
+/// — so the check is a separate call, made by whoever is in a position to
+/// produce an actionable error. `COCOeval::calibration` makes it; a caller
+/// composing these functions directly may, and gets the same message if it does.
+///
+/// The precondition is not pedantry. Binning clamps the *index*, not the score,
+/// so a value outside the unit interval saturates into an end bin and carries its
+/// raw magnitude into that bin's mean — which yields a calibration error above
+/// 1.0 with no other symptom, and no hint that logits were passed where
+/// probabilities were expected.
+///
+/// `Err` names the first offending value and how many there are, because a
+/// single stray score and a whole array of logits call for different fixes.
+pub fn scores_in_unit_interval(scores: &[f64]) -> Result<(), String> {
+    let n_bad = scores
+        .iter()
+        .filter(|&&s| !(0.0..=1.0).contains(&s))
+        .count();
+    let Some(&bad) = scores.iter().find(|&&s| !(0.0..=1.0).contains(&s)) else {
+        return Ok(());
+    };
+    Err(format!(
+        "requires scores in [0, 1], found {bad} ({n_bad} of {} out of range). \
+         Raw logits or unnormalized scores bucket into the end bins and produce \
+         a meaningless calibration error — apply a sigmoid or softmax first.",
+        scores.len()
+    ))
+}
+
 /// Bucket predictions into `n_bins` equal-width confidence bins.
 ///
 /// `scores` and `matched` are parallel arrays over predictions in any order —
 /// `scores[i]` is prediction `i`'s confidence in `[0, 1]`, `matched[i]` whether it
 /// was correct. Bin membership is `floor(score * n_bins)`, clamped so `score == 1.0`
 /// lands in the last bin rather than off the end.
+///
+/// # Precondition
+///
+/// Scores outside `[0, 1]` are **accepted, not rejected** — this function computes
+/// what it is asked to. They are also meaningless: the index is clamped, so an
+/// out-of-range score lands in an end bin while its raw magnitude still enters
+/// that bin's `avg_confidence`. Call [`scores_in_unit_interval`] first if the
+/// scores come from somewhere that could produce logits.
 ///
 /// Callers filter out ignored predictions before calling; there is no ignore mask
 /// here because a prediction excluded from calibration should not influence the
@@ -106,6 +147,9 @@ pub fn calibration_curve(scores: &[f64], matched: &[bool], n_bins: usize) -> Vec
 /// The weighting denominator is the total across `bins`, so pass the bins
 /// [`calibration_curve`] returned rather than a filtered subset. Empty bins
 /// contribute nothing; all-empty input returns `(0.0, 0.0)`.
+///
+/// Inherits [`calibration_curve`]'s precondition: bins built from scores outside
+/// `[0, 1]` produce an ECE above 1.0. See [`scores_in_unit_interval`].
 pub fn calibration_error(bins: &[CalibrationBin]) -> (f64, f64) {
     let total: usize = bins.iter().map(|b| b.count).sum();
     if total == 0 {

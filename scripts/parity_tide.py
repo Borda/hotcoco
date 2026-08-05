@@ -8,6 +8,7 @@ Requires: uv pip install tidecv
 
 Tolerances (ΔAP in [0,1] scale):
   Cls, Loc, Both, Dupe, Bkg: ±0.005
+  ap_base, FP, FN: ±0.005 (measured on val2017: 0.0003 / 0.0003 / 0.0007)
   Miss: ±0.10 — a documented deviation, not a parity target. See below.
 
 Why Miss is not held to +/-0.005
@@ -40,11 +41,11 @@ tidecv API notes (v1.0.1):
 """
 
 import sys
-from pathlib import Path
 
-_DATA = Path(__file__).resolve().parents[1] / "data"
-GT_PATH = str(_DATA / "annotations/instances_val2017.json")
-DT_PATH = str(_DATA / "bbox_val2017_results.json")
+from helpers import VAL2017
+
+GT_PATH = str(VAL2017["bbox"]["gt"])
+DT_PATH = str(VAL2017["bbox"]["dt"])
 
 # --- hotcoco ---
 from hotcoco import COCO, COCOeval  # noqa: E402
@@ -67,7 +68,16 @@ for k in ["Cls", "Loc", "Both", "Dupe", "Bkg", "Miss"]:
 # --- tidecv ---
 try:
     from tidecv import TIDE, datasets
-    from tidecv.errors.main_errors import BackgroundError, BoxError, ClassError, DuplicateError, MissedError, OtherError
+    from tidecv.errors.main_errors import (
+        BackgroundError,
+        BoxError,
+        ClassError,
+        DuplicateError,
+        FalseNegativeError,
+        FalsePositiveError,
+        MissedError,
+        OtherError,
+    )
 
     tide = TIDE()
     tide.evaluate_range(datasets.COCO(GT_PATH), datasets.COCOResult(DT_PATH), mode=TIDE.BOX)
@@ -108,6 +118,35 @@ try:
     tol_miss = 0.10  # bounded, not pinned: crowd-handling deviation (see docstring)
     all_ok = True
 
+    # ap_base: tidecv's r50.ap is get_mAP() in [0,100] -- a 101-point Riemann sum
+    # averaged over classes with data, the same construction as hotcoco's
+    # ap_base averaged over categories with GT. Directly comparable after /100.
+    # Measured diff on val2017: 0.0003, so it is held to the same +/-0.005.
+    tc_ap = r50.ap / 100.0
+    ap_diff = abs(hc["ap_base"] - tc_ap)
+    ap_status = "OK" if ap_diff <= tol else "FAIL"
+    if ap_status == "FAIL":
+        all_ok = False
+    print(f"  base: hc={hc['ap_base']:.4f}           tc={tc_ap:.4f}           diff={ap_diff:.4f}  {ap_status}")
+
+    # FP/FN: tidecv's special oracles, which hotcoco implements verbatim --
+    # FP suppresses every false positive, FN drops every missed GT from the
+    # denominator. Unlike Miss, the crowd-handling deviation barely reaches
+    # them (measured on val2017: FP diff 0.0003, FN diff 0.0007), so they are
+    # held to the same +/-0.005 as the five main types.
+    special = r50.fix_special_errors()
+    tc_delta["FP"] = special.get(FalsePositiveError, 0.0) / 100.0
+    tc_delta["FN"] = special.get(FalseNegativeError, 0.0) / 100.0
+
+    for name in ["FP", "FN"]:
+        hc_v = hc["delta_ap"][name]
+        tc_v = tc_delta[name]
+        diff = abs(hc_v - tc_v)
+        status = "OK" if diff <= tol else "FAIL"
+        if status == "FAIL":
+            all_ok = False
+        print(f"  {name:4s}: hc={hc_v:.4f}           tc={tc_v:.4f}           diff={diff:.4f}  {status}")
+
     for name in ["Cls", "Loc", "Both", "Dupe", "Bkg", "Miss"]:
         hc_v = hc["delta_ap"][name]
         tc_v = tc_delta.get(name, float("nan"))
@@ -128,7 +167,7 @@ try:
         print("\nSome values exceed tolerance.")
         sys.exit(1)
 
-    print("\nAll ΔAP values within tolerance (±0.005 for Cls/Loc/Both/Dupe/Bkg; ±0.10 for Miss).")
+    print("\nAll values within tolerance (±0.005 for ap_base/FP/FN/Cls/Loc/Both/Dupe/Bkg; ±0.10 for Miss).")
 
 except ImportError:
     # Exit non-zero: without the reference this script has printed hotcoco's own

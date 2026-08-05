@@ -15,6 +15,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from helpers import DATA_DIR
+
 try:
     import polars as pl
 except ImportError:
@@ -23,7 +25,11 @@ except ImportError:
 
 HF_REPO = "jxu124/objects365"
 SPLIT = "validation"
-OUT_DEFAULT = "data/annotations/zhiyuan_objv2_val.json"
+# Absolute, from `helpers.DATA_DIR` — the same constant every reader of `data/`
+# resolves against. Spelled as the relative string "data/annotations/..." this
+# wrote to wherever the shell happened to be, so a download run from anywhere but
+# the repo root landed a file no script would ever find.
+OUT_DEFAULT = str(DATA_DIR / "annotations/zhiyuan_objv2_val.json")
 
 
 def parse_args():

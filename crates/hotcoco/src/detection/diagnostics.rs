@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use serde::Serialize;
 
@@ -120,23 +121,28 @@ fn bbox_iou_plain(a: [f64; 4], b: [f64; 4]) -> f64 {
 /// Reuses the standard COCO 101-point interpolation with monotone precision correction
 /// via [`crate::metrics::counts::average_precision`].
 ///
-/// `detections` is `(score, is_tp)` sorted by score descending.
+/// `scores` and `matched` are parallel arrays over this image's non-ignored
+/// detections, in any order — [`average_precision`](crate::metrics::counts::average_precision)
+/// ranks them itself. They are collected as two vectors during the classification
+/// walk rather than as one vector of pairs, so no per-image split is needed here;
+/// the caller's own score sort is gone for the same reason, since it was ranking
+/// the detections a second time with the identical stable comparator.
+///
 /// `n_gt` is the total number of non-ignored GT annotations for this image.
+/// `rec_thrs` is the caller's recall grid — passed in rather than defaulted, so a
+/// custom-grid evaluator does not report per-image AP on a different axis than the
+/// AP it prints, and so the grid is built once per call rather than once per image.
 ///
 /// An image with no ground truth scores `1.0` when nothing was predicted: this is
 /// a per-image *quality* score, where a correctly-empty image is perfect. (TIDE's
 /// corpus AP deliberately uses the opposite convention for `n_gt == 0` — see the
 /// [`counts`](crate::metrics::counts) module note.)
-fn compute_image_ap(detections: &[(f64, bool)], n_gt: u32) -> f64 {
+fn compute_image_ap(scores: &[f64], matched: &[bool], n_gt: u32, rec_thrs: &[f64]) -> f64 {
     if n_gt == 0 {
-        return if detections.is_empty() { 1.0 } else { 0.0 };
+        return if scores.is_empty() { 1.0 } else { 0.0 };
     }
 
-    let scores: Vec<f64> = detections.iter().map(|&(score, _)| score).collect();
-    let matched: Vec<bool> = detections.iter().map(|&(_, is_tp)| is_tp).collect();
-    let rec_thrs = crate::params::default_rec_thrs();
-
-    crate::metrics::counts::average_precision(&scores, &matched, None, n_gt as usize, &rec_thrs)
+    crate::metrics::counts::average_precision(scores, matched, None, n_gt as usize, rec_thrs)
 }
 
 impl COCOeval {
@@ -167,86 +173,72 @@ impl COCOeval {
             return Err("image_diagnostics() requires evaluate() to be called first".into());
         }
 
-        // Snap to nearest IoU threshold
-        let t_idx = self
-            .params
-            .iou_thrs
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                ((**a - iou_thr).abs())
-                    .partial_cmp(&((**b - iou_thr).abs()))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map_or(0, |(i, _)| i);
+        // Snap to nearest IoU threshold — the reported `iou_thr` says which one.
+        let t_idx = self.params.nearest_iou_thr_idx(iou_thr);
         let actual_iou_thr = self.params.iou_thrs[t_idx];
-
-        // Use "all" area range
-        let target_area_idx = self.params.all_area_idx();
-        let target_area = self.params.area_ranges[target_area_idx].range;
-
-        // Last max_det (largest)
-        let target_max_det = self.params.max_dets.iter().copied().max().unwrap_or(100);
 
         let mut dt_status: HashMap<u64, DtStatus> = HashMap::new();
         let mut gt_status: HashMap<u64, GtStatus> = HashMap::new();
         let mut dt_match_map: HashMap<u64, u64> = HashMap::new();
         let mut gt_match_map: HashMap<u64, u64> = HashMap::new();
 
-        // Per-image: (score, is_tp) pairs for AP, and tp/fp/fn counts
-        let mut img_detections: HashMap<u64, Vec<(f64, bool)>> = HashMap::new();
+        // Per-image: parallel (score, is_tp) arrays for AP, and tp/fp/fn counts.
+        // Two vectors rather than one of pairs, because that is the shape
+        // `average_precision` takes — building pairs here only to split them again
+        // per image allocated twice more for no reason.
+        let mut img_detections: HashMap<u64, (Vec<f64>, Vec<bool>)> = HashMap::new();
         let mut img_counts: HashMap<u64, (u32, u32, u32)> = HashMap::new(); // (tp, fp, fn)
 
-        // Walk eval_imgs
-        for eval_img in self.eval_imgs.iter().flatten() {
-            if eval_img.area_rng != target_area || eval_img.max_det != target_max_det {
-                continue;
-            }
-            if t_idx >= eval_img.dt_matched.len() {
+        // `default_cells` owns the (area = "all", default max_det) predicate.
+        for eval_img in self.default_cells() {
+            if t_idx >= eval_img.dt_matched.num_rows() {
                 continue;
             }
 
             let img_id = eval_img.image_id;
-            let matched = &eval_img.dt_matched[t_idx];
-            let ignored = &eval_img.dt_ignore[t_idx];
-            let matches = &eval_img.dt_matches[t_idx];
+            let matched = eval_img.dt_matched.row(t_idx);
+            let ignored = eval_img.dt_ignore.row(t_idx);
+            let matches = eval_img.dt_matches.row(t_idx);
             debug_assert_eq!(matched.len(), matches.len());
 
+            // Both entries are the same for every annotation in this cell, so they
+            // are resolved once per cell rather than once per annotation.
             let counts = img_counts.entry(img_id).or_insert((0, 0, 0));
+            let dets = img_detections.entry(img_id).or_default();
 
-            // Classify detections
+            // Classify detections. `entry`, not `contains_key` then `insert`:
+            // one hash lookup instead of two, and the "already seen" test and the
+            // write cannot drift apart.
             for (d, &did) in eval_img.dt_ids.iter().enumerate() {
                 if d >= ignored.len() || ignored[d] {
                     continue;
                 }
-                if dt_status.contains_key(&did) {
+                let Entry::Vacant(slot) = dt_status.entry(did) else {
                     continue;
-                }
+                };
 
                 let is_tp = d < matched.len() && matched[d];
                 if is_tp {
-                    dt_status.insert(did, DtStatus::Tp);
+                    slot.insert(DtStatus::Tp);
                     let gt_id = matches[d];
                     dt_match_map.insert(did, gt_id);
                     gt_match_map.insert(gt_id, did);
                     counts.0 += 1;
                 } else {
-                    dt_status.insert(did, DtStatus::Fp);
+                    slot.insert(DtStatus::Fp);
                     counts.1 += 1;
                 }
 
-                img_detections
-                    .entry(img_id)
-                    .or_default()
-                    .push((eval_img.dt_scores[d], is_tp));
+                dets.0.push(eval_img.dt_scores[d]);
+                dets.1.push(is_tp);
             }
 
             // Classify ground truths
-            let gt_matched_at_t = &eval_img.gt_matched[t_idx];
+            let gt_matched_at_t = eval_img.gt_matched.row(t_idx);
             for (g, &gid) in eval_img.gt_ids.iter().enumerate() {
-                if gt_status.contains_key(&gid) {
+                let Entry::Vacant(slot) = gt_status.entry(gid) else {
                     continue;
-                }
+                };
                 // `counts_as_miss`, not `!gt_ignore` — otherwise per-image
                 // diagnostics disagree with `stats[0]` about whether an undetected
                 // Open Images group-of box is a false negative.
@@ -255,9 +247,9 @@ impl COCOeval {
                 }
                 let is_matched = g < gt_matched_at_t.len() && gt_matched_at_t[g];
                 if is_matched {
-                    gt_status.insert(gid, GtStatus::Matched);
+                    slot.insert(GtStatus::Matched);
                 } else {
-                    gt_status.insert(gid, GtStatus::Fn);
+                    slot.insert(GtStatus::Fn);
                     counts.2 += 1;
                 }
             }
@@ -282,11 +274,12 @@ impl COCOeval {
                 (2 * tp) as f64 / denom as f64
             };
 
-            // Sort detections by score descending for AP
-            let mut dets = img_detections.remove(&img_id).unwrap_or_default();
-            dets.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            // No sort here: `average_precision` ranks its input with the same
+            // stable comparator this used, so sorting first only sorted an array
+            // that was about to be sorted again.
+            let (scores, matched) = img_detections.remove(&img_id).unwrap_or_default();
             let n_gt = tp + fn_count; // total non-ignored GT for this image
-            let ap = compute_image_ap(&dets, n_gt);
+            let ap = compute_image_ap(&scores, &matched, n_gt, &self.params.rec_thrs);
 
             let error_profile = match (fp, fn_count) {
                 (0, 0) => ErrorProfile::Perfect,
@@ -685,16 +678,19 @@ mod image_ap_tests {
         // Perfect: one GT, one matching detection. Precision is 1.0 at every
         // reachable threshold, and recall reaches 1.0, so every threshold is
         // reachable.
-        assert_eq!(compute_image_ap(&[(0.9, true)], 1), 1.0);
+        assert_eq!(compute_image_ap(&[0.9], &[true], 1, &rec_thrs), 1.0);
 
         // All false positives against one GT: recall never leaves 0, so only the
         // r=0 threshold is reachable and precision there is 0.
-        assert_eq!(compute_image_ap(&[(0.9, false), (0.8, false)], 1), 0.0);
+        assert_eq!(
+            compute_image_ap(&[0.9, 0.8], &[false, false], 1, &rec_thrs),
+            0.0
+        );
 
         // One TP out of two GT, listed first. Recall tops out at 0.5, so the
         // reachable thresholds are r <= 0.5 — 51 of the 101 — each at precision
         // 1.0. AP = 51/101.
-        let ap = compute_image_ap(&[(0.9, true), (0.8, false)], 2);
+        let ap = compute_image_ap(&[0.9, 0.8], &[true, false], 2, &rec_thrs);
         let reachable = rec_thrs.iter().filter(|&&t| t <= 0.5 + 1e-12).count() as f64;
         assert!(
             (ap - reachable / n_thr).abs() < 1e-12,
@@ -706,7 +702,7 @@ mod image_ap_tests {
         // FP ranked *above* the TP. Recall still tops out at 0.5, but precision at
         // that recall is 1/2 — VOC interpolation cannot rescue it, because there is
         // no higher-precision point further right.
-        let ap_fp_first = compute_image_ap(&[(0.9, false), (0.8, true)], 2);
+        let ap_fp_first = compute_image_ap(&[0.9, 0.8], &[false, true], 2, &rec_thrs);
         assert!(
             (ap_fp_first - 0.5 * reachable / n_thr).abs() < 1e-12,
             "expected half the previous AP, got {ap_fp_first}"
@@ -723,9 +719,10 @@ mod image_ap_tests {
     /// makes it exactly the kind of thing a copy-paste would silently invert.
     #[test]
     fn empty_image_is_perfect_only_when_nothing_was_predicted() {
-        assert_eq!(compute_image_ap(&[], 0), 1.0);
-        assert_eq!(compute_image_ap(&[(0.9, false)], 0), 0.0);
+        let rec_thrs = crate::params::default_rec_thrs();
+        assert_eq!(compute_image_ap(&[], &[], 0, &rec_thrs), 1.0);
+        assert_eq!(compute_image_ap(&[0.9], &[false], 0, &rec_thrs), 0.0);
         // No detections against real ground truth is a total miss, not a pass.
-        assert_eq!(compute_image_ap(&[], 3), 0.0);
+        assert_eq!(compute_image_ap(&[], &[], 3, &rec_thrs), 0.0);
     }
 }

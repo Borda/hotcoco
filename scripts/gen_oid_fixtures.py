@@ -50,8 +50,9 @@ OUT = Path(__file__).parent / "fixtures" / "oid_tf_expected.json"
 
 # Minimum share of cases that must score strictly between 0 and 1. A corpus of
 # saturated cases agrees with any implementation that always returns 0 or 1.
-# `parity_oid.py` asserts the same floor, so regenerating with a degenerate
-# scenario set fails loudly instead of quietly weakening the consumer.
+# `parity_oid.py` imports this and asserts the same floor on the checked-in
+# corpus, so regenerating with a degenerate scenario set fails loudly at both
+# ends instead of quietly weakening the consumer.
 MIN_DISCRIMINATING = 0.3
 
 # Pinned, not `master`. Every other generator in this repo records an exact
@@ -126,13 +127,14 @@ def _xywh_to_yxyx(b):
 
 
 def _case(name, anns, dets, n_cat=1):
-    # `categories` is stored, not derived from `n_cat` by the consumer: the `c{i}`
-    # naming is part of the oracle's contract (`reference_ap` matches TF result
-    # keys with `endswith(f"/c{i}")`), so the fixture should carry it rather than
-    # two files independently agreeing to spell it the same way.
+    # `categories` is what the fixture carries; `n_cat` is only a local shorthand
+    # for building it. The `c{i}` naming is part of the oracle's contract
+    # (`reference_ap` matches TF result keys with `endswith(f"/c{i}")`), so the
+    # fixture should carry the list rather than have two files independently agree
+    # to spell it the same way — and carrying the count *as well* is a second
+    # source of truth for the same fact.
     return {
         "name": name,
-        "n_cat": n_cat,
         "categories": [{"id": i, "name": f"c{i}"} for i in range(1, n_cat + 1)],
         "annotations": anns,
         "detections": dets,
@@ -289,10 +291,10 @@ def reference_ap(ode, case):
 
     result = ev.evaluate()
     per_class = {}
-    for i in range(1, case["n_cat"] + 1):
+    for cat in case["categories"]:
         for key, val in result.items():
-            if key.endswith(f"/c{i}"):
-                per_class[str(i)] = None if np.isnan(val) else float(val)
+            if key.endswith(f"/{cat['name']}"):
+                per_class[str(cat["id"])] = None if np.isnan(val) else float(val)
     mean_key = next(k for k in result if "mAP" in k)
     return per_class, float(result[mean_key])
 
@@ -347,7 +349,10 @@ def main() -> int:
             "Regenerate with scripts/gen_oid_fixtures.py (needs network access)."
         ),
         "reference": {
-            "source": "github.com/tensorflow/models @ master, research/object_detection",
+            # The commit, not the branch. This string is what a reader consults
+            # when a comparison goes red, so naming `master` while the download
+            # pins a SHA sends them to a tree the numbers never came from.
+            "source": f"github.com/tensorflow/models @ {REF_COMMIT}, research/object_detection",
             "evaluator": "OpenImagesDetectionEvaluator(group_of_weight=1.0)",
             "numpy": md.version("numpy"),
         },

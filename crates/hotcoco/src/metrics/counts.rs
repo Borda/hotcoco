@@ -34,20 +34,63 @@ pub fn precision_recall_curve(
     num_gt: usize,
     rec_thrs: &[f64],
 ) -> (f64, Vec<(usize, f64, usize)>) {
+    let mut scratch = PrCurveScratch::default();
+    let mut out = Vec::new();
+    let final_recall =
+        precision_recall_curve_into(tp_cum, fp_cum, num_gt, rec_thrs, &mut scratch, &mut out);
+    (final_recall, out)
+}
+
+/// Reusable working buffers for [`precision_recall_curve_into`].
+///
+/// Two `nd`-long scratch vectors, held by the caller so a loop over IoU
+/// thresholds allocates once instead of once per threshold. Opaque on purpose:
+/// what is inside is an implementation detail of the accumulator, and the only
+/// thing a caller may do with it is keep it alive.
+#[derive(Debug, Default)]
+pub struct PrCurveScratch {
+    rc: Vec<f64>,
+    pr: Vec<f64>,
+}
+
+/// [`precision_recall_curve`] writing into caller-owned buffers.
+///
+/// Same computation, same values, same emission order — the only difference is
+/// that the two `nd`-long working vectors and the output vector are supplied
+/// rather than allocated. `out` is cleared first, so the result is exactly the
+/// `Vec` the allocating form returns; the return value is its `final_recall`.
+///
+/// `detection::accumulate` runs this `T` times per (category, area range,
+/// max_det) cell — on COCO val that is ~10,000 calls per `accumulate()` and
+/// several hundred thousand across a bootstrap comparison, each of which was
+/// allocating and dropping three vectors.
+pub fn precision_recall_curve_into(
+    tp_cum: &[f64],
+    fp_cum: &[f64],
+    num_gt: usize,
+    rec_thrs: &[f64],
+    scratch: &mut PrCurveScratch,
+    out: &mut Vec<(usize, f64, usize)>,
+) -> f64 {
+    out.clear();
+
     let nd = tp_cum.len();
     if nd == 0 || num_gt == 0 {
-        return (0.0, vec![]);
+        return 0.0;
     }
 
     let num_gt_f = num_gt as f64;
 
     // Recall and precision at each detection rank.
-    let mut rc = vec![0.0f64; nd];
-    let mut pr = vec![0.0f64; nd];
+    let (rc, pr) = (&mut scratch.rc, &mut scratch.pr);
+    rc.clear();
+    pr.clear();
+    rc.reserve(nd);
+    pr.reserve(nd);
     for d in 0..nd {
-        rc[d] = tp_cum[d] / num_gt_f;
+        rc.push(tp_cum[d] / num_gt_f);
         let total = tp_cum[d] + fp_cum[d];
-        pr[d] = if total > 0.0 { tp_cum[d] / total } else { 0.0 };
+        pr.push(if total > 0.0 { tp_cum[d] / total } else { 0.0 });
     }
 
     let final_recall = rc[nd - 1];
@@ -58,18 +101,59 @@ pub fn precision_recall_curve(
     }
 
     // Two-pointer scan: map pr onto fixed recall thresholds.
-    let mut result = Vec::with_capacity(rec_thrs.len());
+    out.reserve(rec_thrs.len());
     let mut rc_ptr = 0;
     for (r_idx, &rec_thr) in rec_thrs.iter().enumerate() {
         while rc_ptr < nd && rc[rc_ptr] < rec_thr {
             rc_ptr += 1;
         }
         if rc_ptr < nd {
-            result.push((r_idx, pr[rc_ptr], rc_ptr));
+            out.push((r_idx, pr[rc_ptr], rc_ptr));
         }
     }
 
-    (final_recall, result)
+    final_recall
+}
+
+/// Cumulative TP and FP counts over detections visited in `order`.
+///
+/// **The one owner of TP/FP classification.** `order` lists indices into the
+/// parallel `matched`/`ignored` arrays, score-descending; an ignored detection
+/// contributes to neither counter but still occupies a rank, which is what makes
+/// the cumulative arrays line up with the score ordering the curve is read at.
+///
+/// `tp_cum` and `fp_cum` are cleared and refilled to `order`'s length, so a
+/// caller sweeping IoU thresholds reuses one pair of buffers. The classification
+/// rule lived in both [`average_precision`] here and `detection::accumulate`'s
+/// inner loop — the same three-way branch written twice, in two layers.
+pub fn cumulative_tp_fp(
+    order: impl IntoIterator<Item = usize>,
+    matched: &[bool],
+    ignored: Option<&[bool]>,
+    tp_cum: &mut Vec<f64>,
+    fp_cum: &mut Vec<f64>,
+) {
+    tp_cum.clear();
+    fp_cum.clear();
+
+    let (mut tp, mut fp) = (0.0f64, 0.0f64);
+    for i in order {
+        if !ignored.is_some_and(|ig| ig[i]) {
+            if matched[i] {
+                tp += 1.0;
+            } else {
+                fp += 1.0;
+            }
+        }
+        tp_cum.push(tp);
+        fp_cum.push(fp);
+    }
+}
+
+/// Mean interpolated precision over `rec_thrs` — the tail every AP path shares.
+fn mean_precision(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize, rec_thrs: &[f64]) -> f64 {
+    let (_, curve) = precision_recall_curve(tp_cum, fp_cum, num_gt, rec_thrs);
+    curve.iter().map(|&(_, prec, _)| prec).sum::<f64>() / rec_thrs.len() as f64
 }
 
 /// Average precision over `rec_thrs`, from per-detection match flags.
@@ -108,21 +192,47 @@ pub fn average_precision(
 
     let mut tp_cum = Vec::with_capacity(nd);
     let mut fp_cum = Vec::with_capacity(nd);
-    let (mut tp, mut fp) = (0.0f64, 0.0f64);
-    for &i in &order {
-        if !ignored.is_some_and(|ig| ig[i]) {
-            if matched[i] {
-                tp += 1.0;
-            } else {
-                fp += 1.0;
-            }
-        }
-        tp_cum.push(tp);
-        fp_cum.push(fp);
+    cumulative_tp_fp(
+        order.iter().copied(),
+        matched,
+        ignored,
+        &mut tp_cum,
+        &mut fp_cum,
+    );
+
+    mean_precision(&tp_cum, &fp_cum, num_gt, rec_thrs)
+}
+
+/// [`average_precision`] for detections **already** in score-descending order.
+///
+/// Same metric, same value — it simply skips the sort, which is the only thing
+/// `scores` was used for. A caller ranking one array of detections several ways
+/// (TIDE runs eight AP evaluations per category over the same ranking) sorts once
+/// and calls this; sorting stably twice and sorting stably once produce the same
+/// permutation, so the two entry points are bit-identical on sorted input.
+///
+/// `matched[i]` and `ignored[i]` describe the detection at rank `i`. Passing an
+/// unsorted ranking is not an error — it computes the AP of *that* ranking, which
+/// is a different (and generally lower) number.
+///
+/// Returns `0.0` for no detections or no ground truth, matching
+/// [`average_precision`]; see the [module note](self) on empty-set conventions.
+pub fn average_precision_ranked(
+    matched: &[bool],
+    ignored: Option<&[bool]>,
+    num_gt: usize,
+    rec_thrs: &[f64],
+) -> f64 {
+    let nd = matched.len();
+    if nd == 0 || num_gt == 0 || rec_thrs.is_empty() {
+        return 0.0;
     }
 
-    let (_, curve) = precision_recall_curve(&tp_cum, &fp_cum, num_gt, rec_thrs);
-    curve.iter().map(|&(_, prec, _)| prec).sum::<f64>() / rec_thrs.len() as f64
+    let mut tp_cum = Vec::with_capacity(nd);
+    let mut fp_cum = Vec::with_capacity(nd);
+    cumulative_tp_fp(0..nd, matched, ignored, &mut tp_cum, &mut fp_cum);
+
+    mean_precision(&tp_cum, &fp_cum, num_gt, rec_thrs)
 }
 
 /// Average precision by the VOC 2010 "all-points" rule — the exact area under the
@@ -209,7 +319,7 @@ pub fn max_f_beta(precisions: &[f64], recalls: &[f64], beta: f64) -> Option<f64>
     let n = precisions.len().min(recalls.len());
     let mut best = f64::NEG_INFINITY;
     for i in 0..n {
-        if precisions[i] < 0.0 {
+        if crate::metrics::is_missing(precisions[i]) {
             continue;
         }
         best = best.max(f_beta(precisions[i], recalls[i], beta));

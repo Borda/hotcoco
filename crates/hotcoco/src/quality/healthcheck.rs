@@ -504,16 +504,44 @@ fn check_compatibility(
         Layer::Compatibility,
     );
 
-    // DT annotations with score outside [0, 1]
+    // DT annotations with a NaN score. Its own finding, and an *error* rather
+    // than a warning: a NaN score does not merely look wrong, it makes the whole
+    // run undefined. Every ranking path sorts with `partial_cmp(..).unwrap_or(Equal)`,
+    // and that comparator is not transitive once NaN is present — the sort does
+    // not panic, it silently produces an arbitrary order, so AP becomes a
+    // function of the sort implementation.
+    //
+    // It used to fall through to the range warning below, which was doubly wrong:
+    // `(0.0..=1.0).contains(&NaN)` is false, so NaN was reported under a message
+    // about being "outside the [0, 1] range" — a description that fits no NaN and
+    // suggests clamping, which cannot fix it.
+    let nan_score: Vec<u64> = dt
+        .annotations
+        .iter()
+        .filter(|ann| ann.score.is_some_and(f64::is_nan))
+        .map(|ann| ann.id)
+        .collect();
+    let n = nan_score.len();
+    push_if_nonempty(
+        errors,
+        nan_score,
+        "dt_nan_score",
+        format!(
+            "{n} detection(s) have a NaN score. Scores order the detection ranking, \
+             and NaN makes that order undefined — every metric downstream would be \
+             meaningless. Filter or repair these detections before evaluating."
+        ),
+        Layer::Compatibility,
+    );
+
+    // DT annotations with a finite score outside [0, 1]. NaN is excluded above;
+    // infinities land here, where "outside the range" is an accurate description.
     let bad_score: Vec<u64> = dt
         .annotations
         .iter()
         .filter(|ann| {
-            if let Some(score) = ann.score {
-                !(0.0..=1.0).contains(&score)
-            } else {
-                false
-            }
+            ann.score
+                .is_some_and(|score| !score.is_nan() && !(0.0..=1.0).contains(&score))
         })
         .map(|ann| ann.id)
         .collect();

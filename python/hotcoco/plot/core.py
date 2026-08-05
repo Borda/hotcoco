@@ -12,6 +12,11 @@ if TYPE_CHECKING:
 
 _MPL_ERROR = "matplotlib is required for plotting. Install with: pip install hotcoco[plot]"
 
+# TIDE's error taxonomy, in the order the paper presents it. Every surface that
+# lists error types — the CLI table, the matplotlib bar chart, the dashboard —
+# reads this so they cannot drift into disagreeing orders.
+TIDE_ERROR_ORDER: tuple[str, ...] = ("Cls", "Loc", "Both", "Dupe", "Bkg", "Miss")
+
 
 def _import_mpl():
     try:
@@ -101,7 +106,7 @@ def _place_title_and_subtitle(ax, title: str, subtitle: str) -> None:
     )
 
 
-def _configure_axes(ax, title: str | None = None, subtitle: str | None = None, value_axis: str = "y"):
+def _configure_axes(ax, title: str | None = None, subtitle: str | None = None, value_axis: str | None = "y"):
     """Set grid direction, title, and subtitle. Colors come from active rcParams."""
     if value_axis == "y":
         ax.yaxis.grid(True)
@@ -136,18 +141,78 @@ def _mask_invalid_prec(arr) -> "np.ndarray":
     return out
 
 
-def _annotate_f1_peak(ax, recall_pts, prec, line):
-    """Fill under a PR curve and mark the F1 peak."""
+def _report_curves(curves: dict) -> "tuple[np.ndarray, list[float], np.ndarray]":
+    """Unpack ``report()["curves"]`` into ``(rec_thrs, iou_thrs, precision)``.
+
+    ``precision`` has shape ``(T, R)``, one aggregate curve per IoU threshold in
+    ascending threshold order — the curve keys are ``"pr@0.50"`` … ``"pr@0.95"``,
+    and dict order is not threshold order.
+
+    This is the boundary where Rust's ``-1.0`` sentinel ("not computed for this
+    configuration") becomes NumPy's own missing value, NaN. Every renderer of
+    these curves crosses that boundary here, once.
+    """
     import numpy as np
 
-    color = line.get_color()
-    ax.fill_between(recall_pts, prec, alpha=0.15, color=color)
+    rec_thrs = np.asarray(curves["rec_thrs"], dtype=float)
+    ordered = sorted(
+        ((float(key[len("pr@") :]), values) for key, values in curves.items() if key.startswith("pr@")),
+        key=lambda item: item[0],
+    )
+    iou_thrs = [thr for thr, _ in ordered]
+    precision = _mask_invalid_prec(np.asarray([values for _, values in ordered], dtype=float))
+    return rec_thrs, iou_thrs, precision
+
+
+def _top_confusion_keep(matrix, n_cats: int, top_n: int | None = None) -> "list[int] | None":
+    """Pick which confusion-matrix rows/columns to keep, by off-diagonal mass.
+
+    *matrix* is the full ``(K + 1, K + 1)`` matrix, BG last. Returns the kept
+    category indices in ascending order with the BG index appended, or ``None``
+    when everything fits and the caller should not subset at all.
+
+    ``top_n=None`` means "decide for me": above 30 categories a full matrix is
+    unreadable, so it falls back to the 25 worst offenders.
+    """
+    import numpy as np
+
+    if top_n is None and n_cats > 30:
+        top_n = 25
+    if top_n is None or top_n >= n_cats:
+        return None
+
+    cat_block = matrix[:n_cats, :n_cats]
+    diag = np.diag(cat_block)
+    confusion_mass = (cat_block.sum(axis=1) - diag) + (cat_block.sum(axis=0) - diag)
+    top_indices = np.argsort(confusion_mass)[::-1][:top_n]
+    return sorted(int(i) for i in top_indices) + [n_cats]
+
+
+def _f1_peak(recall_pts, prec) -> "tuple[int, float] | None":
+    """Return ``(index, f1)`` at the peak F1 of a PR curve, or ``None``.
+
+    NaN precision entries (the -1 sentinel, already masked) are skipped; the
+    index is into the arrays as passed.
+    """
+    import numpy as np
+
     f1 = 2 * prec * recall_pts / np.maximum(prec + recall_pts, 1e-8)
     if np.all(np.isnan(f1)):
-        return
+        return None
     best = int(np.nanargmax(f1))
+    return best, float(f1[best])
+
+
+def _annotate_f1_peak(ax, recall_pts, prec, line):
+    """Fill under a PR curve and mark the F1 peak."""
+    color = line.get_color()
+    ax.fill_between(recall_pts, prec, alpha=0.15, color=color)
+    peak = _f1_peak(recall_pts, prec)
+    if peak is None:
+        return
+    best, f1_val = peak
     if prec[best] > 0:
         ax.plot(recall_pts[best], prec[best], "o", color=color, markersize=5, zorder=5)
         ax.annotate(
-            f"F1={f1[best]:.2f}", (recall_pts[best], prec[best]), textcoords="offset points", xytext=(5, 5), fontsize=8
+            f"F1={f1_val:.2f}", (recall_pts[best], prec[best]), textcoords="offset points", xytext=(5, 5), fontsize=8
         )

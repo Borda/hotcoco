@@ -77,7 +77,7 @@ coco eval --gt <gt.json> --dt <dt.json> [options]
 | `--diag-iou-thr` | IoU threshold for diagnostics TP/FP classification | `0.5` |
 | `--diag-score-thr` | Min detection score for label error candidates | `0.5` |
 | `--report <path>` | Save a PDF evaluation report to this path (requires `hotcoco[plot]`) | off |
-| `--title` | Report title shown in the header | `COCO Evaluation Report` |
+| `--title` | Report title shown in the header | derived from eval mode |
 | `--slices <path>` | JSON file with named image ID groups for sliced evaluation | off |
 | `--healthcheck` | Run dataset healthcheck before evaluation (warnings to stderr) | off |
 | `--calibration` | Compute confidence calibration (ECE/MCE) after standard metrics | off |
@@ -128,7 +128,7 @@ coco eval --gt instances_val2017.json --dt bbox_results.json --tide --slices sli
 ```json
 {
   "hotcoco_version": "0.3.0",
-  "params": { "iou_type": "Bbox", "iou_thresholds": [...], "area_ranges": {...}, ... },
+  "params": { "iou_type": "bbox", "iou_thresholds": [...], "area_ranges": {...}, ... },
   "metrics": { "AP": 0.578, "AP50": 0.861, "AP75": 0.600, "APs": 0.327, ... },
   "tide": { "delta_ap": {...}, "counts": {...}, "ap_base": 0.578, ... },
   "slices": { "daytime": { "AP": 0.61, ... }, "_overall": { ... } },

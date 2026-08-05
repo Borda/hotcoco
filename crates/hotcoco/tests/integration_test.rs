@@ -56,15 +56,29 @@ fn det(id: u64, bbox: [f64; 4], score: f64) -> Annotation {
     }
 }
 
-/// Modifiers for the builders above. Add variants (`crowd`, `in_cat`, `in_img`)
-/// as tests need them — `-D warnings` rejects any that sit unused.
+/// Modifiers for the builders above. Add variants as tests need them —
+/// `-D warnings` rejects any that sit unused.
 trait AnnExt {
     fn group_of(self) -> Self;
+    /// Move to image `img_id`; both builders default to image 1.
+    fn in_img(self, img_id: u64) -> Self;
+    /// Move to category `cat_id`; both builders default to category 1.
+    fn in_cat(self, cat_id: u64) -> Self;
 }
 
 impl AnnExt for Annotation {
     fn group_of(mut self) -> Self {
         self.is_group_of = Some(true);
+        self
+    }
+
+    fn in_img(mut self, img_id: u64) -> Self {
+        self.image_id = img_id;
+        self
+    }
+
+    fn in_cat(mut self, cat_id: u64) -> Self {
+        self.category_id = cat_id;
         self
     }
 }
@@ -1038,96 +1052,27 @@ fn test_sample_determinism() {
 // LVIS federated evaluation tests
 // ---------------------------------------------------------------------------
 
-/// Helper: build a minimal Dataset from raw parts.
-fn make_lvis_dataset(
-    images: Vec<Image>,
-    annotations: Vec<Annotation>,
-    categories: Vec<Category>,
-) -> Dataset {
-    Dataset {
-        info: None,
-        images,
-        annotations,
-        categories,
-        licenses: vec![],
-    }
-}
-
-fn lvis_image(id: u64, neg_category_ids: Vec<u64>, not_exhaustive_category_ids: Vec<u64>) -> Image {
-    Image {
-        id,
-        file_name: format!("img{}.jpg", id),
-        height: 100,
-        width: 100,
-        license: None,
-        coco_url: None,
-        flickr_url: None,
-        date_captured: None,
-        neg_category_ids,
-        not_exhaustive_category_ids,
-    }
-}
-
-fn lvis_gt_ann(id: u64, image_id: u64, category_id: u64, area: f64) -> Annotation {
-    Annotation {
-        id,
-        image_id,
-        category_id,
-        bbox: Some([0.0, 0.0, area.sqrt(), area.sqrt()]),
-        area: Some(area),
-        segmentation: None,
-        iscrowd: false,
-        keypoints: None,
-        num_keypoints: None,
-        score: None,
-        obb: None,
-        is_group_of: None,
-    }
-}
-
-fn lvis_dt_ann(id: u64, image_id: u64, category_id: u64, area: f64, score: f64) -> Annotation {
-    Annotation {
-        id,
-        image_id,
-        category_id,
-        bbox: Some([0.0, 0.0, area.sqrt(), area.sqrt()]),
-        area: Some(area),
-        segmentation: None,
-        iscrowd: false,
-        keypoints: None,
-        num_keypoints: None,
-        score: Some(score),
-        obb: None,
-        is_group_of: None,
-    }
-}
-
-fn lvis_category(id: u64, frequency: Option<&str>) -> Category {
-    Category {
-        id,
-        name: format!("cat{}", id),
-        supercategory: None,
-        skeleton: None,
-        keypoints: None,
-        frequency: frequency.map(String::from),
-    }
-}
-
 /// LVIS test 1: neg_category_ids — unmatched DTs on an image where the
 /// category is confirmed absent must count as FP → AP = 0.
 #[test]
 fn test_lvis_neg_category_counts_as_fp() {
     // 1 image, cat 1 listed in neg_category_ids (no GT). Detector fires.
     // The DT is a false positive → AP should be 0.
-    let gt_ds = make_lvis_dataset(
-        vec![lvis_image(1, vec![1], vec![])],
+    let gt_ds = dataset(
+        vec![Image {
+            neg_category_ids: vec![1],
+            ..img(1)
+        }],
+        vec![Category {
+            frequency: Some("r".into()),
+            ..cat(1, "cat1")
+        }],
         vec![],
-        vec![lvis_category(1, Some("r"))],
     );
-    let dt_ds = make_lvis_dataset(
-        vec![lvis_image(1, vec![], vec![])],
-        vec![lvis_dt_ann(101, 1, 1, 400.0, 0.9)],
-        vec![lvis_category(1, None)],
+    let dt_ds = dataset(
+        vec![img(1)],
+        vec![cat(1, "cat1")],
+        vec![det(101, [0.0, 0.0, 20.0, 20.0], 0.9)], // area 400
     );
 
     let coco_gt = COCO::from_dataset(gt_ds);
@@ -1152,21 +1097,21 @@ fn test_lvis_unlisted_category_not_penalized() {
     // Image A: has GT + matching DT (correct).
     // Image B: no GT, cat not listed anywhere, but DT fires.
     // Expected: the DT on image B is dropped; AP equals the single-image case.
-    let gt_ds = make_lvis_dataset(
-        vec![
-            lvis_image(1, vec![], vec![]), // image A: no neg, no not_exhaustive
-            lvis_image(2, vec![], vec![]), // image B: no neg, no not_exhaustive
-        ],
-        vec![lvis_gt_ann(1, 1, 1, 400.0)], // GT only on image A
-        vec![lvis_category(1, Some("f"))],
+    let gt_ds = dataset(
+        vec![img(1), img(2)], // neither image lists neg or not_exhaustive
+        vec![Category {
+            frequency: Some("f".into()),
+            ..cat(1, "cat1")
+        }],
+        vec![ann(1, [0.0, 0.0, 20.0, 20.0])], // GT only on image A
     );
-    let dt_ds = make_lvis_dataset(
-        vec![lvis_image(1, vec![], vec![]), lvis_image(2, vec![], vec![])],
+    let dt_ds = dataset(
+        vec![img(1), img(2)],
+        vec![cat(1, "cat1")],
         vec![
-            lvis_dt_ann(101, 1, 1, 400.0, 0.9), // matches GT on image A
-            lvis_dt_ann(102, 2, 1, 400.0, 0.8), // fires on image B — should be dropped
+            det(101, [0.0, 0.0, 20.0, 20.0], 0.9), // matches GT on image A
+            det(102, [0.0, 0.0, 20.0, 20.0], 0.8).in_img(2), // fires on image B — should be dropped
         ],
-        vec![lvis_category(1, None)],
     );
 
     let coco_gt_two = COCO::from_dataset(gt_ds.clone());
@@ -1176,15 +1121,18 @@ fn test_lvis_unlisted_category_not_penalized() {
     ev_two.run();
 
     // Baseline: only image A with its GT and matching DT (perfect AP = 1.0).
-    let gt_ds_one = make_lvis_dataset(
-        vec![lvis_image(1, vec![], vec![])],
-        vec![lvis_gt_ann(1, 1, 1, 400.0)],
-        vec![lvis_category(1, Some("f"))],
+    let gt_ds_one = dataset(
+        vec![img(1)],
+        vec![Category {
+            frequency: Some("f".into()),
+            ..cat(1, "cat1")
+        }],
+        vec![ann(1, [0.0, 0.0, 20.0, 20.0])],
     );
-    let dt_ds_one = make_lvis_dataset(
-        vec![lvis_image(1, vec![], vec![])],
-        vec![lvis_dt_ann(101, 1, 1, 400.0, 0.9)],
-        vec![lvis_category(1, None)],
+    let dt_ds_one = dataset(
+        vec![img(1)],
+        vec![cat(1, "cat1")],
+        vec![det(101, [0.0, 0.0, 20.0, 20.0], 0.9)],
     );
 
     let mut ev_one = COCOeval::new_lvis(
@@ -1212,18 +1160,24 @@ fn test_lvis_not_exhaustive_unmatched_ignored() {
     // DT: 2 detections — DT1 matches GT (TP), DT2 is unmatched.
     // Image has cat 1 in not_exhaustive_category_ids.
     // DT2 must be ignored → precision at recall=1 stays 1.0 → AP = 1.0.
-    let gt_ds = make_lvis_dataset(
-        vec![lvis_image(1, vec![], vec![1])], // not_exhaustive for cat 1
-        vec![lvis_gt_ann(1, 1, 1, 400.0)],
-        vec![lvis_category(1, Some("c"))],
+    let gt_ds = dataset(
+        vec![Image {
+            not_exhaustive_category_ids: vec![1], // not_exhaustive for cat 1
+            ..img(1)
+        }],
+        vec![Category {
+            frequency: Some("c".into()),
+            ..cat(1, "cat1")
+        }],
+        vec![ann(1, [0.0, 0.0, 20.0, 20.0])], // area 400
     );
-    let dt_ds = make_lvis_dataset(
-        vec![lvis_image(1, vec![], vec![])],
+    let dt_ds = dataset(
+        vec![img(1)],
+        vec![cat(1, "cat1")],
         vec![
-            lvis_dt_ann(101, 1, 1, 400.0, 0.9), // matches GT
-            lvis_dt_ann(102, 1, 1, 100.0, 0.5), // unmatched — should be ignored
+            det(101, [0.0, 0.0, 20.0, 20.0], 0.9), // matches GT
+            det(102, [0.0, 0.0, 10.0, 10.0], 0.5), // area 100, unmatched — should be ignored
         ],
-        vec![lvis_category(1, None)],
     );
 
     let mut ev = COCOeval::new_lvis(
@@ -1241,80 +1195,6 @@ fn test_lvis_not_exhaustive_unmatched_ignored() {
 }
 
 // ============================================================
-// Helpers shared by confusion_matrix tests
-// ============================================================
-
-fn cm_image(id: u64) -> Image {
-    Image {
-        id,
-        file_name: format!("img{id}.jpg"),
-        height: 200,
-        width: 200,
-        license: None,
-        coco_url: None,
-        flickr_url: None,
-        date_captured: None,
-        neg_category_ids: vec![],
-        not_exhaustive_category_ids: vec![],
-    }
-}
-
-fn cm_category(id: u64, name: &str) -> Category {
-    Category {
-        id,
-        name: name.into(),
-        supercategory: None,
-        skeleton: None,
-        keypoints: None,
-        frequency: None,
-    }
-}
-
-fn cm_gt_ann(id: u64, img_id: u64, cat_id: u64, bbox: [f64; 4]) -> Annotation {
-    Annotation {
-        id,
-        image_id: img_id,
-        category_id: cat_id,
-        bbox: Some(bbox),
-        area: Some(bbox[2] * bbox[3]),
-        iscrowd: false,
-        segmentation: None,
-        keypoints: None,
-        num_keypoints: None,
-        score: None,
-        obb: None,
-        is_group_of: None,
-    }
-}
-
-fn cm_dt_ann(id: u64, img_id: u64, cat_id: u64, bbox: [f64; 4], score: f64) -> Annotation {
-    Annotation {
-        id,
-        image_id: img_id,
-        category_id: cat_id,
-        bbox: Some(bbox),
-        area: Some(bbox[2] * bbox[3]),
-        iscrowd: false,
-        segmentation: None,
-        keypoints: None,
-        num_keypoints: None,
-        score: Some(score),
-        obb: None,
-        is_group_of: None,
-    }
-}
-
-fn cm_coco(images: Vec<Image>, anns: Vec<Annotation>, cats: Vec<Category>) -> COCO {
-    COCO::from_dataset(Dataset {
-        info: None,
-        images,
-        annotations: anns,
-        categories: cats,
-        licenses: vec![],
-    })
-}
-
-// ============================================================
 // confusion_matrix tests
 // ============================================================
 
@@ -1322,22 +1202,22 @@ fn cm_coco(images: Vec<Image>, anns: Vec<Annotation>, cats: Vec<Category>) -> CO
 #[test]
 fn test_confusion_matrix_perfect() {
     // 2 categories: cat(1)=idx 0, dog(2)=idx 1; background=idx 2
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0]),  // cat GT
-            cm_gt_ann(2, 1, 2, [60.0, 0.0, 50.0, 50.0]), // dog GT
+            ann(1, [0.0, 0.0, 50.0, 50.0]),            // cat GT
+            ann(2, [60.0, 0.0, 50.0, 50.0]).in_cat(2), // dog GT
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.9), // cat DT → matches cat GT
-            cm_dt_ann(102, 1, 2, [60.0, 0.0, 50.0, 50.0], 0.8), // dog DT → matches dog GT
+            det(101, [0.0, 0.0, 50.0, 50.0], 0.9), // cat DT → matches cat GT
+            det(102, [60.0, 0.0, 50.0, 50.0], 0.8).in_cat(2), // dog DT → matches dog GT
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    ));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     let cm = ev.confusion_matrix(0.5, None, None);
@@ -1365,16 +1245,16 @@ fn test_confusion_matrix_perfect() {
 fn test_confusion_matrix_class_confusion() {
     // 1 GT: cat(1) at [0,0,50,50]
     // 1 DT: dog(2) at same location → IoU=1.0 with cat GT → recorded as gt=cat, pred=dog
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 2, [0.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
+        vec![det(101, [0.0, 0.0, 50.0, 50.0], 0.9).in_cat(2)],
+    ));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     let cm = ev.confusion_matrix(0.5, None, None);
@@ -1393,16 +1273,12 @@ fn test_confusion_matrix_class_confusion() {
 #[test]
 fn test_confusion_matrix_fp_background() {
     // No GT annotations; one spurious DT
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![], // no GTs
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(vec![img(1)], vec![cat(1, "cat")], vec![]));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![det(101, [0.0, 0.0, 50.0, 50.0], 0.9)],
+    ));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     let cm = ev.confusion_matrix(0.5, None, None);
@@ -1423,16 +1299,12 @@ fn test_confusion_matrix_fp_background() {
 #[test]
 fn test_confusion_matrix_fn_missed() {
     // One GT, no DTs
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![], // no detections
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(vec![img(1)], vec![cat(1, "cat")], vec![]));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     let cm = ev.confusion_matrix(0.5, None, None);
@@ -1457,16 +1329,16 @@ fn test_confusion_matrix_iou_threshold() {
     //   intersection = 50×100 = 5000
     //   union = 10000 + 5000 - 5000 = 10000
     //   IoU = 0.5
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 100.0, 100.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [50.0, 0.0, 50.0, 100.0], 0.9)],
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 100.0, 100.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![det(101, [50.0, 0.0, 50.0, 100.0], 0.9)],
+    ));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
 
@@ -1486,16 +1358,16 @@ fn test_confusion_matrix_iou_threshold() {
 /// Low-score DT dropped by min_score → GT becomes a missed detection (FN).
 #[test]
 fn test_confusion_matrix_min_score() {
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.3)],
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![det(101, [0.0, 0.0, 50.0, 50.0], 0.3)],
+    ));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
 
@@ -1525,22 +1397,22 @@ fn test_confusion_matrix_max_det() {
     // 2 GTs: cat at [0,0,50,50], dog at [60,0,50,50]
     // 2 DTs: cat (score=0.9) and dog (score=0.5)
     // With max_det=1: only cat DT kept → cat GT matches, dog GT missed (FN)
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0]),
-            cm_gt_ann(2, 1, 2, [60.0, 0.0, 50.0, 50.0]),
+            ann(1, [0.0, 0.0, 50.0, 50.0]),
+            ann(2, [60.0, 0.0, 50.0, 50.0]).in_cat(2),
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.9),
-            cm_dt_ann(102, 1, 2, [60.0, 0.0, 50.0, 50.0], 0.5),
+            det(101, [0.0, 0.0, 50.0, 50.0], 0.9),
+            det(102, [60.0, 0.0, 50.0, 50.0], 0.5).in_cat(2),
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    ));
 
     let ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
 
@@ -1570,9 +1442,6 @@ fn test_confusion_matrix_max_det() {
 // ============================================================
 // tide_errors tests
 // ============================================================
-//
-// Reuse the cm_* helpers defined above:
-//   cm_image, cm_category, cm_gt_ann, cm_dt_ann, cm_coco
 
 /// Run evaluate() and return tide_errors at the default thresholds.
 fn run_tide(coco_gt: COCO, coco_dt: COCO) -> hotcoco::TideErrors {
@@ -1584,16 +1453,16 @@ fn run_tide(coco_gt: COCO, coco_dt: COCO) -> hotcoco::TideErrors {
 /// Test 1: all DTs are perfect TPs → all ΔAP = 0, all counts = 0.
 #[test]
 fn test_tide_all_correct() {
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![det(101, [0.0, 0.0, 50.0, 50.0], 0.9)],
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1620,19 +1489,19 @@ fn test_tide_cls_error() {
     // DT dog(2) at [0,0,50,50] (score=0.9): FP for dog category because no dog GT overlaps.
     // Cross-IoU with cat(1) GT = 1.0 ≥ pos_thr → Cls.
     // dog(2) has 1 GT so it contributes to ΔAP: fixing Cls converts FP→TP, AP goes 0→1 for dog.
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0]),  // cat GT
-            cm_gt_ann(2, 1, 2, [60.0, 0.0, 50.0, 50.0]), // dog GT (no overlap with DT)
+            ann(1, [0.0, 0.0, 50.0, 50.0]),            // cat GT
+            ann(2, [60.0, 0.0, 50.0, 50.0]).in_cat(2), // dog GT (no overlap with DT)
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 2, [0.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
+        vec![det(101, [0.0, 0.0, 50.0, 50.0], 0.9).in_cat(2)],
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1651,16 +1520,16 @@ fn test_tide_cls_error() {
 fn test_tide_loc_error() {
     // GT: [0,0,50,50] area=2500; DT: [25,0,50,50] area=2500
     // IoU = intersection/union = 25*50 / (50*50 + 50*50 - 25*50) = 1250/3750 = 1/3 ≈ 0.333
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [25.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![det(101, [25.0, 0.0, 50.0, 50.0], 0.9)],
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1678,16 +1547,16 @@ fn test_tide_loc_error() {
 #[test]
 fn test_tide_both_error() {
     // GT: cat(1) at [0,0,50,50]; DT: dog(2) at [25,0,50,50] → IoU≈0.333 with cat GT
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 2, [25.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
+        vec![det(101, [25.0, 0.0, 50.0, 50.0], 0.9).in_cat(2)],
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1700,19 +1569,19 @@ fn test_tide_both_error() {
 #[test]
 fn test_tide_dupe_error() {
     // GT: [0,0,50,50]; DT1(score=0.9): exact match (TP); DT2(score=0.7): same box (Dupe)
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
         vec![
-            cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.9), // TP
-            cm_dt_ann(102, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.7), // Dupe
+            det(101, [0.0, 0.0, 50.0, 50.0], 0.9), // TP
+            det(102, [0.0, 0.0, 50.0, 50.0], 0.7), // Dupe
         ],
-        vec![cm_category(1, "cat")],
-    );
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1725,16 +1594,16 @@ fn test_tide_dupe_error() {
 #[test]
 fn test_tide_bkg_error() {
     // GT: [0,0,10,10]; DT: [90,90,10,10] — no overlap at all → IoU=0 < bg_thr=0.1
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 10.0, 10.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [90.0, 90.0, 10.0, 10.0], 0.9)],
-        vec![cm_category(1, "cat")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 10.0, 10.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![det(101, [90.0, 90.0, 10.0, 10.0], 0.9)],
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1747,12 +1616,12 @@ fn test_tide_bkg_error() {
 #[test]
 fn test_tide_miss_error() {
     // GT: [0,0,50,50]; no DT at all
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(vec![cm_image(1)], vec![], vec![cm_category(1, "cat")]);
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(vec![img(1)], vec![cat(1, "cat")], vec![]));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1780,23 +1649,23 @@ fn test_tide_priority_loc_over_cls() {
     //     - same-class IoU with cat GT [0,0,30,30] = 900/2500 = 0.36 ∈ [bg_thr=0.1, pos_thr=0.5] → Loc
     //     - cross-class IoU with dog GT [0,0,50,50] = 1.0 ≥ pos_thr=0.5 → would be Cls if Loc lost
     // tidecv/hotcoco priority: Loc fires first → Loc wins.
-    let coco_gt = cm_coco(
-        vec![cm_image(1), cm_image(2)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1), img(2)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0]), // img1 cat TP
-            cm_gt_ann(2, 2, 1, [0.0, 0.0, 30.0, 30.0]), // img2 cat (small)
-            cm_gt_ann(3, 2, 2, [0.0, 0.0, 50.0, 50.0]), // img2 dog
+            ann(1, [0.0, 0.0, 50.0, 50.0]),                     // img1 cat TP
+            ann(2, [0.0, 0.0, 30.0, 30.0]).in_img(2),           // img2 cat (small)
+            ann(3, [0.0, 0.0, 50.0, 50.0]).in_img(2).in_cat(2), // img2 dog
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1), cm_image(2)],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1), img(2)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.95), // img1 cat TP
-            cm_dt_ann(102, 2, 1, [0.0, 0.0, 50.0, 50.0], 0.9),  // img2 cat FP: Loc wins over Cls
+            det(101, [0.0, 0.0, 50.0, 50.0], 0.95),          // img1 cat TP
+            det(102, [0.0, 0.0, 50.0, 50.0], 0.9).in_img(2), // img2 cat FP: Loc wins over Cls
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1821,19 +1690,19 @@ fn test_tide_priority_loc_over_both() {
     // DT cat(1): [25,0,50,50] → same-class IoU ≈ 0.333 ≥ bg_thr=0.1 → Loc
     //             cross-IoU with dog GT [60,0,50,50] = 0 (no overlap) → can't be Both
     // So Loc wins.
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0]),  // cat
-            cm_gt_ann(2, 1, 2, [60.0, 0.0, 50.0, 50.0]), // dog (no overlap with DT)
+            ann(1, [0.0, 0.0, 50.0, 50.0]),            // cat
+            ann(2, [60.0, 0.0, 50.0, 50.0]).in_cat(2), // dog (no overlap with DT)
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(101, 1, 1, [25.0, 0.0, 50.0, 50.0], 0.9)],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
+        vec![det(101, [25.0, 0.0, 50.0, 50.0], 0.9)],
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1845,26 +1714,26 @@ fn test_tide_priority_loc_over_both() {
 #[test]
 fn test_tide_delta_ap_fp_ge_individuals() {
     // Multiple FP error types in one scene
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
-            cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0]),
-            cm_gt_ann(2, 1, 2, [60.0, 0.0, 50.0, 50.0]),
+            ann(1, [0.0, 0.0, 50.0, 50.0]),
+            ann(2, [60.0, 0.0, 50.0, 50.0]).in_cat(2),
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat"), cat(2, "dog")],
         vec![
             // DT1 cat: matches cat GT (TP)
-            cm_dt_ann(101, 1, 1, [0.0, 0.0, 50.0, 50.0], 0.95),
+            det(101, [0.0, 0.0, 50.0, 50.0], 0.95),
             // DT2 dog: far away → Bkg
-            cm_dt_ann(102, 1, 2, [150.0, 150.0, 10.0, 10.0], 0.8),
+            det(102, [150.0, 150.0, 10.0, 10.0], 0.8).in_cat(2),
             // DT3 cat: wrong class vs dog GT at [60,0,50,50] → cross-IoU=1.0 → Cls
-            cm_dt_ann(103, 1, 1, [60.0, 0.0, 50.0, 50.0], 0.7),
+            det(103, [60.0, 0.0, 50.0, 50.0], 0.7),
         ],
-        vec![cm_category(1, "cat"), cm_category(2, "dog")],
-    );
+    ));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -1885,12 +1754,12 @@ fn test_tide_delta_ap_fp_ge_individuals() {
 #[test]
 fn test_tide_empty_category() {
     // cat(1): 1 GT, 0 DTs → Miss=1, all ΔAP values finite
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, [0.0, 0.0, 50.0, 50.0])],
-        vec![cm_category(1, "cat")],
-    );
-    let coco_dt = cm_coco(vec![cm_image(1)], vec![], vec![cm_category(1, "cat")]);
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "cat")],
+        vec![ann(1, [0.0, 0.0, 50.0, 50.0])],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(vec![img(1)], vec![cat(1, "cat")], vec![]));
 
     let te = run_tide(coco_gt, coco_dt);
 
@@ -3037,16 +2906,16 @@ fn test_cvat_skips_unsupported() {
 fn make_perfect_eval() -> COCOeval {
     // One image, one GT bbox, one perfectly matching DT.
     let bbox = [10.0, 10.0, 50.0, 50.0];
-    let coco_gt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_gt_ann(1, 1, 1, bbox)],
-        vec![cm_category(1, "thing")],
-    );
-    let coco_dt = cm_coco(
-        vec![cm_image(1)],
-        vec![cm_dt_ann(1, 1, 1, bbox, 1.0)],
-        vec![cm_category(1, "thing")],
-    );
+    let coco_gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![ann(1, bbox)],
+    ));
+    let coco_dt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![det(1, bbox, 1.0)],
+    ));
     let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     ev.evaluate();
     ev.accumulate();
@@ -3076,14 +2945,14 @@ fn test_f_scores_keys_and_range() {
 
     let f1 = ev.f_scores(1.0);
     assert_eq!(f1.len(), 3);
-    assert!(f1.contains_key("F1") && f1.contains_key("F150") && f1.contains_key("F175"));
+    assert!(f1.contains_key("F1") && f1.contains_key("F1_50") && f1.contains_key("F1_75"));
     for (k, v) in &f1 {
         assert!((0.0..=1.0).contains(v), "{k} = {v} outside [0, 1]");
     }
 
     // beta variant gets correct key prefix
     let fb = ev.f_scores(0.5);
-    assert!(fb.contains_key("F0.5") && fb.contains_key("F0.550") && fb.contains_key("F0.575"));
+    assert!(fb.contains_key("F0.5") && fb.contains_key("F0.5_50") && fb.contains_key("F0.5_75"));
 }
 
 #[test]
@@ -3091,9 +2960,9 @@ fn test_f_scores_perfect_detection() {
     let scores = make_perfect_eval().f_scores(1.0);
     assert!((scores["F1"] - 1.0).abs() < 1e-9, "F1={}", scores["F1"]);
     assert!(
-        (scores["F150"] - 1.0).abs() < 1e-9,
-        "F150={}",
-        scores["F150"]
+        (scores["F1_50"] - 1.0).abs() < 1e-9,
+        "F1_50={}",
+        scores["F1_50"]
     );
 }
 
@@ -3956,7 +3825,7 @@ fn test_oid_group_of_multi_match() {
     let ignored: Vec<u64> = e
         .dt_ids
         .iter()
-        .zip(&e.dt_ignore[0])
+        .zip(e.dt_ignore.row(0))
         .filter(|&(_, &ig)| ig)
         .map(|(&id, _)| id)
         .collect();
@@ -3966,7 +3835,8 @@ fn test_oid_group_of_multi_match() {
         "only the surplus detection is ignored; the best one scores the box"
     );
     assert_eq!(
-        e.dt_matches[0][1], 2,
+        e.dt_matches[(0, 1)],
+        2,
         "DT2 should be paired with the group-of GT (id 2)"
     );
 
@@ -4095,7 +3965,7 @@ fn test_oid_undetected_group_of_is_a_miss() {
         "the group-of box counts toward the denominator even though nothing hit it"
     );
     assert!(
-        !e.gt_matched[0][1],
+        !e.gt_matched[(0, 1)],
         "the group-of box should be unmatched — that is what makes it a miss"
     );
 }
@@ -4927,38 +4797,12 @@ fn test_compare_bootstrap_coverage() {
 // OBB (Oriented Bounding Box) evaluation tests
 // =============================================================================
 
-fn obb_test_image() -> Image {
-    Image {
-        id: 1,
-        file_name: "obb_test.png".into(),
-        width: 800,
-        height: 600,
-        license: None,
-        coco_url: None,
-        flickr_url: None,
-        date_captured: None,
-        neg_category_ids: vec![],
-        not_exhaustive_category_ids: vec![],
-    }
-}
-
-fn obb_test_category() -> Category {
-    Category {
-        id: 1,
-        name: "vehicle".into(),
-        supercategory: None,
-        skeleton: None,
-        keypoints: None,
-        frequency: None,
-    }
-}
-
 #[test]
 fn test_obb_eval_basic() {
     // GT: one rotated box, DT: same box with high score → AP ≈ 1.0
     let gt_dataset = Dataset {
         info: None,
-        images: vec![obb_test_image()],
+        images: vec![img(1)],
         annotations: vec![Annotation {
             id: 1,
             image_id: 1,
@@ -4973,7 +4817,7 @@ fn test_obb_eval_basic() {
             score: None,
             is_group_of: None,
         }],
-        categories: vec![obb_test_category()],
+        categories: vec![cat(1, "vehicle")],
         licenses: vec![],
     };
 
@@ -5021,7 +4865,7 @@ fn test_obb_eval_no_overlap() {
     // GT and DT have non-overlapping OBBs → AP = 0 (or -1)
     let gt_dataset = Dataset {
         info: None,
-        images: vec![obb_test_image()],
+        images: vec![img(1)],
         annotations: vec![Annotation {
             id: 1,
             image_id: 1,
@@ -5036,7 +4880,7 @@ fn test_obb_eval_no_overlap() {
             score: None,
             is_group_of: None,
         }],
-        categories: vec![obb_test_category()],
+        categories: vec![cat(1, "vehicle")],
         licenses: vec![],
     };
 
@@ -5082,7 +4926,7 @@ fn test_obb_eval_no_overlap() {
 fn test_dota_round_trip_integration() {
     let dataset = Dataset {
         info: None,
-        images: vec![obb_test_image()],
+        images: vec![img(1)],
         annotations: vec![Annotation {
             id: 1,
             image_id: 1,
@@ -5097,7 +4941,7 @@ fn test_dota_round_trip_integration() {
             score: None,
             is_group_of: None,
         }],
-        categories: vec![obb_test_category()],
+        categories: vec![cat(1, "vehicle")],
         licenses: vec![],
     };
 
@@ -5333,12 +5177,22 @@ fn crate_root_api_surface_resolves() {
 // EvalReport
 // ---------------------------------------------------------------------------
 
-fn bbox_eval_on_fixtures() -> COCOeval {
+/// The standard bbox fixture pair, loaded but not evaluated.
+///
+/// Left unrun because the provenance tests below adjust `params` first, which
+/// only means anything before `run()`. Callers that just want the numbers use
+/// [`bbox_eval_on_fixtures`].
+fn load_bbox_fixtures() -> COCOeval {
     let coco_gt = COCO::new(&fixtures_dir().join("gt.json")).expect("Failed to load GT");
     let coco_dt = coco_gt
         .load_res(&fixtures_dir().join("dt.json"))
         .expect("Failed to load DT");
-    let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+    COCOeval::new(coco_gt, coco_dt, IouType::Bbox)
+}
+
+/// [`load_bbox_fixtures`] run to completion.
+fn bbox_eval_on_fixtures() -> COCOeval {
+    let mut ev = load_bbox_fixtures();
     ev.run();
     ev
 }
@@ -5625,12 +5479,6 @@ fn eval_invariants_hold_for_open_images() {
 // asserting that a run which *should* be downgraded actually is.
 // ---------------------------------------------------------------------------
 
-fn bbox_eval_for_provenance() -> COCOeval {
-    let gt = COCO::new(&fixtures_dir().join("gt.json")).unwrap();
-    let dt = gt.load_res(&fixtures_dir().join("dt.json")).unwrap();
-    COCOeval::new(gt, dt, IouType::Bbox)
-}
-
 /// Run to completion and report whether `report()` calls the result comparable.
 fn provenance_of(mut ev: COCOeval) -> Provenance {
     ev.run();
@@ -5642,7 +5490,7 @@ fn default_params_are_parity_verified() {
     // The control. Without this, every assertion below could pass because
     // `report()` downgrades unconditionally.
     assert_eq!(
-        provenance_of(bbox_eval_for_provenance()),
+        provenance_of(load_bbox_fixtures()),
         Provenance::ParityVerified
     );
 }
@@ -5655,7 +5503,7 @@ fn default_params_are_parity_verified() {
 /// extension run with every assertion above still green.
 #[test]
 fn provenance_accessor_agrees_with_report() {
-    let mut verified = bbox_eval_for_provenance();
+    let mut verified = load_bbox_fixtures();
     verified.run();
     assert_eq!(
         verified.provenance(),
@@ -5664,7 +5512,7 @@ fn provenance_accessor_agrees_with_report() {
     );
     assert_eq!(verified.provenance(), Provenance::ParityVerified);
 
-    let mut extension = bbox_eval_for_provenance();
+    let mut extension = load_bbox_fixtures();
     extension.params.iou_thrs = vec![0.5, 0.75];
     extension.run();
     assert_eq!(
@@ -5679,21 +5527,21 @@ fn provenance_accessor_agrees_with_report() {
 
 #[test]
 fn custom_iou_thrs_downgrade_to_extension() {
-    let mut ev = bbox_eval_for_provenance();
+    let mut ev = load_bbox_fixtures();
     ev.params.iou_thrs = vec![0.5, 0.75];
     assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
 fn custom_max_dets_downgrade_to_extension() {
-    let mut ev = bbox_eval_for_provenance();
+    let mut ev = load_bbox_fixtures();
     ev.params.max_dets = vec![1, 10, 50];
     assert_eq!(provenance_of(ev), Provenance::Extension);
 }
 
 #[test]
 fn custom_area_range_labels_downgrade_to_extension() {
-    let mut ev = bbox_eval_for_provenance();
+    let mut ev = load_bbox_fixtures();
     for (i, ar) in ev.params.area_ranges.iter_mut().enumerate() {
         ar.label = format!("bucket{i}");
     }
@@ -5705,7 +5553,7 @@ fn custom_area_range_labels_downgrade_to_extension() {
 /// nothing and the run still claimed parity.
 #[test]
 fn custom_area_range_bounds_downgrade_even_with_default_labels() {
-    let mut ev = bbox_eval_for_provenance();
+    let mut ev = load_bbox_fixtures();
     let labels_before: Vec<String> = ev
         .params
         .area_ranges
@@ -5735,7 +5583,7 @@ fn custom_area_range_bounds_downgrade_even_with_default_labels() {
 
 #[test]
 fn custom_rec_thrs_downgrade_to_extension() {
-    let mut ev = bbox_eval_for_provenance();
+    let mut ev = load_bbox_fixtures();
     // The 11-point VOC grid instead of COCO's 101 points.
     ev.params.rec_thrs = (0..=10).map(|i| f64::from(i) / 10.0).collect();
     assert_eq!(provenance_of(ev), Provenance::Extension);
@@ -5743,7 +5591,7 @@ fn custom_rec_thrs_downgrade_to_extension() {
 
 #[test]
 fn class_agnostic_pooling_downgrades_to_extension() {
-    let mut ev = bbox_eval_for_provenance();
+    let mut ev = load_bbox_fixtures();
     ev.params.use_cats = false;
     assert_eq!(provenance_of(ev), Provenance::Extension);
 }
@@ -5895,7 +5743,7 @@ fn tide_fp_types_partition_the_false_positives() {
             continue;
         }
         for d in 0..e.dt_ids.len() {
-            if !e.dt_matched[t_idx][d] && !e.dt_ignore[t_idx][d] {
+            if !e.dt_matched[(t_idx, d)] && !e.dt_ignore[(t_idx, d)] {
                 expected_fps += 1;
             }
         }
@@ -5913,12 +5761,263 @@ fn tide_fp_types_partition_the_false_positives() {
         te.counts
     );
 
-    // `FN` and `Miss` are the same quantity computed once and reported twice; the
-    // day one of them is recomputed independently, this is what notices.
-    if let (Some(fnv), Some(miss)) = (te.delta_ap.get("FN"), te.delta_ap.get("Miss")) {
-        assert_eq!(
-            fnv, miss,
-            "delta_ap[FN] and delta_ap[Miss] must be the same value"
+    // `FP` and `FN` are tidecv's special oracles. Both are pure improvements —
+    // suppressing FPs can only raise precision, shrinking the denominator can
+    // only raise recall — so neither delta may be negative. And since `FP`
+    // suppresses *every* false positive, it dominates each per-type fix that is
+    // itself a pure suppression (Bkg/Both/Dupe; not Loc/Cls, whose fixes gain
+    // recall by flipping to TP).
+    let fp = te.delta_ap["FP"];
+    let fnv = te.delta_ap["FN"];
+    assert!(fp >= 0.0, "FP oracle must not lower AP, got {fp}");
+    assert!(fnv >= 0.0, "FN oracle must not lower AP, got {fnv}");
+    for k in ["Bkg", "Both", "Dupe"] {
+        let per_type = te.delta_ap[k];
+        assert!(
+            fp >= per_type - 1e-12,
+            "suppressing all FPs must dominate suppressing only {k}: {fp} < {per_type}"
         );
     }
+}
+
+/// `max_dets` order must not change any number.
+///
+/// Before `Params::max_det()` owned the cap, `evaluate()` stamped eval_imgs
+/// with `max_dets.last()` while `image_diagnostics` filtered on the maximum:
+/// with `[100, 10, 1]` the filter matched nothing and diagnostics came back
+/// empty. pycocotools sorts `maxDets` in-place; hotcoco keeps the caller's
+/// order on the M axis, so equality here is by value, not by index.
+#[test]
+fn test_max_dets_order_is_irrelevant() {
+    let gt_path = fixtures_dir().join("gt.json");
+    let dt_path = fixtures_dir().join("dt.json");
+
+    let run = |max_dets: Vec<usize>| {
+        let coco_gt = COCO::new(&gt_path).expect("Failed to load GT");
+        let coco_dt = coco_gt.load_res(&dt_path).expect("Failed to load DT");
+        let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+        ev.params.max_dets = max_dets;
+        ev.evaluate();
+        ev.accumulate();
+        ev.summarize();
+        ev
+    };
+
+    let sorted = run(vec![1, 10, 100]);
+    let unsorted = run(vec![100, 10, 1]);
+
+    // Summary metrics look up the M axis by value, so the stats vectors must
+    // be identical element-for-element.
+    assert_eq!(
+        sorted.stats().expect("summarize sets stats"),
+        unsorted.stats().expect("summarize sets stats"),
+        "stats must not depend on max_dets order"
+    );
+
+    // The diagnostics filter is the site that used to disagree with the
+    // evaluate() cap: it must find eval_imgs, not an empty intersection.
+    let diag_sorted = sorted
+        .image_diagnostics(0.5, 0.5)
+        .expect("diagnostics on sorted max_dets");
+    let diag_unsorted = unsorted
+        .image_diagnostics(0.5, 0.5)
+        .expect("diagnostics on unsorted max_dets");
+    assert!(
+        !diag_unsorted.images.is_empty(),
+        "diagnostics must see eval_imgs regardless of max_dets order"
+    );
+    assert_eq!(
+        diag_sorted.images.len(),
+        diag_unsorted.images.len(),
+        "diagnostics coverage must not depend on max_dets order"
+    );
+}
+
+/// GT annotations feed the matcher in JSON array order, exactly as pycocotools
+/// builds `_gts` — the index must not re-sort them by id.
+///
+/// The order is observable: the greedy scan takes the *later* GT on an exact
+/// IoU tie (`>=`, same as pycocotools), so two identical boxes whose ids are
+/// reversed relative to array order pick opposite winners under the two
+/// orderings. Official COCO files are id-ordered, which is why no parity run
+/// can see this; converted or merged files are where it bites.
+#[test]
+fn test_gt_annotations_keep_json_array_order() {
+    let gt_json = r#"{
+        "images": [{"id": 1, "width": 100, "height": 100}],
+        "categories": [{"id": 1, "name": "thing"}],
+        "annotations": [
+            {"id": 2, "image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "area": 400, "iscrowd": 0},
+            {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "area": 400, "iscrowd": 0}
+        ]
+    }"#;
+    let dt_json = r#"[
+        {"image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.9}
+    ]"#;
+
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let gt_path = dir.path().join("gt.json");
+    let dt_path = dir.path().join("dt.json");
+    std::fs::write(&gt_path, gt_json).expect("write GT fixture");
+    std::fs::write(&dt_path, dt_json).expect("write DT fixture");
+
+    let coco_gt = COCO::new(&gt_path).expect("load GT");
+    let coco_dt = coco_gt.load_res(&dt_path).expect("load DT");
+    let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+    ev.evaluate();
+
+    let all_idx = ev.params.all_area_idx();
+    let all_rng = ev.params.area_ranges[all_idx].range;
+    let cell = ev
+        .eval_imgs()
+        .iter()
+        .flatten()
+        .find(|e| e.area_rng == all_rng)
+        .expect("one populated cell at area=all");
+
+    // Array order [2, 1], not id order [1, 2].
+    assert_eq!(
+        cell.gt_ids,
+        vec![2, 1],
+        "GT ids must stay in JSON array order"
+    );
+    // On an exact IoU tie the later GT in array order wins — id 1 here.
+    // Under id-sorted order the winner flips to id 2.
+    assert!(cell.dt_matched[(0, 0)], "detection must match at IoU 0.5");
+    assert_eq!(
+        cell.dt_matches[(0, 0)],
+        1,
+        "tie must resolve to the later GT in array order, as pycocotools does"
+    );
+}
+
+/// Per-class AP, the F-scores and `report()`'s PR curves must read the M-axis
+/// slot holding `max_det()`, not the last one.
+///
+/// `Params::max_dets` is the caller's list and hotcoco does not sort it (the
+/// accumulated M axis follows the caller's order), so `[100, 10, 1]` puts the cap
+/// at slot 0 while `[1, 10, 100]` puts it at slot 2. Three sites took
+/// `shape.m - 1` regardless, which meant a single `report()` disagreed with
+/// itself: the headline `AP` was computed at `maxDets = 100` and every per-class
+/// `AP` beside it at `maxDets = 1`.
+///
+/// The scenario needs more than one detection per image per class, or the cap
+/// makes no difference and the test passes against the defect.
+#[test]
+fn per_class_metrics_follow_max_det_not_the_last_slot() {
+    let gt_ds = dataset(
+        vec![img(1)],
+        vec![cat(1, "a"), cat(2, "b")],
+        vec![
+            ann(1, [0.0, 0.0, 10.0, 10.0]),
+            ann(2, [20.0, 0.0, 10.0, 10.0]),
+            ann(3, [0.0, 20.0, 10.0, 10.0]).in_cat(2),
+            ann(4, [20.0, 20.0, 10.0, 10.0]).in_cat(2),
+        ],
+    );
+    // Two true positives per class. At maxDets = 1 only the top-scoring one
+    // survives, halving recall and therefore AP.
+    let dets = vec![
+        det(1, [0.0, 0.0, 10.0, 10.0], 0.9),
+        det(2, [20.0, 0.0, 10.0, 10.0], 0.8),
+        det(3, [0.0, 20.0, 10.0, 10.0], 0.7).in_cat(2),
+        det(4, [20.0, 20.0, 10.0, 10.0], 0.6).in_cat(2),
+    ];
+
+    let run = |max_dets: Vec<usize>| {
+        let gt = COCO::from_dataset(gt_ds.clone());
+        let dt = gt.load_res_anns(dets.clone()).unwrap();
+        let mut ev = COCOeval::new(gt, dt, IouType::Bbox);
+        ev.params.max_dets = max_dets;
+        ev.run();
+        let report = ev.report().unwrap();
+        let per_class: Vec<f64> = report
+            .per_class
+            .values()
+            .filter_map(|m| m.get("AP").copied())
+            .collect();
+        let f1 = ev.f_scores(1.0).get("F1").copied().unwrap();
+        let curve = report.curves["pr@0.50"].clone();
+        (report.metrics["AP"], per_class, f1, curve)
+    };
+
+    let (ap_sorted, per_class_sorted, f1_sorted, curve_sorted) = run(vec![1, 10, 100]);
+    let (ap_unsorted, per_class_unsorted, f1_unsorted, curve_unsorted) = run(vec![100, 10, 1]);
+
+    // The cap is the same value either way, so every one of these is the same
+    // number — the ordering of `max_dets` is not a metric input.
+    assert_eq!(
+        ap_sorted, ap_unsorted,
+        "headline AP must not depend on order"
+    );
+    assert_eq!(
+        per_class_sorted, per_class_unsorted,
+        "per-class AP diverged"
+    );
+    assert_eq!(f1_sorted, f1_unsorted, "F1 diverged");
+    assert_eq!(curve_sorted, curve_unsorted, "PR curve diverged");
+
+    // And the per-class values must agree with the headline they sit beside,
+    // which is what a reader compares them against.
+    assert!(
+        !per_class_unsorted.is_empty(),
+        "no per-class AP was reported"
+    );
+    for ap in &per_class_unsorted {
+        assert!(
+            (ap - ap_unsorted).abs() < 1e-12,
+            "per-class AP {ap} disagrees with headline AP {ap_unsorted}"
+        );
+    }
+}
+
+/// `metric_defs()` is the catalog `metric_keys()` and `stats()` are projections
+/// of, so all three must stay index-parallel. Renderers read `defs[i]` to label
+/// `stats[i]`; if the two lists could differ in length or order, every label
+/// would be one row off with nothing to catch it.
+#[test]
+fn metric_defs_align_with_metric_keys_and_stats() {
+    let gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "a")],
+        vec![ann(1, [0.0, 0.0, 10.0, 10.0])],
+    ));
+    let dt = gt
+        .load_res_anns(vec![det(1, [0.0, 0.0, 10.0, 10.0], 0.9)])
+        .unwrap();
+    let mut ev = COCOeval::new(gt, dt, IouType::Bbox);
+    ev.run();
+
+    let defs = ev.metric_defs();
+    let keys = ev.metric_keys();
+    let stats = ev.stats().unwrap();
+
+    assert_eq!(defs.len(), keys.len());
+    assert_eq!(defs.len(), stats.len());
+    for (d, &k) in defs.iter().zip(&keys) {
+        assert_eq!(d.name, k);
+    }
+
+    // The fields a renderer needs are readable, and describe the row they label.
+    let ap50 = defs.iter().find(|d| d.name == "AP50").unwrap();
+    assert!(ap50.ap);
+    assert_eq!(ap50.iou_thr, Some(0.5));
+    assert_eq!(ap50.area_lbl, "all");
+    assert_eq!(ap50.max_det, 100);
+    assert!(ap50.freq_group.is_none());
+
+    // LVIS is the mode that populates the frequency axis.
+    let gt = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "a")],
+        vec![ann(1, [0.0, 0.0, 10.0, 10.0])],
+    ));
+    let dt = gt.load_res_anns(vec![]).unwrap();
+    let lvis = COCOeval::new_lvis(gt, dt, IouType::Bbox);
+    let apr = lvis
+        .metric_defs()
+        .into_iter()
+        .find(|d| d.name == "APr")
+        .unwrap();
+    assert_eq!(apr.freq_group, Some(hotcoco::FreqGroup::Rare));
 }

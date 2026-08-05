@@ -1,14 +1,13 @@
 {
   "_comment": "Open Images detection AP produced by the TensorFlow Object Detection API (OpenImagesDetectionEvaluator, group_of_weight=1.0), NOT by hotcoco. This is the Challenge detection metric without the non-exhaustive image-level-label filter, which hotcoco does not implement. Consumed by scripts/parity_oid.py. Regenerate with scripts/gen_oid_fixtures.py (needs network access).",
   "reference": {
-    "source": "github.com/tensorflow/models @ master, research/object_detection",
+    "source": "github.com/tensorflow/models @ 4d7bdd8c170ee90850f2f9ccef0f6d19b817de35, research/object_detection",
     "evaluator": "OpenImagesDetectionEvaluator(group_of_weight=1.0)",
     "numpy": "2.4.3"
   },
   "cases": [
     {
       "name": "no_group_of",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -55,7 +54,6 @@
     },
     {
       "name": "group_of_one_detection_inside",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -103,7 +101,6 @@
     },
     {
       "name": "group_of_many_detections_inside",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -192,7 +189,6 @@
     },
     {
       "name": "group_of_undetected",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -253,7 +249,6 @@
     },
     {
       "name": "small_detection_inside_group_of",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -328,7 +323,6 @@
     },
     {
       "name": "detection_half_outside_group_of",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -376,7 +370,6 @@
     },
     {
       "name": "detection_mostly_outside_group_of",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -424,7 +417,6 @@
     },
     {
       "name": "group_of_only_no_detections",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -457,7 +449,6 @@
     },
     {
       "name": "two_group_of_boxes",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -533,7 +524,6 @@
     },
     {
       "name": "two_categories",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -613,7 +603,6 @@
     },
     {
       "name": "random_000",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -775,7 +764,6 @@
     },
     {
       "name": "random_001",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -833,7 +821,6 @@
     },
     {
       "name": "random_002",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -978,7 +965,6 @@
     },
     {
       "name": "random_003",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -1091,7 +1077,6 @@
     },
     {
       "name": "random_004",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -1226,7 +1211,6 @@
     },
     {
       "name": "random_005",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -1369,7 +1353,6 @@
     },
     {
       "name": "random_006",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -1457,7 +1440,6 @@
     },
     {
       "name": "random_007",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -1628,7 +1610,6 @@
     },
     {
       "name": "random_008",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -1746,7 +1727,6 @@
     },
     {
       "name": "random_009",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -1889,7 +1869,6 @@
     },
     {
       "name": "random_010",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -2045,7 +2024,6 @@
     },
     {
       "name": "random_011",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -2175,7 +2153,6 @@
     },
     {
       "name": "random_012",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -2342,7 +2319,6 @@
     },
     {
       "name": "random_013",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -2517,7 +2493,6 @@
     },
     {
       "name": "random_014",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -2689,7 +2664,6 @@
     },
     {
       "name": "random_015",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -2815,7 +2789,6 @@
     },
     {
       "name": "random_016",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -2943,7 +2916,6 @@
     },
     {
       "name": "random_017",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -3056,7 +3028,6 @@
     },
     {
       "name": "random_018",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -3177,7 +3148,6 @@
     },
     {
       "name": "random_019",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -3330,7 +3300,6 @@
     },
     {
       "name": "random_020",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -3432,7 +3401,6 @@
     },
     {
       "name": "random_021",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -3520,7 +3488,6 @@
     },
     {
       "name": "random_022",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -3610,7 +3577,6 @@
     },
     {
       "name": "random_023",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -3727,7 +3693,6 @@
     },
     {
       "name": "random_024",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -3816,7 +3781,6 @@
     },
     {
       "name": "random_025",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -3941,7 +3905,6 @@
     },
     {
       "name": "random_026",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -4027,7 +3990,6 @@
     },
     {
       "name": "random_027",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -4153,7 +4115,6 @@
     },
     {
       "name": "random_028",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -4243,7 +4204,6 @@
     },
     {
       "name": "random_029",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -4384,7 +4344,6 @@
     },
     {
       "name": "random_030",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -4451,7 +4410,6 @@
     },
     {
       "name": "random_031",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -4503,7 +4461,6 @@
     },
     {
       "name": "random_032",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -4652,7 +4609,6 @@
     },
     {
       "name": "random_033",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -4710,7 +4666,6 @@
     },
     {
       "name": "random_034",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -4827,7 +4782,6 @@
     },
     {
       "name": "random_035",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -4924,7 +4878,6 @@
     },
     {
       "name": "random_036",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -5071,7 +5024,6 @@
     },
     {
       "name": "random_037",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -5242,7 +5194,6 @@
     },
     {
       "name": "random_038",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -5294,7 +5245,6 @@
     },
     {
       "name": "random_039",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -5422,7 +5372,6 @@
     },
     {
       "name": "random_040",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -5576,7 +5525,6 @@
     },
     {
       "name": "random_041",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -5739,7 +5687,6 @@
     },
     {
       "name": "random_042",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -5859,7 +5806,6 @@
     },
     {
       "name": "random_043",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -6020,7 +5966,6 @@
     },
     {
       "name": "random_044",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -6158,7 +6103,6 @@
     },
     {
       "name": "random_045",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -6258,7 +6202,6 @@
     },
     {
       "name": "random_046",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -6361,7 +6304,6 @@
     },
     {
       "name": "random_047",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -6541,7 +6483,6 @@
     },
     {
       "name": "random_048",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -6701,7 +6642,6 @@
     },
     {
       "name": "random_049",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -6781,7 +6721,6 @@
     },
     {
       "name": "random_050",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -6848,7 +6787,6 @@
     },
     {
       "name": "random_051",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -6920,7 +6858,6 @@
     },
     {
       "name": "random_052",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -7100,7 +7037,6 @@
     },
     {
       "name": "random_053",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -7232,7 +7168,6 @@
     },
     {
       "name": "random_054",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -7385,7 +7320,6 @@
     },
     {
       "name": "random_055",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,
@@ -7521,7 +7455,6 @@
     },
     {
       "name": "random_056",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -7624,7 +7557,6 @@
     },
     {
       "name": "random_057",
-      "n_cat": 3,
       "categories": [
         {
           "id": 1,
@@ -7804,7 +7736,6 @@
     },
     {
       "name": "random_058",
-      "n_cat": 1,
       "categories": [
         {
           "id": 1,
@@ -7906,7 +7837,6 @@
     },
     {
       "name": "random_059",
-      "n_cat": 2,
       "categories": [
         {
           "id": 1,

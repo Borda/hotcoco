@@ -3,22 +3,27 @@
 import argparse
 
 import hotcoco
+from helpers import VAL2017
 from hotcoco.plot import report
 
+# `kpt` is the spelling `just report type=kpt` passes; the evaluator's own name
+# for it is `keypoints`, and passing `kpt` through was a hard error.
+_ALIASES = {"kpt": "keypoints"}
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--type", default="bbox", choices=["bbox", "segm", "kpt"])
+parser.add_argument("--type", default="bbox", choices=["bbox", "segm", "kpt", "keypoints"])
 parser.add_argument("--out", default="report.pdf")
 args = parser.parse_args()
 
-if args.type == "kpt":
-    gt_path = "data/annotations/person_keypoints_val2017.json"
-else:
-    gt_path = "data/annotations/instances_val2017.json"
-dt_path = f"data/{args.type}_val2017_results.json"
+iou_type = _ALIASES.get(args.type, args.type)
+# Absolute paths from helpers.DATA_DIR: relative strings only worked from the
+# repo root, so `just report` broke anywhere else.
+gt_path = str(VAL2017[iou_type]["gt"])
+dt_path = str(VAL2017[iou_type]["dt"])
 
 gt = hotcoco.COCO(gt_path)
 dt = gt.load_res(dt_path)
-ev = hotcoco.COCOeval(gt, dt, args.type)
+ev = hotcoco.COCOeval(gt, dt, iou_type)
 ev.run()
 report(ev, save_path=args.out, gt_path=gt_path, dt_path=dt_path)
 print(f"Saved {args.out}")

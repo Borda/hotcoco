@@ -109,8 +109,15 @@ where
 
 /// Segmentation mask in one of three COCO formats.
 ///
-/// Uses `#[serde(untagged)]` to auto-detect the format from JSON structure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `#[serde(untagged)]` auto-detects the format when *serializing* (it just
+/// writes the variant's content, which is the COCO wire shape). Deserialization
+/// is hand-written below instead of untagged: untagged buffers the entire value
+/// into serde's internal `Content` tree and then tries each variant against it,
+/// which materializes every polygon coordinate twice — measured as the dominant
+/// cost of loading a polygon-heavy GT file, on serde_json and simd-json alike.
+/// The visitor streams instead: a JSON array is a polygon list, a JSON object
+/// is an RLE whose variant is decided by the type of its `counts` value.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Segmentation {
     /// Polygon format: list of polygons, each a flat list of [x, y, x, y, ...] coordinates.
@@ -119,6 +126,94 @@ pub enum Segmentation {
     CompressedRle { size: [u32; 2], counts: String },
     /// Uncompressed RLE format.
     UncompressedRle { size: [u32; 2], counts: Vec<u32> },
+}
+
+impl<'de> Deserialize<'de> for Segmentation {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// `counts` value: a compressed-RLE string or an uncompressed run list,
+        /// decided by the token serde hands the visitor — no buffering.
+        enum Counts {
+            Str(String),
+            Ints(Vec<u32>),
+        }
+
+        impl<'de> Deserialize<'de> for Counts {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct CountsVisitor;
+                impl<'de> serde::de::Visitor<'de> for CountsVisitor {
+                    type Value = Counts;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("an RLE counts string or an array of run lengths")
+                    }
+
+                    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Counts, E> {
+                        Ok(Counts::Str(v.to_owned()))
+                    }
+
+                    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Counts, E> {
+                        Ok(Counts::Str(v))
+                    }
+
+                    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                        self,
+                        mut seq: A,
+                    ) -> Result<Counts, A::Error> {
+                        let mut v = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                        while let Some(c) = seq.next_element()? {
+                            v.push(c);
+                        }
+                        Ok(Counts::Ints(v))
+                    }
+                }
+                deserializer.deserialize_any(CountsVisitor)
+            }
+        }
+
+        struct SegVisitor;
+        impl<'de> serde::de::Visitor<'de> for SegVisitor {
+            type Value = Segmentation;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of polygons or an RLE object with `size` and `counts`")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Segmentation, A::Error> {
+                let mut polys = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(p) = seq.next_element()? {
+                    polys.push(p);
+                }
+                Ok(Segmentation::Polygon(polys))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Segmentation, A::Error> {
+                let mut size: Option<[u32; 2]> = None;
+                let mut counts: Option<Counts> = None;
+                while let Some(key) = map.next_key::<std::borrow::Cow<'_, str>>()? {
+                    match key.as_ref() {
+                        "size" => size = Some(map.next_value()?),
+                        "counts" => counts = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let size = size.ok_or_else(|| serde::de::Error::missing_field("size"))?;
+                match counts.ok_or_else(|| serde::de::Error::missing_field("counts"))? {
+                    Counts::Str(counts) => Ok(Segmentation::CompressedRle { size, counts }),
+                    Counts::Ints(counts) => Ok(Segmentation::UncompressedRle { size, counts }),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SegVisitor)
+    }
 }
 
 /// An object category (e.g. "person", "car").

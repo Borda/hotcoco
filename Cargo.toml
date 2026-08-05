@@ -76,8 +76,25 @@ inherits = "release"
 debug = true
 strip = false
 
+# `split-debuginfo` and `debug` are set explicitly because Cargo's macOS defaults
+# make `target/` grow without bound. The default is `split-debuginfo = "unpacked"`
+# with full debug info: every compilation unit leaves a loose `.o` file in
+# `target/debug/deps/`, and Cargo never garbage-collects them — each rebuild emits
+# a freshly-hashed set and the old ones stay forever. The pre-commit hook runs
+# `cargo test`, so every commit deposited a few thousand more. It reached 87,134
+# object files / 18 GB before anyone looked.
+#
+# `packed` hands the objects to `dsymutil`, which consumes them into one `.dSYM`
+# bundle per binary. `line-tables-only` keeps `file:line` in panic backtraces —
+# what you actually read when a test fails — and drops the variable and type info
+# only an interactive debugger uses. If you need to step through code in lldb,
+# override for that session: `RUSTFLAGS="-Cdebuginfo=2" cargo test`.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
+split-debuginfo = "packed"
 
 [profile.test]
 opt-level = 1
+debug = "line-tables-only"
+split-debuginfo = "packed"

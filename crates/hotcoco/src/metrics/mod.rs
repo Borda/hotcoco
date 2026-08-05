@@ -51,3 +51,28 @@ pub mod bootstrap;
 pub mod calibration;
 pub mod confusion;
 pub mod counts;
+
+/// Whether a metric value was actually computed, as opposed to carrying the
+/// crate's `-1.0` "not computed for this configuration" sentinel.
+///
+/// The predicate half of the sentinel convention whose *producer* is
+/// [`detection::summarize::mean_or_missing`](crate::detection). It lives here
+/// rather than beside the producer because the lower layer has to read it too:
+/// [`counts::max_f_beta`] skips sentinel precisions, and `metrics` may not import
+/// a family driver (`tests/architecture.rs` enforces that). Detection reaches
+/// down; the dependency runs one way.
+///
+/// Spelled `v >= 0.0` rather than `!(v < 0.0)` so it is the exact test the five
+/// hand-written sites used — the two differ only on `NaN`, which none of the
+/// accumulated arrays can hold, and matching the old spelling keeps the fold
+/// bit-identical without anyone having to prove that.
+#[inline]
+pub(crate) fn is_computed(v: f64) -> bool {
+    v >= 0.0
+}
+
+/// The complement of [`is_computed`]: `v` is the "not computed" sentinel.
+#[inline]
+pub(crate) fn is_missing(v: f64) -> bool {
+    !is_computed(v)
+}

@@ -6,15 +6,15 @@
 //! presentation — which numbers appear, under which names, in which order — plus
 //! assembling [`EvalReport`].
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::params::{IouType, Params};
 use crate::report::{EvalReport, Provenance};
 
 use super::accumulate::AccumulatedEval;
-use super::catalog::build_metric_defs;
+use super::catalog::{MetricDef, build_metric_defs};
 use super::results::{EvalParams, EvalResults};
-use super::summarize::{mean_or_missing, per_cat_ap_static, summarize_impl};
+use super::summarize::{mean_of_valid, mean_or_missing, per_cat_ap_static, summarize_impl};
 use super::{COCOeval, EvalMode};
 
 impl COCOeval {
@@ -204,7 +204,7 @@ impl COCOeval {
         }
 
         // Delegate the actual computation to the free function.
-        let metrics = build_metric_defs(&self.params, self.eval_mode);
+        let metrics = self.metric_defs();
         let stats = summarize_impl(
             eval,
             &self.params,
@@ -264,9 +264,18 @@ impl COCOeval {
         }
     }
 
-    /// Index of the "all" area range, or 0 if not found.
-    fn area_all_idx(&self) -> usize {
-        self.params.all_area_idx()
+    /// The summary-metric catalog for the current evaluation mode.
+    ///
+    /// One [`MetricDef`] per headline number, in the order `summarize()`,
+    /// [`metric_keys`](Self::metric_keys) and [`stats`](Self::stats) use — so
+    /// `metric_defs()[i]` describes `stats()[i]`, and a renderer can label a
+    /// value from its definition instead of parsing its name.
+    ///
+    /// The list depends on `params` (it resolves the max-detection axis) and on
+    /// `eval_mode`, so it is a method rather than a constant: COCO bbox/segm has
+    /// 12 entries, keypoints 10, LVIS 13, Open Images 1.
+    pub fn metric_defs(&self) -> Vec<MetricDef> {
+        build_metric_defs(&self.params, self.eval_mode)
     }
 
     /// Metric key names in canonical display order for the current evaluation mode.
@@ -274,11 +283,11 @@ impl COCOeval {
     /// Returns the same ordered list that drives `summarize()` and `get_results()`.
     /// For standard COCO bbox/segm: `["AP", "AP50", ..., "ARl"]` (12 keys).
     /// For keypoints: 10 keys. For LVIS: 13 keys.
+    ///
+    /// The names projected out of [`metric_defs`](Self::metric_defs) — one list,
+    /// so the keys and the definitions cannot fall out of order with each other.
     pub fn metric_keys(&self) -> Vec<&'static str> {
-        build_metric_defs(&self.params, self.eval_mode)
-            .into_iter()
-            .map(|m| m.name)
-            .collect()
+        self.metric_defs().into_iter().map(|m| m.name).collect()
     }
 
     /// Per-category mean AP (averaged over all IoU thresholds and recall thresholds,
@@ -288,7 +297,24 @@ impl COCOeval {
         per_cat_ap_static(eval, &self.params, self.eval_mode)
     }
 
-    /// Return summary metrics as a `HashMap<metric_name, value>`.
+    /// Per-category AP keyed by category *name*, in `params.cat_ids` order.
+    ///
+    /// The one place the name→AP table is derived. Categories reporting the
+    /// `-1.0` "not computed" sentinel, and ids with no category record to name
+    /// them, are dropped — and both [`report`](Self::report) and
+    /// [`get_results`](Self::get_results) drop exactly the same ones, which is
+    /// the point: they were two independent filters over the same data, free to
+    /// disagree about which classes exist.
+    fn per_class_ap_named(&self, eval: &AccumulatedEval) -> Vec<(String, f64)> {
+        self.per_cat_ap(eval)
+            .iter()
+            .zip(self.params.cat_ids.iter())
+            .filter(|&(&ap, _)| ap >= 0.0)
+            .filter_map(|(&ap, &cat_id)| self.coco_gt.get_cat(cat_id).map(|c| (c.name.clone(), ap)))
+            .collect()
+    }
+
+    /// Return summary metrics as a `BTreeMap<metric_name, value>`.
     ///
     /// Must be called after [`summarize`](COCOeval::summarize). Returns an empty map
     /// if `summarize` has not been run.
@@ -312,10 +338,10 @@ impl COCOeval {
     ///
     /// For keypoints: `AP`, `AP50`, `AP75`, `APm`, `APl`,
     /// `AR`, `AR50`, `AR75`, `ARm`, `ARl`.
-    pub fn get_results(&self, prefix: Option<&str>, per_class: bool) -> HashMap<String, f64> {
+    pub fn get_results(&self, prefix: Option<&str>, per_class: bool) -> BTreeMap<String, f64> {
         let stats = match &self.stats {
             Some(s) => s,
-            None => return HashMap::new(),
+            None => return BTreeMap::new(),
         };
 
         let keys = self.metric_keys();
@@ -327,7 +353,7 @@ impl COCOeval {
             }
         };
 
-        let mut results: HashMap<String, f64> = keys
+        let mut results: BTreeMap<String, f64> = keys
             .iter()
             .zip(stats.iter())
             .map(|(&k, &v)| (make_key(k), v))
@@ -335,13 +361,8 @@ impl COCOeval {
 
         if per_class {
             if let Some(eval) = &self.eval {
-                let per_cat = self.per_cat_ap(eval);
-                for (ap, cat_id) in per_cat.iter().zip(self.params.cat_ids.iter()) {
-                    if *ap >= 0.0 {
-                        if let Some(cat) = self.coco_gt.get_cat(*cat_id) {
-                            results.insert(make_key(&format!("AP/{}", cat.name)), *ap);
-                        }
-                    }
+                for (name, ap) in self.per_class_ap_named(eval) {
+                    results.insert(make_key(&format!("AP/{name}")), ap);
                 }
             }
         }
@@ -361,34 +382,29 @@ impl COCOeval {
     /// - `beta > 1.0`  → weights recall more heavily
     ///
     /// Returns an empty map if `accumulate()` has not been run.
-    pub fn f_scores(&self, beta: f64) -> HashMap<String, f64> {
+    ///
+    /// Keys are `F1`, `F1_50`, `F1_75` (or `F0.5`, `F0.5_50`, … for other betas).
+    /// The separator is not decorative: `F1` + `50` reads as an unrelated metric
+    /// named `F150`, which is what these keys used to be.
+    pub fn f_scores(&self, beta: f64) -> BTreeMap<String, f64> {
         let eval = match &self.eval {
             Some(e) => e,
-            None => return HashMap::new(),
+            None => return BTreeMap::new(),
         };
 
-        let a_idx = self.area_all_idx();
-        let m_idx = eval.shape.m - 1;
+        let a_idx = self.params.all_area_idx();
+        // `max_det_idx`, not `shape.m - 1`: the F-scores are the AP/AP50/AP75
+        // rows in another metric, so they must read the same M slot those do.
+        let m_idx = self.params.max_det_idx();
 
-        // Identify which IoU threshold indices correspond to 0.5 and 0.75.
-        let mut is_t50 = vec![false; eval.shape.t];
-        let mut is_t75 = vec![false; eval.shape.t];
-        for (i, &thr) in self.params.iou_thrs.iter().enumerate() {
-            if (thr - 0.5).abs() < 1e-9 {
-                is_t50[i] = true;
-            }
-            if (thr - 0.75).abs() < 1e-9 {
-                is_t75[i] = true;
-            }
-        }
+        // `Params::iou_thr_idx` owns this lookup, tolerance included: `F1_50`
+        // names the 0.50 slice or nothing, exactly as `AP50` does.
+        let t50 = self.params.iou_thr_idx(0.5);
+        let t75 = self.params.iou_thr_idx(0.75);
 
-        // Single pass: compute max-F-beta per (t_idx, k_idx), accumulate into three buckets.
-        let mut sum_all = 0.0_f64;
-        let mut count_all = 0_usize;
-        let mut sum_50 = 0.0_f64;
-        let mut count_50 = 0_usize;
-        let mut sum_75 = 0.0_f64;
-        let mut count_75 = 0_usize;
+        // Single pass: compute max-F-beta per (t_idx, k_idx), accumulate into
+        // three (sum, count) buckets — overall, then the two single-threshold ones.
+        let mut buckets = [(0.0_f64, 0_usize); 3];
 
         for t_idx in 0..eval.shape.t {
             for k_idx in 0..eval.shape.k {
@@ -401,15 +417,12 @@ impl COCOeval {
                 if let Some(max_f) =
                     crate::metrics::counts::max_f_beta(&precisions, &self.params.rec_thrs, beta)
                 {
-                    sum_all += max_f;
-                    count_all += 1;
-                    if is_t50[t_idx] {
-                        sum_50 += max_f;
-                        count_50 += 1;
-                    }
-                    if is_t75[t_idx] {
-                        sum_75 += max_f;
-                        count_75 += 1;
+                    let in_bucket = [true, Some(t_idx) == t50, Some(t_idx) == t75];
+                    for (bucket, hit) in buckets.iter_mut().zip(in_bucket) {
+                        if hit {
+                            bucket.0 += max_f;
+                            bucket.1 += 1;
+                        }
                     }
                 }
             }
@@ -421,11 +434,16 @@ impl COCOeval {
             format!("F{:.1}", beta)
         };
 
-        let mut out = HashMap::new();
-        out.insert(prefix.clone(), mean_or_missing(sum_all, count_all));
-        out.insert(format!("{}50", prefix), mean_or_missing(sum_50, count_50));
-        out.insert(format!("{}75", prefix), mean_or_missing(sum_75, count_75));
-        out
+        let names = [
+            prefix.clone(),
+            format!("{prefix}_50"),
+            format!("{prefix}_75"),
+        ];
+        names
+            .into_iter()
+            .zip(buckets)
+            .map(|(name, (sum, count))| (name, mean_or_missing(sum, count)))
+            .collect()
     }
 
     /// Print results to stdout in a compact key=value format.
@@ -433,18 +451,20 @@ impl COCOeval {
     /// Must be called after [`summarize`](COCOeval::summarize). Prints nothing if
     /// `summarize` has not been run (emits a warning to stderr instead).
     pub fn print_results(&self) {
-        let results = self.get_results(None, false);
-        if results.is_empty() {
+        // Zipped straight against `stats`, which is what `metric_keys()` is
+        // parallel to. Building a `BTreeMap` and then looking every key back out
+        // of it needed an `unwrap_or(-1.0)` for a miss that cannot happen, and
+        // that unreachable default is indistinguishable from a real `-1.000`.
+        let keys = self.metric_keys();
+        let stats = self.stats.as_deref().unwrap_or(&[]);
+
+        if keys.is_empty() || stats.is_empty() {
             eprintln!("No results to print. Run evaluate(), accumulate(), and summarize() first.");
             return;
         }
 
-        let keys = self.metric_keys();
-
-        for key in keys {
-            let val = results.get(key).copied().unwrap_or(-1.0);
-            let val_str = Self::format_metric(val);
-            println!(" {:>10} = {}", key, val_str);
+        for (&key, &val) in keys.iter().zip(stats) {
+            println!(" {:>10} = {}", key, Self::format_metric(val));
         }
     }
 
@@ -542,12 +562,8 @@ impl COCOeval {
 
         // Per-class AP. Categories with no valid precision anywhere report -1.0
         // and are omitted rather than recorded as a real score.
-        for (&ap, &cat_id) in self.per_cat_ap(eval).iter().zip(self.params.cat_ids.iter()) {
-            if ap >= 0.0 {
-                if let Some(cat) = self.coco_gt.get_cat(cat_id) {
-                    report = report.with_class_metric(cat.name.clone(), "AP", ap);
-                }
-            }
+        for (name, ap) in self.per_class_ap_named(eval) {
+            report = report.with_class_metric(name, "AP", ap);
         }
 
         // LVIS frequency buckets as a structured group axis. Same values as the
@@ -564,24 +580,19 @@ impl COCOeval {
 
         // Aggregate PR curves: mean precision over categories at each recall
         // threshold, for each IoU threshold.
-        let a_idx = self.area_all_idx();
-        let m_idx = eval.shape.m - 1;
+        let a_idx = self.params.all_area_idx();
+        // The curve a chart draws must be the curve the headline AP was averaged
+        // from, so it reads the same M slot — `max_det_idx`, not the last one.
+        let m_idx = self.params.max_det_idx();
         for (t_idx, &thr) in self.params.iou_thrs.iter().enumerate() {
-            // Summed in place rather than collected: this runs T×R times (10×101
+            // Folded in place rather than collected: this runs T×R times (10×101
             // on COCO), and collecting a throwaway Vec per recall threshold cost
             // ~1000 heap allocations per `report()` call to compute a mean.
             let curve: Vec<f64> = (0..eval.shape.r)
                 .map(|r_idx| {
-                    let (mut sum, mut count) = (0.0f64, 0usize);
-                    for k_idx in 0..eval.shape.k {
-                        let v =
-                            eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)];
-                        if v >= 0.0 {
-                            sum += v;
-                            count += 1;
-                        }
-                    }
-                    mean_or_missing(sum, count)
+                    mean_of_valid((0..eval.shape.k).map(|k_idx| {
+                        eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
+                    }))
                 })
                 .collect();
             report = report.with_curve(format!("pr@{thr:.2}"), curve);

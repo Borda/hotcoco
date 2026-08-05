@@ -6,17 +6,16 @@ Usage:
 
 import json
 import time
-from pathlib import Path
 
 import fiftyone as fo
+from helpers import VAL2017
 
 # ---------------------------------------------------------------------------
 # Load COCO data
 # ---------------------------------------------------------------------------
 
-_DATA = Path(__file__).resolve().parents[1] / "data"
-GT_FILE = str(_DATA / "annotations/instances_val2017.json")
-DT_FILE = str(_DATA / "bbox_val2017_results.json")
+GT_FILE = str(VAL2017["bbox"]["gt"])
+DT_FILE = str(VAL2017["bbox"]["dt"])
 
 print("Loading COCO JSON data...")
 t0 = time.perf_counter()

@@ -8,7 +8,7 @@ Usage:
     just download-coco
 
 Flags:
-    --data-dir PATH   Root data directory (default: data/)
+    --data-dir PATH   Root data directory (default: the repo's data/)
     --force           Overwrite files that already exist
     --skip-download   Skip annotation download (generate result files only)
     --skip-generate   Skip result file generation (download annotations only)
@@ -21,6 +21,8 @@ import sys
 import urllib.request
 import zipfile
 from pathlib import Path
+
+from helpers import DATA_DIR
 
 ANNOTATIONS_URL = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 NEEDED_ANNOTATION_FILES = {"annotations/instances_val2017.json", "annotations/person_keypoints_val2017.json"}
@@ -276,7 +278,13 @@ def generate_results(data_dir: Path, force: bool) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", default="data", metavar="PATH", help="Root data directory (default: data/)")
+    # Absolute, from `helpers.DATA_DIR` — the same constant every reader of
+    # `data/` resolves against. The relative "data" default made this writer
+    # disagree with every reader as soon as it ran from anywhere but the repo
+    # root, and the files it wrote were simply invisible to `just parity`.
+    parser.add_argument(
+        "--data-dir", default=str(DATA_DIR), metavar="PATH", help=f"Root data directory (default: {DATA_DIR})"
+    )
     parser.add_argument("--force", action="store_true", help="Overwrite files that already exist")
     parser.add_argument("--skip-download", action="store_true", help="Skip annotation download")
     parser.add_argument("--skip-generate", action="store_true", help="Skip result file generation")

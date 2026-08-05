@@ -141,13 +141,101 @@ pub fn best_above_floor(sims: &[f64], eligible: &[bool], floor: f64) -> Option<u
     best
 }
 
+/// Dense per-threshold matrix: `rows` thresholds × `row_len` items, one allocation.
+///
+/// Everything the matcher reports is T parallel answers to the same question,
+/// one row per IoU threshold. Stored as `Vec<Vec<T>>`, that shape costs T heap
+/// allocations per field per evaluated cell; with five such fields in every
+/// `EvalImg` over ~150k val2017 cells, the profiler attributed the majority of
+/// bbox evaluation to the resulting malloc traffic (and its lock contention
+/// across the rayon fan-out). One strided buffer keeps the `[t][i]` indexing
+/// and drops the cost.
+///
+/// Rows are addressed as `m.row(t)` / `m.row_mut(t)`, single cells as
+/// `m[(t, i)]`.
+#[derive(Debug, Clone)]
+pub struct ThreshMatrix<T> {
+    rows: usize,
+    row_len: usize,
+    data: Vec<T>,
+}
+
+impl<T: Clone> ThreshMatrix<T> {
+    /// A `rows × row_len` matrix with every cell set to `fill`.
+    pub fn new(rows: usize, row_len: usize, fill: T) -> Self {
+        Self {
+            rows,
+            row_len,
+            data: vec![fill; rows * row_len],
+        }
+    }
+
+    /// A matrix whose every row is a copy of `row` — one allocation instead of
+    /// one clone per threshold.
+    pub fn repeat_row(rows: usize, row: &[T]) -> Self {
+        let mut data = Vec::with_capacity(rows * row.len());
+        for _ in 0..rows {
+            data.extend_from_slice(row);
+        }
+        Self {
+            rows,
+            row_len: row.len(),
+            data,
+        }
+    }
+}
+
+impl<T> ThreshMatrix<T> {
+    /// Number of threshold rows.
+    pub fn num_rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Items per row.
+    pub fn row_len(&self) -> usize {
+        self.row_len
+    }
+
+    /// The row for threshold `t`.
+    pub fn row(&self, t: usize) -> &[T] {
+        &self.data[t * self.row_len..(t + 1) * self.row_len]
+    }
+
+    /// Mutable row for threshold `t`.
+    pub fn row_mut(&mut self, t: usize) -> &mut [T] {
+        &mut self.data[t * self.row_len..(t + 1) * self.row_len]
+    }
+
+    /// All rows in threshold order. Yields `num_rows()` slices even when rows
+    /// are empty, so consumers emitting one list per threshold stay correct
+    /// for cells with no detections or no ground truths.
+    pub fn iter_rows(&self) -> impl Iterator<Item = &[T]> + '_ {
+        (0..self.rows).map(move |t| self.row(t))
+    }
+}
+
+impl<T> std::ops::Index<(usize, usize)> for ThreshMatrix<T> {
+    type Output = T;
+    fn index(&self, (t, i): (usize, usize)) -> &T {
+        debug_assert!(t < self.rows && i < self.row_len);
+        &self.data[t * self.row_len + i]
+    }
+}
+
+impl<T> std::ops::IndexMut<(usize, usize)> for ThreshMatrix<T> {
+    fn index_mut(&mut self, (t, i): (usize, usize)) -> &mut T {
+        debug_assert!(t < self.rows && i < self.row_len);
+        &mut self.data[t * self.row_len + i]
+    }
+}
+
 /// Per-threshold greedy match results, indexed `[T]` over IoU thresholds.
 pub struct GreedyMatches {
     /// `[T][D]`: for each threshold and detection (caller's score-descending
     /// order), the matched ground-truth index (caller's GT order) or `None`.
-    pub dt_gt: Vec<Vec<Option<usize>>>,
+    pub dt_gt: ThreshMatrix<Option<usize>>,
     /// `[T][G]`: whether each ground-truth was matched at each threshold.
-    pub gt_matched: Vec<Vec<bool>>,
+    pub gt_matched: ThreshMatrix<bool>,
 }
 
 /// Greedy-match detections to ground-truths, pycocotools-exact.
@@ -158,7 +246,16 @@ pub struct GreedyMatches {
 ///   `[0, num_gt_not_ignored)` are non-ignored, `[num_gt_not_ignored, g)` ignored.
 /// - `iou_flat` is row-major `[D*G]` (`iou_flat[di * g + gi]`) in that ordering.
 ///
-/// `gt_rematchable` and `gt_phase2_eligible` are length `g`.
+/// # The two per-GT policy masks
+///
+/// `gt_rematchable` and `gt_phase2_eligible` are length `g` when present, and
+/// `None` is the **uniform** case: no GT is rematchable, and every GT is
+/// phase-2 eligible. Those are the values every non-crowd, non-OID caller would
+/// otherwise have to materialize — two `vec![_; g]` per matched cell, which on a
+/// COCO run is ~800k allocations per `evaluate()` to say "the usual". The scans
+/// are `T×D×G`, so `None` is resolved to an empty slice once here and the
+/// defaults are supplied by the `get`, rather than branching on an `Option` per
+/// probe.
 ///
 /// The matrix is flat (single allocation) rather than `sim`'s nested `[D][G]`
 /// because the matching loop is `T×D×G` and benefits from contiguous access.
@@ -180,23 +277,37 @@ pub fn greedy_match(
     d: usize,
     g: usize,
     num_gt_not_ignored: usize,
-    gt_rematchable: &[bool],
-    gt_phase2_eligible: &[bool],
+    gt_rematchable: Option<&[bool]>,
+    gt_phase2_eligible: Option<&[bool]>,
     iou_thrs: &[f64],
 ) -> GreedyMatches {
     let t = iou_thrs.len();
-    let mut dt_gt = vec![vec![None; d]; t];
-    let mut gt_matched = vec![vec![false; g]; t];
+    let mut dt_gt = ThreshMatrix::new(t, d, None);
+    let mut gt_matched = ThreshMatrix::new(t, g, false);
+
+    // `None` becomes the empty slice; the `unwrap_or` defaults below carry its
+    // documented meaning. An index past the end reads as the default, so a mask
+    // shorter than `g` degrades to the uniform case rather than panicking —
+    // debug builds catch the caller instead.
+    let rematchable = gt_rematchable.unwrap_or(&[]);
+    let phase2_eligible = gt_phase2_eligible.unwrap_or(&[]);
+    debug_assert!(rematchable.is_empty() || rematchable.len() >= g);
+    debug_assert!(phase2_eligible.is_empty() || phase2_eligible.len() >= g);
 
     for (ti, &iou_thr) in iou_thrs.iter().enumerate() {
-        for (di, dt_slot) in dt_gt[ti].iter_mut().enumerate() {
+        // One row borrow per threshold keeps the T×D×G inner scans on plain
+        // slice indexing instead of paying the strided-index arithmetic and
+        // bounds check on every probe.
+        let dt_row = dt_gt.row_mut(ti);
+        let gt_row = gt_matched.row_mut(ti);
+        for (di, dt_slot) in dt_row.iter_mut().enumerate() {
             let base = di * g;
             let mut best_iou = iou_thr;
             let mut best_gi: Option<usize> = None;
 
             // Phase 1: non-ignored GTs — highest-IoU available match.
             for gi in 0..num_gt_not_ignored {
-                if gt_matched[ti][gi] && !gt_rematchable[gi] {
+                if gt_row[gi] && !rematchable.get(gi).copied().unwrap_or(false) {
                     continue;
                 }
                 let iou_val = iou_flat[base + gi];
@@ -209,10 +320,10 @@ pub fn greedy_match(
             // Phase 2: ignored GTs — only if phase 1 found no match.
             if best_gi.is_none() {
                 for gi in num_gt_not_ignored..g {
-                    if !gt_phase2_eligible[gi] {
+                    if !phase2_eligible.get(gi).copied().unwrap_or(true) {
                         continue;
                     }
-                    if gt_matched[ti][gi] && !gt_rematchable[gi] {
+                    if gt_row[gi] && !rematchable.get(gi).copied().unwrap_or(false) {
                         continue;
                     }
                     let iou_val = iou_flat[base + gi];
@@ -225,7 +336,7 @@ pub fn greedy_match(
 
             if let Some(gi) = best_gi {
                 *dt_slot = Some(gi);
-                gt_matched[ti][gi] = true;
+                gt_row[gi] = true;
             }
         }
     }
@@ -280,19 +391,29 @@ mod tests {
                 .collect();
             thrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-            let m = greedy_match(&iou_flat, d, g, num_ni, &rematchable, &phase2, &thrs);
+            let m = greedy_match(
+                &iou_flat,
+                d,
+                g,
+                num_ni,
+                Some(&rematchable),
+                Some(&phase2),
+                &thrs,
+            );
             let ctx = format!("case {case}: d={d} g={g} num_ni={num_ni} thrs={thrs:?}");
 
-            assert_eq!(m.dt_gt.len(), thrs.len(), "{ctx}");
-            assert_eq!(m.gt_matched.len(), thrs.len(), "{ctx}");
+            assert_eq!(m.dt_gt.num_rows(), thrs.len(), "{ctx}");
+            assert_eq!(m.gt_matched.num_rows(), thrs.len(), "{ctx}");
 
             for (ti, &thr) in thrs.iter().enumerate() {
-                assert_eq!(m.dt_gt[ti].len(), d, "{ctx}");
-                assert_eq!(m.gt_matched[ti].len(), g, "{ctx}");
+                assert_eq!(m.dt_gt.row_len(), d, "{ctx}");
+                assert_eq!(m.gt_matched.row_len(), g, "{ctx}");
 
                 let mut claimed = vec![0usize; g];
                 for di in 0..d {
-                    let Some(gi) = m.dt_gt[ti][di] else { continue };
+                    let Some(gi) = m.dt_gt[(ti, di)] else {
+                        continue;
+                    };
 
                     assert!(gi < g, "{ctx}: gt index {gi} out of range");
 
@@ -329,7 +450,7 @@ mod tests {
                     // confusion adapter reads both halves specifically to avoid a
                     // second source of truth, which makes this a contract.
                     assert_eq!(
-                        m.gt_matched[ti][gi],
+                        m.gt_matched[(ti, gi)],
                         claimed[gi] > 0,
                         "{ctx}: gt_matched[{gi}] disagrees with dt_gt"
                     );
@@ -386,9 +507,10 @@ mod tests {
             let mut thrs: Vec<f64> = (0..2).map(|_| rng.random_range(0.0..=1.0)).collect();
             thrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-            let m = greedy_match(&iou, d, g, num_ni, &rematchable, &phase2, &thrs);
+            let m = greedy_match(&iou, d, g, num_ni, Some(&rematchable), Some(&phase2), &thrs);
             let tp_at = |ti: usize| {
-                m.dt_gt[ti]
+                m.dt_gt
+                    .row(ti)
                     .iter()
                     .flatten()
                     .filter(|&&gi| gi < num_ni)
@@ -407,39 +529,66 @@ mod tests {
         }
     }
 
-    // No crowd, all GTs eligible for phase 2.
+    // No crowd, all GTs eligible for phase 2 — the `None`/`None` uniform case.
     fn simple(iou_flat: &[f64], d: usize, g: usize, num_ni: usize, thrs: &[f64]) -> GreedyMatches {
-        greedy_match(
-            iou_flat,
+        greedy_match(iou_flat, d, g, num_ni, None, None, thrs)
+    }
+
+    /// The `None` encodings must be *exactly* the uniform masks, not merely close
+    /// to them — every non-crowd caller now takes the `None` path, so a drift here
+    /// is a silent change to every metric at once.
+    #[test]
+    fn none_masks_equal_their_explicit_uniform_forms() {
+        // gi0/gi1 non-ignored, gi2 ignored. D0 claims gi1; D1's best is that same
+        // gi1, so it discriminates the `rematchable` default. D2 clears nothing in
+        // phase 1 and reaches gi2 only in phase 2, so it discriminates the
+        // `phase2_eligible` default.
+        #[rustfmt::skip]
+        let iou = [
+            0.9, 0.95, 0.2,
+            0.5, 0.99, 0.3,
+            0.1, 0.10, 0.9,
+        ];
+        let (d, g, num_ni) = (3, 3, 2);
+        let thrs = [0.5, 0.85];
+
+        let implicit = greedy_match(&iou, d, g, num_ni, None, None, &thrs);
+        let explicit = greedy_match(
+            &iou,
             d,
             g,
             num_ni,
-            &vec![false; g],
-            &vec![true; g],
-            thrs,
-        )
+            Some(&vec![false; g]),
+            Some(&vec![true; g]),
+            &thrs,
+        );
+
+        for ti in 0..thrs.len() {
+            assert_eq!(implicit.dt_gt.row(ti), explicit.dt_gt.row(ti));
+            assert_eq!(implicit.gt_matched.row(ti), explicit.gt_matched.row(ti));
+        }
     }
 
     #[test]
     fn matches_highest_iou_above_threshold() {
         // 1 DT, 2 non-ignored GTs; GT1 has higher IoU.
         let m = simple(&[0.6, 0.9], 1, 2, 2, &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(1));
-        assert_eq!(m.gt_matched[0], vec![false, true]);
+        assert_eq!(m.dt_gt[(0, 0)], Some(1));
+        assert_eq!(m.gt_matched.row(0), &[false, true]);
     }
 
     #[test]
     fn below_threshold_is_no_match() {
         let m = simple(&[0.4, 0.49], 1, 2, 2, &[0.5]);
-        assert_eq!(m.dt_gt[0][0], None);
+        assert_eq!(m.dt_gt[(0, 0)], None);
     }
 
     #[test]
     fn score_order_gives_earlier_dt_first_pick() {
         // 2 DTs (score-desc), 1 GT. DT0 (first) takes it; DT1 gets nothing.
         let m = simple(&[0.9, 0.8], 2, 1, 1, &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(0));
-        assert_eq!(m.dt_gt[0][1], None);
+        assert_eq!(m.dt_gt[(0, 0)], Some(0));
+        assert_eq!(m.dt_gt[(0, 1)], None);
     }
 
     #[test]
@@ -447,50 +596,42 @@ mod tests {
         // g=2: gi0 non-ignored (IoU 0.6), gi1 ignored (IoU 0.99). Phase 1 finds
         // gi0, so phase 2 never runs even though gi1 has higher IoU.
         let m = simple(&[0.6, 0.99], 1, 2, 1, &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(0));
+        assert_eq!(m.dt_gt[(0, 0)], Some(0));
     }
 
     #[test]
     fn falls_back_to_ignored_gt_when_no_phase1_match() {
         // gi0 non-ignored but below threshold (0.4); gi1 ignored at 0.8.
         let m = simple(&[0.4, 0.8], 1, 2, 1, &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(1));
+        assert_eq!(m.dt_gt[(0, 0)], Some(1));
     }
 
     #[test]
     fn crowd_gt_rematched_by_multiple_dts() {
         // 2 DTs, 1 ignored crowd GT (rematchable). Both DTs match it.
-        let m = greedy_match(&[0.9, 0.8], 2, 1, 0, &[true], &[true], &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(0));
-        assert_eq!(m.dt_gt[0][1], Some(0));
+        let m = greedy_match(&[0.9, 0.8], 2, 1, 0, Some(&[true]), None, &[0.5]);
+        assert_eq!(m.dt_gt[(0, 0)], Some(0));
+        assert_eq!(m.dt_gt[(0, 1)], Some(0));
     }
 
     #[test]
     fn non_rematchable_gt_taken_only_once() {
-        let m = greedy_match(&[0.9, 0.8], 2, 1, 0, &[false], &[true], &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(0));
-        assert_eq!(m.dt_gt[0][1], None);
+        let m = greedy_match(&[0.9, 0.8], 2, 1, 0, Some(&[false]), None, &[0.5]);
+        assert_eq!(m.dt_gt[(0, 0)], Some(0));
+        assert_eq!(m.dt_gt[(0, 1)], None);
     }
 
     #[test]
     fn phase2_ineligible_gt_is_skipped() {
         // gi0 non-ignored below threshold; gi1 ignored at 0.9 but phase2-ineligible.
-        let m = greedy_match(
-            &[0.4, 0.9],
-            1,
-            2,
-            1,
-            &[false, false],
-            &[true, false],
-            &[0.5],
-        );
-        assert_eq!(m.dt_gt[0][0], None);
+        let m = greedy_match(&[0.4, 0.9], 1, 2, 1, None, Some(&[true, false]), &[0.5]);
+        assert_eq!(m.dt_gt[(0, 0)], None);
     }
 
     #[test]
     fn equal_iou_later_index_wins() {
         // Two non-ignored GTs with identical IoU; pycocotools' `>=` picks the last.
         let m = simple(&[0.7, 0.7], 1, 2, 2, &[0.5]);
-        assert_eq!(m.dt_gt[0][0], Some(1));
+        assert_eq!(m.dt_gt[(0, 0)], Some(1));
     }
 }

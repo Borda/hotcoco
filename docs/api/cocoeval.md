@@ -262,6 +262,29 @@ Does not require `evaluate()` or `run()` — only depends on the evaluation mode
 
 ---
 
+### `metric_defs`
+
+```python
+metric_defs() -> list[dict]
+```
+
+Return the metric catalog as structured data, one dict per metric in `metric_keys()`
+order: `name` (str), `ap` (bool — AP vs AR), `iou_thr` (float or `None` for the full
+0.50:0.05:0.95 sweep), `area` (str), `max_det` (int), and `freq_group` (`"rare"` /
+`"common"` / `"frequent"` or `None`; LVIS only).
+
+```python
+ev.metric_defs()[1]
+# {'name': 'AP50', 'ap': True, 'iou_thr': 0.5, 'area': 'all', 'max_det': 100, 'freq_group': None}
+```
+
+This exists so renderers read a metric's axes instead of parsing them back out of its
+name — `"AR10"` is ambiguous between a detection cap of 10 and an IoU of 0.10, and only
+the catalog knows which. hotcoco's own PDF report and dashboard consume it. Like
+`metric_keys()`, works before `run()`.
+
+---
+
 ### `get_results`
 
 ```python
@@ -398,6 +421,24 @@ ev.provenance()   # 'extension' — already, before evaluating
 Never infer comparability from `iou_type` or the eval mode instead. Parity is a property
 of the whole configuration, so the run above is an extension despite being ordinary COCO
 bbox evaluation.
+
+---
+
+### `is_benchmark_standard`
+
+```python
+is_benchmark_standard() -> bool
+```
+
+`True` exactly when `provenance()` is `"parity_verified"` — the predicate itself, so
+renderers don't re-derive it with a string compare. Default-deny: a provenance variant
+added in a future release reads as *needs a caveat* until a renderer is taught what it
+means. Works before `run()`.
+
+```python
+if not ev.is_benchmark_standard():
+    print("caveat:", ev.reference_deviations())
+```
 
 ---
 
@@ -569,7 +610,7 @@ Requires `evaluate()` to have been called first.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `"delta_ap"` | `dict[str, float]` | ΔAP for each error type. Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`, `"FP"`, `"FN"`. |
+| `"delta_ap"` | `dict[str, float]` | ΔAP for each error type. Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`, plus tidecv's special oracles `"FP"` (suppress every false positive) and `"FN"` (drop every missed GT from the denominator; a superset of `"Miss"`). |
 | `"counts"` | `dict[str, int]` | Count of each error type. Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`. |
 | `"ap_base"` | `float` | Baseline mean AP at `pos_thr`. |
 | `"pos_thr"` | `float` | IoU threshold used. |
@@ -657,10 +698,10 @@ For each (IoU threshold, category), finds the confidence operating point that ma
 | Key | Description |
 |-----|-------------|
 | `"F1"` | Mean max-F1 across IoU 0.50:0.05:0.95, all categories |
-| `"F150"` | Max-F1 at IoU=0.50 |
-| `"F175"` | Max-F1 at IoU=0.75 |
+| `"F1_50"` | Max-F1 at IoU=0.50 |
+| `"F1_75"` | Max-F1 at IoU=0.75 |
 
-Key names reflect `beta`: `"F0.5"`, `"F0.550"`, `"F0.575"` for `beta=0.5`, etc.
+Key names reflect `beta`: `"F0.5"`, `"F0.5_50"`, `"F0.5_75"` for `beta=0.5`, etc.
 
 Returns an empty dict if `accumulate()` has not been called.
 
@@ -670,13 +711,13 @@ ev.run()
 
 # F1 (default)
 scores = ev.f_scores()
-print(f"F1: {scores['F1']:.3f}, F1@50: {scores['F150']:.3f}")
+print(f"F1: {scores['F1']:.3f}, F1@50: {scores['F1_50']:.3f}")
 
 # Precision-weighted
-print(ev.f_scores(beta=0.5))   # {"F0.5": ..., "F0.550": ..., "F0.575": ...}
+print(ev.f_scores(beta=0.5))   # {"F0.5": ..., "F0.5_50": ..., "F0.5_75": ...}
 
 # Recall-weighted
-print(ev.f_scores(beta=2.0))   # {"F2.0": ..., "F2.050": ..., "F2.075": ...}
+print(ev.f_scores(beta=2.0))   # {"F2.0": ..., "F2.0_50": ..., "F2.0_75": ...}
 ```
 
 ---

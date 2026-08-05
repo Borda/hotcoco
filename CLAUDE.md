@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-hotcoco is a pure Rust port of [pycocotools](https://github.com/ppwwyyxx/cocoapi) with PyO3 Python bindings. It provides 13-23x speedups over pycocotools for bbox, segmentation, and keypoint evaluation.
+hotcoco is a pure Rust port of [pycocotools](https://github.com/ppwwyyxx/cocoapi) with PyO3 Python bindings. It provides 17-33x speedups over pycocotools for bbox, segmentation, and keypoint evaluation.
 
 - **Primary language:** Rust. All core logic lives in `hotcoco`.
 - **Python bindings:** PyO3/maturin in `hotcoco-pyo3`, exposed as the `hotcoco` Python package.
@@ -144,6 +144,29 @@ and watching it fail takes a minute and is not optional.
 - **`uv sync` alone is not enough.** Without `--all-extras` it skips `maturin`, and `just build` then fails. Always use `just setup` for first-time setup.
 - `uv run python` works from anywhere in the repo (no need to cd first).
 - The `coco` CLI is installed into `.venv/bin/coco` by `just build`. Run it as `uv run coco <subcommand>` (or activate the venv with `source .venv/bin/activate` for bare `coco`).
+
+### Keep `target/` bounded
+
+**Cargo has no eviction policy.** Nothing in the toolchain removes stale build
+artifacts — not by age, not by size, not by LRU. A long-lived working copy grows
+monotonically until the disk fills. Assume nothing cleans up for you.
+
+- `just disk` reports what `target/` costs; `just clean` reclaims it. A clean is
+  always safe: it costs one rebuild (~25s cold for all test binaries) and nothing
+  else. The compiled Python extension lives at `python/hotcoco/hotcoco.abi3.so`,
+  **outside** `target/`, so `import hotcoco` survives a clean.
+- A full cold build of every target is ~1.1 GB. That is the number to compare
+  against — if `just disk` reports several GB, something is wrong, not merely used.
+- **Do not remove `split-debuginfo`/`debug` from `[profile.dev]` and
+  `[profile.test]`.** Cargo's macOS default (`unpacked`, full debuginfo) writes
+  ~200 loose `.o` files per crate build into `target/debug/deps` and never collects
+  them. With the pre-commit hook running `cargo test` on every commit, this repo
+  reached **87,134 object files / 18 GB — 96% of `target/`**. The profile comments
+  in `Cargo.toml` record why each value is set; the pre-commit hook warns (never
+  blocks) if stray `.o` files reappear, so a regression is caught on the next
+  commit rather than after weeks of growth.
+- Each git worktree under `.claude/worktrees/` carries its **own** `target/`. They
+  inherit the workspace profiles, but `just clean` only cleans the one you are in.
 
 ## Documentation
 

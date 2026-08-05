@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`hotcoco.metrics` now reads numpy arrays natively.** The module docstring
+  always said "lists or numpy arrays", but the bindings put numpy on the slow
+  path: PyO3's list fast path doesn't fire for ndarrays, so every element of a
+  `float64` array cost a boxed extraction — and every element of a bool array a
+  Python-level `__bool__` call. `float64` and `bool` arrays (including strided
+  views) are now read in a single copy across `average_precision`,
+  `precision_recall_curve`, `calibration_curve`, and `calibration_error`; other
+  dtypes and plain sequences still work through the fallback. The type stubs,
+  which contradicted the docstring by requiring `Sequence`, now accept ndarrays
+  too.
+
 - **Provenance now reaches everything that draws the numbers.** `report()` has
   recorded whether a run is leaderboard-comparable since it landed, but every Python
   rendering surface ignored it: the PDF report, the browse dashboard, and
@@ -32,80 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `run()` — check comparability ahead of a long evaluation instead of after it. In
   Rust, `COCOeval::provenance()` is the single mapping from `reference_deviations()`
   to a `Provenance`, which `report()` now calls rather than inlining.
-
-### Fixed
-
-- **A keypoints PDF report was titled "COCO Evaluation Report".** `PlotData.iou_type`
-  carried the Rust enum's spelling (`"Bbox"`, `"Keypoints"`) while `eval_mode` arrived
-  lowercase, so `iou_type == "keypoints"` was never true. Lowercased at the boundary,
-  where the field's documented contract already said it was.
-
-### Changed
-
-- **Open Images group-of boxes now follow the Challenge protocol.** A group-of box
-  is worth exactly one ground truth: the best-scoring detection inside it is a true
-  positive, surplus detections inside it are ignored, and an undetected group-of box
-  is a single false negative. Previously they were ignored entirely, contributing to
-  neither the numerator nor the denominator.
-
-  Both behaviours are real published protocols — the old one is the Open Images
-  **V2** detection metric, the new one is the **Challenge** metric (2018/2019), i.e.
-  TensorFlow's `group_of_weight = 1.0` and what FiftyOne implements. **OID AP values
-  will change.** If you need V2 semantics, open an issue; the two differ by a single
-  parameter and an enum is easy to add.
-
-- **Open Images AP now uses VOC 2010 all-points integration.** The protocol says
-  detections are "evaluated as in the PASCAL VOC 2010 protocol", and both reference
-  implementations follow it — TensorFlow's `compute_average_precision` and
-  FiftyOne's `_compute_AP`, the latter alongside a separate 101-point path for its
-  COCO evaluation. hotcoco was reusing COCO's 101-point recall grid, which quantizes
-  the result by up to ~`1/101` per class. **OID AP values change**; COCO and LVIS are
-  untouched and keep the 101-point grid.
-
-- **Open Images is now parity-checked against the TensorFlow Object Detection API.**
-  `scripts/parity_oid.py` compares 70 cases — mAP *and* per-class AP — against
-  frozen output from `OpenImagesDetectionEvaluator(group_of_weight=1.0)`. Worst
-  difference **1.11e-16**, one ulp. Runs in CI; needs neither network nor
-  TensorFlow. Regenerate fixtures with `just gen-oid-fixtures`.
-
-  Open Images stays `Provenance::Extension`, but the warning now names the real gap:
-  the challenge's non-exhaustive image-level-label rule is not implemented (it needs
-  per-image label data COCO JSON cannot carry). It previously claimed no reference
-  implementation existed, which was untrue.
-
-### Fixed
-
-- **Open Images group-of matching used IoU instead of IoA.** The protocol says a
-  detection is inside a group-of box when intersection divided by the *detection's*
-  area exceeds 0.5. hotcoco forced the plain-IoU formula for every OID ground truth,
-  so a detection smaller than the group box — an individual object inside a cluster,
-  the normal case — was never absorbed and leaked out as a false positive. An 80×80
-  detection wholly inside a 200×200 group-of box scores IoA 1.00 but IoU 0.16, and
-  was counted as an error.
-
-  The tests that should have caught this used geometry below the threshold, so the
-  group-of code path never ran; they passed on interpolation instead. They now assert
-  the measure, and place the false positive before full recall where AP can see it.
-
-- **Group-of tie-breaking disagreed with the reference.** When a detection sat
-  inside two overlapping group-of boxes at equal IoA — which containment makes
-  common, since it saturates at 1.0 — hotcoco credited the later box and left the
-  earlier one permanently unmatched, converting a true positive into a miss. The
-  reference's `np.argmax` takes the first maximum. The rule now lives in
-  `primitives::greedy::best_above_floor` so a second caller cannot re-derive it.
-  Found by the new Open Images parity check.
-
-- **`AccumulatedEval` gained `ap_all_points`**, the exact area under the precision
-  envelope, shaped and indexed like `recall`. `precision` holds that same envelope
-  sampled at the 101 recall thresholds. `AccumulatedEval` is now `#[non_exhaustive]`
-  so later fields are additive — done while still pre-1.0, when it is free.
-
-- **`EvalImg` gained `gt_in_denominator`** (`gtInDenominator` in Python) and is now
-  `#[non_exhaustive]`. `gt_ignore` means "excluded from matching", which for group-of
-  boxes is no longer the same as "excluded from the recall denominator". Code
-  computing `num_gt` should read the new field.
-
-### Added
 
 - **`EvalResults` carries `provenance`.** It reaches the CLI's `--json`, the PDF
   report, and `ev.results()` in Python - the artifacts users archive and come
@@ -169,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exists for it to be standard against.
 
 - `COCOeval.report()` in Python and `COCOeval::report()` in Rust assemble one. `curves` holds the aggregate precision-recall
-  curve per IoU threshold (`pr@0.50` …), meaned over categories at `area="all"` and the
+  curve per IoU threshold (`pr@0.50` …), averaged over categories at `area="all"` and the
   largest `max_dets`, plus the shared `rec_thrs` axis — the slice a chart actually draws.
   The full `T×R×K×A×M` tensor (~1M floats on COCO) stays reachable via `accumulated()`
   rather than being copied into the report.
@@ -179,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and never name it.
 
 - `just semver` — checks the public Rust API against the last published release via
-  `cargo-semver-checks`. The 1.0 reorganisation moves nearly every type between modules
+  `cargo-semver-checks`. The 1.0 reorganization moves nearly every type between modules
   while promising the crate-root paths keep resolving, and this is the mechanical proof
   of that rather than re-reading `lib.rs` by hand.
 
@@ -187,7 +124,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `min(t, 1 - 1e-10)` match floor, so the detection lineage has one definition of the
   clamp instead of a literal repeated at each call site.
 
+- **`COCOeval.metric_defs()`** — the metric catalog as structured data (`name`, `ap`,
+  `iou_thr`, `area`, `max_det`, `freq_group`) in `metric_keys()` order, so renderers
+  read a metric's axes instead of regex-parsing its name. The PDF report and dashboard
+  consume it; the regex they used misread `AR10` as "IoU 0.10" whenever the IoU grid
+  contained 0.10.
+
+- **`COCOeval.is_benchmark_standard()`** — the default-deny predicate behind
+  `provenance()`, exposed so renderers stop re-deriving it with a string compare.
+  `PlotData` and the browse dashboard now read it from Rust.
+
+- **`COCO::cat_name(id)`** (Rust) — one owner of the category display-name fallback.
+  An unnamed category previously rendered as `cat_7`, `7`, or `?` depending on the
+  surface; every surface now says `cat_7`.
+
+- **`Params::nearest_iou_thr_idx()`, `Params::max_det_idx()`, `Params::all_area_range()`**
+  (Rust) — named owners for lookups that TIDE, per-image diagnostics, F-scores, and the
+  report each hand-rolled (and, for the max-dets index, got wrong — see Fixed).
+
+- **Healthcheck: `dt_nan_score` error.** NaN detection scores are now their own
+  error-severity finding explaining why they poison score sorting; they previously
+  disappeared into the `dt_score_out_of_range` *warning*, whose message did not
+  describe them.
+
+- **`scripts/bench.py --phases`** — splits each benchmark into load (constructor +
+  `loadRes`) and eval (`evaluate` + `accumulate` + `summarize`) phases, plus a
+  bbox-only-GT variant row; feeds the new "Where the time goes" table in
+  `docs/benchmarks.md`.
+
+- **Bounded `target/`: `just disk` / `just clean`.** Cargo never evicts build
+  artifacts, and macOS's default `unpacked` split-debuginfo plus a test-running
+  pre-commit hook grew `target/` to 18 GB of loose `.o` files. The dev/test profiles
+  now use `split-debuginfo = "packed"` with `line-tables-only` debuginfo (rationale
+  recorded in `Cargo.toml`), the pre-commit hook warns — never blocks — if stray `.o`
+  files reappear, and `just disk` / `just clean` report and reclaim.
+
 ### Changed
+
+- **TIDE's `FP` and `FN` ΔAP now follow tidecv's special-oracle definitions,
+  and both are parity-gated.** Previously `FP` was the union fix of the five
+  error types — which flips Cls/Loc errors into true positives and therefore
+  raises recall — and `FN` was a literal alias of `Miss`, carrying no
+  independent information. Now `FP` measures perfect precision (every false
+  positive suppressed, recall untouched) and `FN` measures perfect recall
+  (every unmatched ground truth leaves the denominator, precision untouched),
+  exactly as tidecv computes them. **Both values change.** `parity_tide.py`
+  gates `FP`, `FN`, and `ap_base` against tidecv at ±0.005 (measured val2017
+  diffs: 0.0003, 0.0007, 0.0003); previously all three were printed but never
+  compared.
+
+- **Open Images group-of boxes now follow the Challenge protocol.** A group-of box
+  is worth exactly one ground truth: the best-scoring detection inside it is a true
+  positive, surplus detections inside it are ignored, and an undetected group-of box
+  is a single false negative. Previously they were ignored entirely, contributing to
+  neither the numerator nor the denominator.
+
+  Both behaviors are real published protocols — the old one is the Open Images
+  **V2** detection metric, the new one is the **Challenge** metric (2018/2019), i.e.
+  TensorFlow's `group_of_weight = 1.0` and what FiftyOne implements. **OID AP values
+  will change.** If you need V2 semantics, open an issue; the two differ by a single
+  parameter and an enum is easy to add.
+
+- **Open Images AP now uses VOC 2010 all-points integration.** The protocol says
+  detections are "evaluated as in the PASCAL VOC 2010 protocol", and both reference
+  implementations follow it — TensorFlow's `compute_average_precision` and
+  FiftyOne's `_compute_AP`, the latter alongside a separate 101-point path for its
+  COCO evaluation. hotcoco was reusing COCO's 101-point recall grid, which quantizes
+  the result by up to ~`1/101` per class. **OID AP values change**; COCO and LVIS are
+  untouched and keep the 101-point grid.
+
+- **Open Images is now parity-checked against the TensorFlow Object Detection API.**
+  `scripts/parity_oid.py` compares 70 cases — mAP *and* per-class AP — against
+  frozen output from `OpenImagesDetectionEvaluator(group_of_weight=1.0)`. Worst
+  difference **1.11e-16**, one ulp. Runs in CI; needs neither network nor
+  TensorFlow. Regenerate fixtures with `just gen-oid-fixtures`.
+
+  Open Images stays `Provenance::Extension`, but the warning now names the real gap:
+  the challenge's non-exhaustive image-level-label rule is not implemented (it needs
+  per-image label data COCO JSON cannot carry). It previously claimed no reference
+  implementation existed, which was untrue.
 
 - **`COCOeval::results()` and the Python result dicts are now byte-stable.** They
   used `HashMap`, so three identical runs produced three different key orders and
@@ -326,37 +341,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ErrType::as_str` also replaces a second, separate enumeration of the variants in
   the aggregation step.
 
-### Removed
+- **`iou_type` serializes lowercase.** `results()["params"]["iou_type"]` and saved
+  results files now say `"bbox"` / `"segm"` / `"keypoints"` instead of `"Bbox"` / …,
+  matching `Display` and `FromStr` — an archived results file round-trips into
+  `COCOeval(...)` and the CLI without case-fixing.
 
-- **Five pre-1.0 Rust *module* paths, with no compatibility aliases.** `cargo-semver-checks`
-  reports 47 removed paths, and every one is under these five:
+- **`f_scores()` keys renamed** from `F150` / `F175` to `F1_50` / `F1_75` (general
+  form `F{beta}_50` / `F{beta}_75`) — the names the documentation always advertised.
 
-  | Gone | Use |
-  |---|---|
-  | `hotcoco::eval::*` | `hotcoco::detection::*` |
-  | `hotcoco::hierarchy` | `hotcoco::detection::hierarchy` |
-  | `hotcoco::healthcheck` | `hotcoco::quality::healthcheck` |
-  | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | `hotcoco::quality::*` |
-  | `hotcoco::primitives::counts` | `hotcoco::metrics::counts` |
+- **Byte-stable output ordering, now in the types.** `get_results()`, `f_scores()`,
+  and `compare()`'s metric/delta/CI maps are ordered (`BTreeMap`) in Rust like
+  `EvalResults` / `EvalReport` already were, instead of being sorted only at the
+  Python boundary — the Rust API and serialized JSON no longer churn between runs.
 
-  **No crate-root path was removed.** `hotcoco::COCOeval`, `hotcoco::EvalImg`,
-  `hotcoco::Hierarchy`, `hotcoco::HealthReport`, `hotcoco::SummaryStats` and the rest
-  resolve exactly as they did in 0.5.0, so code using them needs no edit — which is
-  most code, since the module paths are the verbose form.
+- **`confusion_matrix()["matrix"]` dtype is `uint64`.** It was `int64` from
+  `COCOeval.confusion_matrix()` but `uint64` from `hotcoco.metrics` — the two entry
+  points now agree, via one shared converter.
 
-  0.x is pre-release under SemVer ("anything MAY change at any time"), so these paths
-  carried no stability promise. An earlier draft of 1.0 kept them as deprecated
-  aliases; that was dropped because it committed the crate to carrying a compatibility
-  tier through all of 1.x and removing it at 2.0 — a multi-year obligation to a Rust
-  module surface with no known consumer, when the crate-root paths already absorb the
-  moves. A compile error naming the new path is a better migration experience than a
-  silent alias.
+- **`ev.params` mutations reach every method.** `confusion_matrix()`, `tide_errors()`,
+  `calibration()`, `slice_by()`, `image_diagnostics()`, `get_results()`, `report()`,
+  `f_scores()`, `results()`, and `save_results()` now observe params edits made before
+  the call; previously `ev.params.catIds = [...]` was silently ignored by analysis
+  methods until the next `evaluate()` — despite `confusion_matrix` being documented
+  as standalone.
 
-  **Python is entirely unaffected** and always was: these are Rust module paths.
-  `hotcoco.COCOeval`, `hotcoco.mask`, `init_as_pycocotools()`, and the
-  `pycocotools`/LVIS drop-in surface are permanent.
+- **Presentation consistency across surfaces:** the CLI TIDE table lists error types
+  in canonical order (Cls, Loc, Both, Dupe, Bkg, Miss — it led with Loc);
+  `coco compare` prints `n/a` for not-computed metrics instead of `-1.000`; the
+  dashboard and PDF recall KPI tile shows `AR100` / `AR@300` / `AR` per mode instead
+  of `AR1`; `--title` defaults to a mode-derived report title ("LVIS Evaluation
+  Report", …); `--json` runs of `eval` / `compare` / `convert` no longer animate
+  spinners; and the PDF footer version comes from the extension itself rather than a
+  best-effort `importlib.metadata` lookup that could silently vanish.
+
+- **Evaluation allocates far less.** Flat per-threshold match matrices
+  (`ThreshMatrix`), a per-`evaluate()` RLE cache mirroring pycocotools' `_prepare`
+  (`SegmRles`), thread-local polygon-rasterization scratch, and per-(image, category)
+  gathering shared across the four area ranges: evaluate + accumulate wall time on
+  val2017 dropped 44% (bbox), 24% (segm), 32% (keypoints). Output verified
+  bit-identical.
+
+- **JSON loading is ~2× faster.** simd-json for parsing, a hand-written streaming
+  `Segmentation` deserializer (replacing `#[serde(untagged)]`, which buffered every
+  polygon twice regardless of parser), and a SIMD substring prefilter for the
+  NaN/Infinity sanitizer: `COCO::new` on the val2017 instances file went 105 ms →
+  58 ms, and the end-to-end bbox benchmark headline moved from 24× to 33× vs
+  pycocotools.
+
+- **Analysis surfaces scale.** The confusion matrix accumulates sparse label pairs
+  instead of a dense (K+1)² grid per rayon split (528 ms → single-digit ms with
+  1,000 mostly-empty categories) and collects per-image pairs in O(annotations)
+  rather than O(images × categories); `accumulate` visits each (category, area)
+  bucket once with the maxDets loop inside (~40% faster — bootstrap `compare` is
+  accumulate-bound); TIDE sorts each category's detections twice instead of eight
+  times and parallelizes across categories. All verified bit-identical on val2017
+  and Objects365.
 
 ### Fixed
+
+- **Unsorted `max_dets` no longer silently empties `image_diagnostics()`.** Five
+  sites each derived the per-image detection cap independently — four spelled
+  `max_dets.last()`, one spelled the maximum. Identical on the sorted default
+  `[1, 10, 100]`, divergent on unsorted input: `evaluate()` stamped eval images
+  with one value while diagnostics filtered on the other and matched nothing.
+  `Params::max_det()` now owns the reduction (the maximum, as the name says — the
+  same value pycocotools reaches by sorting `maxDets` in place), an architecture
+  test bans any other derivation, and evaluation results are now independent of
+  `max_dets` order.
+
+- **Ground-truth annotations now feed the matcher in JSON array order,** exactly
+  as pycocotools builds `_gts`, instead of being re-sorted by annotation id. The
+  order is observable: on an exact IoU tie the greedy matcher takes the later
+  ground truth, so files whose annotation ids are not in array order — converted
+  or merged datasets, typically — could match a different GT than pycocotools.
+  Official COCO files are id-ordered, so their numbers cannot move.
+
+- **A keypoints PDF report was titled "COCO Evaluation Report".** `PlotData.iou_type`
+  carried the Rust enum's spelling (`"Bbox"`, `"Keypoints"`) while `eval_mode` arrived
+  lowercase, so `iou_type == "keypoints"` was never true. Lowercased at the boundary,
+  where the field's documented contract already said it was.
+
+- **Open Images group-of matching used IoU instead of IoA.** The protocol says a
+  detection is inside a group-of box when intersection divided by the *detection's*
+  area exceeds 0.5. hotcoco forced the plain-IoU formula for every OID ground truth,
+  so a detection smaller than the group box — an individual object inside a cluster,
+  the normal case — was never absorbed and leaked out as a false positive. An 80×80
+  detection wholly inside a 200×200 group-of box scores IoA 1.00 but IoU 0.16, and
+  was counted as an error.
+
+  The tests that should have caught this used geometry below the threshold, so the
+  group-of code path never ran; they passed on interpolation instead. They now assert
+  the measure, and place the false positive before full recall where AP can see it.
+
+- **Group-of tie-breaking disagreed with the reference.** When a detection sat
+  inside two overlapping group-of boxes at equal IoA — which containment makes
+  common, since it saturates at 1.0 — hotcoco credited the later box and left the
+  earlier one permanently unmatched, converting a true positive into a miss. The
+  reference's `np.argmax` takes the first maximum. The rule now lives in
+  `primitives::greedy::best_above_floor` so a second caller cannot re-derive it.
+  Found by the new Open Images parity check.
+
+- **`AccumulatedEval` gained `ap_all_points`**, the exact area under the precision
+  envelope, shaped and indexed like `recall`. `precision` holds that same envelope
+  sampled at the 101 recall thresholds. `AccumulatedEval` is now `#[non_exhaustive]`
+  so later fields are additive — done while still pre-1.0, when it is free.
+
+- **`EvalImg` gained `gt_in_denominator`** (`gtInDenominator` in Python) and is now
+  `#[non_exhaustive]`. `gt_ignore` means "excluded from matching", which for group-of
+  boxes is no longer the same as "excluded from the recall denominator". Code
+  computing `num_gt` should read the new field.
 
 - **`ev.params.imgIds = [...]` was a silent no-op.** The `params` getter cloned
   into a fresh object on every access, so pycocotools' canonical configuration
@@ -499,13 +592,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
   One ulp is not harmless on the recall grid. `recall = tp / num_gt` is a ratio of
   small integers, so it lands exactly on a grid point routinely — at
-  `num_gt = 20, tp = 7` it equalled the old `rec_thrs[35]` bit-for-bit while
+  `num_gt = 20, tp = 7` it equaled the old `rec_thrs[35]` bit-for-bit while
   sitting strictly below numpy's, so the two-pointer scan stopped one detection
   early and reported a different precision there. Neither grid is more *correct*,
   which is exactly why matching the reference is free. `params::linspace` is now
   the single owner of both, pinned against captured numpy bit patterns.
 
-- **Property tests over `primitives` and `metrics`.** Randomised coverage of the
+- **Property tests over `primitives` and `metrics`.** Randomized coverage of the
   matcher contract (injectivity, output agreement, threshold clearance, phase-2
   eligibility), bbox IoU algebra, PR-curve well-formedness, `f_beta` bounds,
   confusion marginals, and calibration binning — roughly 80k generated cases,
@@ -562,6 +655,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the confusion matrix, per-image diagnostics, and calibration do not, because
   they are hotcoco-native analysis over a user-chosen threshold. `greedy_match`
   itself still adds no epsilon of its own — the clamp remains caller-applied.
+
+- **Per-class AP and F-scores could read the wrong maxDets slice.** With unsorted
+  `max_dets` (e.g. `[100, 10, 1]`), `report()["per_class"]`, `compare()`'s
+  per-category table, and `f_scores()` silently used the *last* slot (maxDets = 1)
+  while the headline AP used the largest — 0.63 vs 0.91 within one `report()`. All
+  three now resolve through `Params::max_det_idx()`; a regression test pins it.
+
+- **`coco.browse(eval=ev)` rendered no dashboard.** The documented invocation only
+  honored `eval=` when `dt=` was also passed; it now uses the evaluator directly and
+  derives the detection overlay from it.
+
+- **`plot.confusion_matrix(group_by=…, top_n=N)` ignored `top_n`**, and grouped
+  matrices skipped the >30-category auto-subset.
+
+- **PR plots fabricated the recall axis** as `linspace(0, 1, R)` — mislabeling every
+  x coordinate on a run with custom `rec_thrs`. All curves now use the evaluator's
+  own grid, and the standard aggregate curve is read from `report()["curves"]`
+  instead of re-derived (the two disagreed about empty slices: NaN vs the `-1.0`
+  sentinel).
+
+- **`image_diagnostics()` per-image AP ignored custom `rec_thrs`**, always evaluating
+  on the default 101-point grid.
+
+- Open Images' `AP` row was captioned "IoU 0.50:0.95" in the PDF; it is AP@0.5.
+
+- `just report type=kpt` failed from any directory but the repo root (relative
+  paths) and rejected the `kpt` spelling its own recipe suggests.
+
+- `scripts/parity.py` silently skipped its pinned val2017 baseline when the fixture
+  was missing or a key renamed, printing "ALL METRICS PASS" having checked nothing;
+  the baseline is now mandatory and a missing per-type key is a scored failure.
+
+### Removed
+
+- **Five pre-1.0 Rust *module* paths, with no compatibility aliases.** `cargo-semver-checks`
+  reports 47 removed paths, and every one is under these five:
+
+  | Gone | Use |
+  |---|---|
+  | `hotcoco::eval::*` | `hotcoco::detection::*` |
+  | `hotcoco::hierarchy` | `hotcoco::detection::hierarchy` |
+  | `hotcoco::healthcheck` | `hotcoco::quality::healthcheck` |
+  | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | `hotcoco::quality::*` |
+  | `hotcoco::primitives::counts` | `hotcoco::metrics::counts` |
+
+  **No crate-root path was removed.** `hotcoco::COCOeval`, `hotcoco::EvalImg`,
+  `hotcoco::Hierarchy`, `hotcoco::HealthReport`, `hotcoco::SummaryStats` and the rest
+  resolve exactly as they did in 0.5.0, so code using them needs no edit — which is
+  most code, since the module paths are the verbose form.
+
+  0.x is pre-release under SemVer ("anything MAY change at any time"), so these paths
+  carried no stability promise. An earlier draft of 1.0 kept them as deprecated
+  aliases; that was dropped because it committed the crate to carrying a compatibility
+  tier through all of 1.x and removing it at 2.0 — a multi-year obligation to a Rust
+  module surface with no known consumer, when the crate-root paths already absorb the
+  moves. A compile error naming the new path is a better migration experience than a
+  silent alias.
+
+  **Python is entirely unaffected** and always was: these are Rust module paths.
+  `hotcoco.COCOeval`, `hotcoco.mask`, `init_as_pycocotools()`, and the
+  `pycocotools`/LVIS drop-in surface are permanent.
+
+- **`Provenance::label()`** (Rust) — never called, and carried a second, hyphenated
+  spelling of the provenance strings; removed before 1.0 froze it.
 
 ## [0.5.0] - 2026-07-26
 

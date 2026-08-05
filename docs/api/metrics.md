@@ -18,6 +18,11 @@ Every function here is pure: arrays in, numbers out. This is the same shape
 `sklearn.metrics` and `torchmetrics.functional` use, and it means you can score
 predictions that never went through a COCO JSON file.
 
+Float and bool inputs accept lists or numpy arrays. A `float64` / `bool`
+ndarray is read in a single copy; other dtypes and plain sequences work too,
+element by element. The signatures below write `Sequence[float]` — read every
+such parameter as "or a 1-D ndarray".
+
 ```python
 from hotcoco import metrics
 
@@ -26,6 +31,10 @@ matched = [True, True, False, True]
 
 ap = metrics.average_precision(scores, matched, num_gt=5)
 ece, mce = metrics.calibration_error(scores, matched)
+
+# numpy arrays work directly — no .tolist() needed
+import numpy as np
+ap = metrics.average_precision(np.array(scores), np.array(matched), num_gt=5)
 ```
 
 !!! tip "`COCOeval` still does the whole pipeline"
@@ -172,6 +181,16 @@ The data behind a reliability diagram. Each dict has `bin_lower`, `bin_upper`,
 
 A perfectly calibrated model has `avg_confidence == avg_accuracy` in every bin —
 that diagonal is what the diagram compares against.
+
+!!! warning "Scores must be confidences in `[0, 1]`"
+
+    Both calibration functions bucket by `score * n_bins` and clamp the bin
+    *index*, not the score, so a raw logit saturates into an end bin and carries
+    its magnitude into that bin's mean — an ECE above 1.0 with no other symptom.
+    Neither free function validates its input: they are hot-path primitives over
+    flat arrays, and the check is a full pass over the scores. `COCOeval.calibration()`
+    does validate and raises on out-of-range scores. Apply a sigmoid or softmax
+    before calling these directly.
 
 ---
 

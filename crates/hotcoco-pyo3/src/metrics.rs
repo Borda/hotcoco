@@ -4,14 +4,15 @@
 //! needs a `COCOeval`, which is the point: the same `average_precision` that
 //! backs COCO's AP is callable on any `(scores, matched)` pair you have.
 
-use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 use hotcoco_core::metrics::{calibration as rcal, confusion as rconf, counts as rcounts};
 use hotcoco_core::params::default_rec_thrs;
 
-use crate::convert::{calibration_bin_to_py, check_parallel};
+use crate::convert::{
+    bool_vec, calibration_bin_to_py, check_parallel, confusion_counts_to_py, f64_vec,
+};
 
 #[pyfunction]
 #[pyo3(
@@ -44,12 +45,16 @@ Example:
     0.835
 "]
 fn average_precision(
-    scores: Vec<f64>,
-    matched: Vec<bool>,
+    scores: &Bound<'_, PyAny>,
+    matched: &Bound<'_, PyAny>,
     num_gt: usize,
-    ignored: Option<Vec<bool>>,
-    rec_thrs: Option<Vec<f64>>,
+    ignored: Option<&Bound<'_, PyAny>>,
+    rec_thrs: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<f64> {
+    let scores = f64_vec(scores, "scores")?;
+    let matched = bool_vec(matched, "matched")?;
+    let ignored = ignored.map(|o| bool_vec(o, "ignored")).transpose()?;
+    let rec_thrs = rec_thrs.map(|o| f64_vec(o, "rec_thrs")).transpose()?;
     check_parallel(scores.len(), matched.len(), "scores", "matched")?;
     if let Some(ig) = &ignored {
         check_parallel(ig.len(), scores.len(), "ignored", "scores")?;
@@ -89,11 +94,14 @@ Returns:
 "]
 fn precision_recall_curve(
     py: Python<'_>,
-    tp_cum: Vec<f64>,
-    fp_cum: Vec<f64>,
+    tp_cum: &Bound<'_, PyAny>,
+    fp_cum: &Bound<'_, PyAny>,
     num_gt: usize,
-    rec_thrs: Option<Vec<f64>>,
+    rec_thrs: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let tp_cum = f64_vec(tp_cum, "tp_cum")?;
+    let fp_cum = f64_vec(fp_cum, "fp_cum")?;
+    let rec_thrs = rec_thrs.map(|o| f64_vec(o, "rec_thrs")).transpose()?;
     check_parallel(tp_cum.len(), fp_cum.len(), "tp_cum", "fp_cum")?;
     let thrs = rec_thrs.unwrap_or_else(default_rec_thrs);
     let (final_recall, curve) = rcounts::precision_recall_curve(&tp_cum, &fp_cum, num_gt, &thrs);
@@ -133,10 +141,12 @@ Returns:
 "]
 fn calibration_curve(
     py: Python<'_>,
-    scores: Vec<f64>,
-    matched: Vec<bool>,
+    scores: &Bound<'_, PyAny>,
+    matched: &Bound<'_, PyAny>,
     n_bins: usize,
 ) -> PyResult<Py<PyAny>> {
+    let scores = f64_vec(scores, "scores")?;
+    let matched = bool_vec(matched, "matched")?;
     check_parallel(scores.len(), matched.len(), "scores", "matched")?;
     let bins = rcal::calibration_curve(&scores, &matched, n_bins);
 
@@ -172,7 +182,13 @@ Example:
     >>> round(ece, 3)
     0.4
 "]
-fn calibration_error(scores: Vec<f64>, matched: Vec<bool>, n_bins: usize) -> PyResult<(f64, f64)> {
+fn calibration_error(
+    scores: &Bound<'_, PyAny>,
+    matched: &Bound<'_, PyAny>,
+    n_bins: usize,
+) -> PyResult<(f64, f64)> {
+    let scores = f64_vec(scores, "scores")?;
+    let matched = bool_vec(matched, "matched")?;
     check_parallel(scores.len(), matched.len(), "scores", "matched")?;
     let bins = rcal::calibration_curve(&scores, &matched, n_bins);
     Ok(rcal::calibration_error(&bins))
@@ -217,9 +233,7 @@ fn confusion_matrix(
 ) -> PyResult<Py<PyAny>> {
     check_parallel(gt.len(), dt.len(), "gt", "dt")?;
     let flat = rconf::confusion_matrix(&gt, &dt, num_classes);
-    let k = num_classes + 1;
-    let arr = PyArray1::from_vec(py, flat);
-    Ok(arr.reshape([k, k])?.into_any().unbind())
+    confusion_counts_to_py(py, flat, num_classes + 1)
 }
 
 /// Build the `hotcoco.metrics` submodule.

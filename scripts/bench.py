@@ -24,16 +24,13 @@ import time
 import pycocotools.mask as mask_utils
 from faster_coco_eval import COCO as FcCOCO
 from faster_coco_eval import COCOeval_faster
-from helpers import DATA_DIR, suppress_stdout
+from helpers import VAL2017, suppress_output
 from hotcoco import COCO, COCOeval
 from pycocotools.coco import COCO as PyCOCO
 from pycocotools.cocoeval import COCOeval as PyCOCOeval
 
-BENCHMARKS = [
-    {"name": "bbox", "gt": DATA_DIR / "annotations/instances_val2017.json", "iou_type": "bbox"},
-    {"name": "segm", "gt": DATA_DIR / "annotations/instances_val2017.json", "iou_type": "segm"},
-    {"name": "keypoints", "gt": DATA_DIR / "annotations/person_keypoints_val2017.json", "iou_type": "keypoints"},
-]
+# Detections are synthesized from the GT, so only the annotation files in
+# `helpers.VAL2017` are used — the result files are not read here.
 
 # ~1 detection per GT annotation in val2017 instances (~36,781 annotations).
 BASE_DETS = 36_781
@@ -91,39 +88,67 @@ def generate_detections(gt_path, iou_type, n_dets, seed=42):
 
 
 def bench_pycocotools(gt_file, dt_file, iou_type):
-    t0 = time.perf_counter()
-    with suppress_stdout():
+    """Returns (load_seconds, eval_seconds); load = ctor + loadRes."""
+    with suppress_output(stderr=False):
+        t0 = time.perf_counter()
         gt = PyCOCO(str(gt_file))
         dt = gt.loadRes(str(dt_file))
+        t_load = time.perf_counter() - t0
+        t0 = time.perf_counter()
         ev = PyCOCOeval(gt, dt, iou_type)
         ev.evaluate()
         ev.accumulate()
         ev.summarize()
-    return time.perf_counter() - t0
+        t_eval = time.perf_counter() - t0
+    return t_load, t_eval
 
 
 def bench_faster_coco_eval(gt_file, dt_file, iou_type):
-    t0 = time.perf_counter()
-    with suppress_stdout():
+    """Returns (load_seconds, eval_seconds); load = ctor + loadRes."""
+    with suppress_output(stderr=False):
+        t0 = time.perf_counter()
         gt = FcCOCO(str(gt_file))
         dt = gt.loadRes(str(dt_file))
+        t_load = time.perf_counter() - t0
+        t0 = time.perf_counter()
         ev = COCOeval_faster(gt, dt, iou_type)
         ev.evaluate()
         ev.accumulate()
         ev.summarize()
-    return time.perf_counter() - t0
+        t_eval = time.perf_counter() - t0
+    return t_load, t_eval
 
 
 def bench_hotcoco(gt_file, dt_file, iou_type):
-    t0 = time.perf_counter()
-    with suppress_stdout():
+    """Returns (load_seconds, eval_seconds); load = ctor + loadRes."""
+    with suppress_output(stderr=False):
+        t0 = time.perf_counter()
         gt = COCO(str(gt_file))
         dt = gt.load_res(str(dt_file))
+        t_load = time.perf_counter() - t0
+        t0 = time.perf_counter()
         ev = COCOeval(gt, dt, iou_type)
         ev.evaluate()
         ev.accumulate()
         ev.summarize()
-    return time.perf_counter() - t0
+        t_eval = time.perf_counter() - t0
+    return t_load, t_eval
+
+
+def strip_segmentation(gt_path, out_path):
+    """Write a copy of a GT file with every `segmentation` field removed.
+
+    The official instances files carry a polygon on every annotation — about
+    two-thirds of the file bytes — which bbox evaluation never reads. This
+    variant represents datasets that never had masks (custom bbox datasets,
+    YOLO conversions, Objects365).
+    """
+    with open(gt_path) as f:
+        gt = json.load(f)
+    for ann in gt["annotations"]:
+        ann.pop("segmentation", None)
+    with open(out_path, "w") as f:
+        json.dump(gt, f)
 
 
 def parse_args():
@@ -142,34 +167,66 @@ def parse_args():
         default=["bbox", "segm", "keypoints"],
         help="Eval types to run (default: all three)",
     )
+    p.add_argument(
+        "--phases",
+        action="store_true",
+        help="Split each result into load (ctor + loadRes) and eval "
+        "(evaluate + accumulate + summarize), and add a bbox-only-GT variant "
+        "row (segmentation fields stripped) when bbox is among the types",
+    )
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    active = [b for b in BENCHMARKS if b["name"] in args.types]
     n_dets = BASE_DETS * args.scale
 
     scale_note = f" ({args.scale}× detections)" if args.scale > 1 else ""
     print(f"\nCOCO val2017{scale_note} — {n_dets:,} synthetic detections (seed=42)")
     print("=" * 68)
-    print(f"  {'Eval Type':<12} {'pycocotools':>13} {'faster-coco-eval':>17} {'hotcoco':>9}")
+    if args.phases:
+        print(f"  {'Eval Type':<22} {'Phase':<6} {'pycocotools':>12} {'faster-coco-eval':>17} {'hotcoco':>9}")
+    else:
+        print(f"  {'Eval Type':<12} {'pycocotools':>13} {'faster-coco-eval':>17} {'hotcoco':>9}")
     print("=" * 68)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for bench in active:
-            dets = generate_detections(bench["gt"], bench["iou_type"], n_dets)
-            dt_path = os.path.join(tmpdir, f"{bench['name']}_dt.json")
+        # (row label, GT file, iou_type). The label and the iou_type coincide for
+        # the three real types and diverge only for the stripped-GT variant below.
+        rows = [(iou_type, files["gt"], iou_type) for iou_type, files in VAL2017.items() if iou_type in args.types]
+        if args.phases and "bbox" in args.types:
+            # Same detections, GT without its (unread) polygon masks.
+            stripped = os.path.join(tmpdir, "gt_bbox_only.json")
+            strip_segmentation(VAL2017["bbox"]["gt"], stripped)
+            rows.append(("bbox (bbox-only GT)", stripped, "bbox"))
+
+        for name, gt_path, iou_type in rows:
+            # Detections are generated from the *official* GT so the
+            # bbox-only-GT variant times the same workload on a lighter file.
+            src_gt = VAL2017["bbox"]["gt"] if name.startswith("bbox") else gt_path
+            dets = generate_detections(src_gt, iou_type, n_dets)
+            dt_path = os.path.join(tmpdir, "dt.json")
             with open(dt_path, "w") as f:
                 json.dump(dets, f)
 
-            py_t = bench_pycocotools(bench["gt"], dt_path, bench["iou_type"])
-            fc_t = bench_faster_coco_eval(bench["gt"], dt_path, bench["iou_type"])
-            hc_t = bench_hotcoco(bench["gt"], dt_path, bench["iou_type"])
+            py = bench_pycocotools(gt_path, dt_path, iou_type)
+            fc = bench_faster_coco_eval(gt_path, dt_path, iou_type)
+            hc = bench_hotcoco(gt_path, dt_path, iou_type)
 
-            fc_x = py_t / fc_t
-            hc_x = py_t / hc_t
-            print(f"  {bench['name']:<12} {py_t:>11.2f}s  {fc_t:>6.2f}s ({fc_x:.1f}×)  {hc_t:>6.2f}s ({hc_x:.1f}×)")
+            if args.phases:
+                for phase, i in (("load", 0), ("eval", 1)):
+                    label = name if phase == "load" else ""
+                    print(
+                        f"  {label:<22} {phase:<6} {py[i]:>11.2f}s "
+                        f"{fc[i]:>10.2f}s ({py[i] / fc[i]:.1f}×) "
+                        f"{hc[i]:>6.2f}s ({py[i] / hc[i]:.1f}×)"
+                    )
+            else:
+                py_t, fc_t, hc_t = sum(py), sum(fc), sum(hc)
+                print(
+                    f"  {name:<12} {py_t:>11.2f}s  {fc_t:>6.2f}s ({py_t / fc_t:.1f}×)  "
+                    f"{hc_t:>6.2f}s ({py_t / hc_t:.1f}×)"
+                )
 
     print("=" * 68)
     print("  Speedups are relative to pycocotools.")

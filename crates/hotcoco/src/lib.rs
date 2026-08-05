@@ -100,10 +100,13 @@ pub use convert::{ConvertError, CvatStats, DotaStats, VocStats, YoloStats};
 pub use detection::{
     AccumulatedEval, AnnotationIndex, COCOeval, CalibrationResult, CategoryDelta, CompareOpts,
     ComparisonResult, ConfusionMatrix, DtStatus, ErrorProfile, EvalImg, EvalMode, EvalParams,
-    EvalResults, EvalShape, GtStatus, ImageDiagnostics, ImageSummary, LabelError, LabelErrorType,
-    SliceResult, SlicedResults, TideErrors, compare,
+    EvalResults, EvalShape, FreqGroup, GtStatus, ImageDiagnostics, ImageSummary, LabelError,
+    LabelErrorType, MetricDef, SliceResult, SlicedResults, TideErrors, compare,
 };
 pub use error::Error;
+// Re-exported at the root because it is the shape of `EvalImg`'s per-threshold
+// fields — a consumer holding an `EvalImg` needs the type nameable.
+pub use primitives::greedy::ThreshMatrix;
 
 pub use detection::hierarchy::Hierarchy;
 // Re-exported from where they are defined, not through `detection`. Both are

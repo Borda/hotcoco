@@ -19,6 +19,8 @@ quick-xml = "0.41"
 rayon = "1"
 rand = "0.9"
 thiserror = "2"
+memchr = "2.8.3"
+simd-json = "0.15.1"
 
 [dev-dependencies]
 tempfile = "3"

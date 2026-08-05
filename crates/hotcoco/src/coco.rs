@@ -24,7 +24,13 @@ pub struct COCO {
     /// `pub(crate)` so `quality::stats` can read it — `COCO::stats` lives there,
     /// since dataset statistics are introspection output rather than schema.
     pub(crate) cat_to_imgs: HashMap<u64, Vec<u64>>,
-    /// (img_id, cat_id) -> [ann_id, ...] (sorted)
+    /// (img_id, cat_id) -> [ann_id, ...] in JSON array order.
+    ///
+    /// Deliberately *not* sorted by id: pycocotools builds `_gts` by iterating
+    /// `dataset['annotations']` once, so array order is what feeds the matcher,
+    /// and the greedy tie-break (`>=`, later GT wins on equal IoU) makes that
+    /// order observable through `evalImgs`. Official COCO files are id-ordered
+    /// anyway; converted or merged files are where the two orders differ.
     img_cat_to_anns: HashMap<(u64, u64), Vec<u64>>,
 }
 
@@ -44,6 +50,18 @@ pub struct COCO {
 /// such tokens, so the common case pays only a single linear scan. The second
 /// element is the number of tokens rewritten.
 fn sanitize_non_finite(input: &[u8]) -> (Cow<'_, [u8]>, usize) {
+    // Prefilter: if the tokens never occur as substrings *anywhere* — even
+    // inside strings, where they would not count — the scan below cannot
+    // rewrite anything. Two SIMD substring searches cost ~1ms on a 19 MB
+    // file; the byte-at-a-time state machine they skip cost ~24ms, paid on
+    // every load of a clean file, which is nearly every load. ("-Infinity"
+    // contains "Infinity", so two needles cover all three tokens.)
+    if memchr::memmem::find(input, b"NaN").is_none()
+        && memchr::memmem::find(input, b"Infinity").is_none()
+    {
+        return (Cow::Borrowed(input), 0);
+    }
+
     let n = input.len();
     let mut out: Option<Vec<u8>> = None;
     let mut count = 0usize;
@@ -159,15 +177,26 @@ impl COCO {
     /// Load a COCO annotation JSON file and build indices.
     pub fn new(annotation_file: &Path) -> crate::error::Result<Self> {
         let raw = std::fs::read(annotation_file)?;
-        let (bytes, n_fixed) = sanitize_non_finite(&raw);
+        let (mut bytes, n_fixed) = Self::sanitize_owned(raw);
         if n_fixed > 0 {
             eprintln!(
                 "hotcoco: normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
                 annotation_file.display()
             );
         }
-        let dataset: Dataset = serde_json::from_slice(&bytes)?;
+        let dataset: Dataset = simd_json::serde::from_slice(&mut bytes)
+            .map_err(|e| crate::error::Error::from(format!("invalid JSON: {e}")))?;
         Ok(Self::from_dataset(dataset))
+    }
+
+    /// [`sanitize_non_finite`] over an owned buffer: hands the original buffer
+    /// back untouched when the input is clean, so the common case pays no copy.
+    /// Owned because `simd_json` parses in place and needs `&mut` bytes.
+    fn sanitize_owned(raw: Vec<u8>) -> (Vec<u8>, usize) {
+        match sanitize_non_finite(&raw) {
+            (Cow::Owned(fixed), n) => (fixed, n),
+            (Cow::Borrowed(_), n) => (raw, n),
+        }
     }
 
     /// Build a COCO object from an already-loaded Dataset.
@@ -234,10 +263,7 @@ impl COCO {
             ids.sort_unstable();
             ids.dedup();
         }
-        // Sort img_cat_to_anns values
-        for ids in self.img_cat_to_anns.values_mut() {
-            ids.sort_unstable();
-        }
+        // img_cat_to_anns stays in JSON array order — see the field doc.
     }
 
     /// Get annotation IDs matching the given filters.
@@ -271,8 +297,11 @@ impl COCO {
         let mut result: Vec<u64> = if !img_ids.is_empty() {
             img_ids
                 .iter()
-                .flat_map(|id| self.img_to_anns.get(id).cloned().unwrap_or_default())
-                .filter_map(|id| self.anns.get(&id).map(|&i| &self.dataset.annotations[i]))
+                // Borrowed, not cloned: the index already holds one `Vec` per
+                // image, and cloning it per key allocated and dropped the whole
+                // list again just to walk it.
+                .flat_map(|id| self.img_to_anns.get(id).map_or(&[][..], Vec::as_slice))
+                .filter_map(|id| self.anns.get(id).map(|&i| &self.dataset.annotations[i]))
                 .filter(filter)
                 .map(|ann| ann.id)
                 .collect()
@@ -326,7 +355,8 @@ impl COCO {
         if !cat_ids.is_empty() {
             let mut valid: Vec<u64> = cat_ids
                 .iter()
-                .flat_map(|cid| self.cat_to_imgs.get(cid).cloned().unwrap_or_default())
+                .flat_map(|cid| self.cat_to_imgs.get(cid).map_or(&[][..], Vec::as_slice))
+                .copied()
                 .collect();
             valid.sort_unstable();
             valid.dedup();
@@ -373,6 +403,24 @@ impl COCO {
         self.cats.get(&id).map(|&i| &self.dataset.categories[i])
     }
 
+    /// The display name for a category id, falling back to `cat_{id}`.
+    ///
+    /// The one owner of the unnamed-category fallback. Three surfaces invented
+    /// their own and disagreed: the confusion matrix rendered `cat_7`, the
+    /// model-comparison table rendered `7`, and the Python layer rendered its
+    /// own third spelling — so the same missing category record produced three
+    /// different labels depending on which report a user was reading. Anything
+    /// that puts a category name in front of a user goes through here, the
+    /// Python bindings included.
+    ///
+    /// `cat_{id}` rather than the bare id because a name column holding `7` next
+    /// to `person` reads as a category *named* seven; the prefix says it is a
+    /// stand-in.
+    pub fn cat_name(&self, id: u64) -> String {
+        self.get_cat(id)
+            .map_or_else(|| format!("cat_{id}"), |c| c.name.clone())
+    }
+
     /// Get annotation IDs for a specific (image, category) pair.
     ///
     /// Single HashMap lookup — much faster than `get_ann_ids` with filtering.
@@ -410,9 +458,8 @@ impl COCO {
     /// with an `annotations` field. The result COCO object shares the images
     /// and categories from self.
     pub fn load_res(&self, res_file: &Path) -> crate::error::Result<COCO> {
-        // Read once into memory so we can retry parsing without re-opening.
         let raw = std::fs::read(res_file)?;
-        let (bytes, n_fixed) = sanitize_non_finite(&raw);
+        let (mut bytes, n_fixed) = Self::sanitize_owned(raw);
         if n_fixed > 0 {
             eprintln!(
                 "hotcoco: normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
@@ -420,13 +467,21 @@ impl COCO {
             );
         }
 
-        // Try to parse as array first, then as Dataset.
-        let anns: Vec<Annotation> = match serde_json::from_slice::<Vec<Annotation>>(&bytes) {
-            Ok(a) => a,
-            Err(_) => {
-                let ds: Dataset = serde_json::from_slice(&bytes)?;
-                ds.annotations
-            }
+        // The shape is decided by the first non-whitespace byte rather than by
+        // try-parse-then-fallback: simd-json parses in place (it unescapes
+        // strings into the buffer as it goes), so a failed first attempt would
+        // leave the buffer unusable for a second one.
+        let is_array = bytes
+            .iter()
+            .find(|b| !b.is_ascii_whitespace())
+            .is_some_and(|&b| b == b'[');
+        let json_err =
+            |e: simd_json::Error| crate::error::Error::from(format!("invalid JSON: {e}"));
+        let anns: Vec<Annotation> = if is_array {
+            simd_json::serde::from_slice(&mut bytes).map_err(json_err)?
+        } else {
+            let ds: Dataset = simd_json::serde::from_slice(&mut bytes).map_err(json_err)?;
+            ds.annotations
         };
 
         self.load_res_anns(anns)

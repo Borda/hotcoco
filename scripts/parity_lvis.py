@@ -12,12 +12,10 @@ Compares all 13 LVIS metrics between the two implementations.
 Tolerance: 1e-4 (same as our COCO parity tests).
 """
 
-import json
-import os
 import sys
-import tempfile
 
 import numpy as np
+from helpers import written_json
 
 # Compatibility shim: lvis-api uses np.float which was removed in numpy 1.24.
 # Only patch what lvis actually needs; do NOT patch np.bool (breaks numpy.ma).
@@ -31,6 +29,11 @@ from lvis import LVISResults as LVISResultsRef  # noqa: E402
 
 EXPECTED_METRIC_COUNT = 13  # LVIS: 12 COCO-style + AR@300, APr/APc/APf
 TOL = 1e-4
+
+# Every scenario below builds bbox data, so this is the only iou_type these
+# comparisons ever exercise. LVIS segm parity is *not* covered by this script;
+# `_build_three_freq` used to claim it did.
+IOU_TYPE = "bbox"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -50,32 +53,27 @@ def make_lvis_gt(images, annotations, categories):
     }
 
 
-def write_json(obj, path):
-    with open(path, "w") as f:
-        json.dump(obj, f)
-
-
-def run_lvis_ref(gt_path, dt_list, iou_type="bbox"):
+def run_lvis_ref(gt_path, dt_list):
     """Run lvis-api LVISEval and return results dict."""
     lvis_gt = LVIS(gt_path)
     lvis_dt = LVISResultsRef(lvis_gt, dt_list)
-    ev = LVISEval(lvis_gt, lvis_dt, iou_type)
+    ev = LVISEval(lvis_gt, lvis_dt, IOU_TYPE)
     ev.run()
     ev.print_results()
     return ev.results
 
 
-def run_hotcoco(gt_path, dt_path, iou_type="bbox"):
+def run_hotcoco(gt_path, dt_path):
     """Run hotcoco LVISeval and return get_results() dict."""
     gt = COCO(gt_path)
     dt = gt.load_res(dt_path)
-    ev = LVISeval(gt, dt, iou_type)
+    ev = LVISeval(gt, dt, IOU_TYPE)
     ev.run()
     ev.print_results()
     return ev.get_results()
 
 
-def compare(ref, got, label):
+def compare(ref, got):
     """Compare two result dicts. Return number of failures."""
     # lvis-api uses "AR@300" etc.; hotcoco uses the same keys
     # lvis-api omits keys that are -1 (undefined)
@@ -105,23 +103,9 @@ def compare(ref, got, label):
     return failures
 
 
-# ── dataset builder ───────────────────────────────────────────────────────────
-
-
-def build_dataset(scenario):
-    """
-    Scenarios:
-      "basic"       — simple TP / FP / neg / not_exhaustive mix, bbox
-      "three_freq"  — 3 frequency groups, many categories, segm
-    """
-    if scenario == "basic":
-        return _build_basic()
-    elif scenario == "three_freq":
-        return _build_three_freq()
-    elif scenario == "edge_cases":
-        return _build_edge_cases()
-    else:
-        raise ValueError(f"Unknown scenario: {scenario}")
+# ── dataset builders ─────────────────────────────────────────────────────────
+# Each returns (gt_dataset, detections). `main` pairs them with their names; a
+# name-to-builder dispatcher sat here with one caller and an unreachable `else`.
 
 
 def _build_basic():
@@ -238,14 +222,21 @@ def _build_basic():
         # img 4, cat 2: no GT, not_exhaustive → ignored
         {"image_id": 4, "category_id": 2, "bbox": bbox(10, 10, 30, 30), "score": 0.60, "segmentation": []},
     ]
-    return make_lvis_gt(images, gt_anns, categories), dts, "bbox"
+    return make_lvis_gt(images, gt_anns, categories), dts
 
 
 def _build_three_freq():
     """
-    10 categories: 3 rare, 4 common, 3 frequent.
-    5 images with various GT/DT patterns.
-    Tests that APr/APc/APf are computed correctly across groups.
+    10 categories: 3 rare, 4 common, 3 frequent. Bounding boxes.
+
+    5 images with various GT/DT patterns; tests that APr/APc/APf are computed
+    correctly across groups.
+
+    The docstring used to say "segm". It never built masks — every annotation
+    here carries an empty `segmentation` — so LVIS *segmentation* parity is
+    unverified by this script, not merely untested by this scenario. Adding it
+    means giving these annotations real polygons and running with
+    `IOU_TYPE = "segm"`.
     """
     categories = (
         [{"id": i, "name": f"rare_{i}", "frequency": "r", "supercategory": "x"} for i in range(1, 4)]
@@ -352,7 +343,7 @@ def _build_three_freq():
                 )
             # else: truly absent, no DT (dropped by federated filter)
 
-    return make_lvis_gt(images, gt_anns, categories), dts, "bbox"
+    return make_lvis_gt(images, gt_anns, categories), dts
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -447,30 +438,28 @@ def _build_edge_cases():
         # img3, cat 3: matches GT (TP)
         {"image_id": 3, "category_id": 3, "bbox": bbox(5, 5, 30, 30), "score": 0.85, "segmentation": []},
     ]
-    return make_lvis_gt(images, gt_anns, categories), dts, "bbox"
+    return make_lvis_gt(images, gt_anns, categories), dts
 
 
-def run_scenario(name):
+SCENARIOS = [("basic", _build_basic), ("three_freq", _build_three_freq), ("edge_cases", _build_edge_cases)]
+
+
+def run_scenario(name, build):
     print(f"\n{'=' * 70}")
     print(f"Scenario: {name}")
     print(f"{'=' * 70}")
 
-    gt_data, dts, iou_type = build_dataset(name)
+    gt_data, dts = build()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        gt_path = os.path.join(tmp, "gt.json")
-        dt_path = os.path.join(tmp, "dt.json")
-        write_json(gt_data, gt_path)
-        write_json(dts, dt_path)
-
+    with written_json(gt_data, dts) as (gt_path, dt_path):
         print("\n--- lvis-api (reference) ---")
-        ref_results = run_lvis_ref(gt_path, dts, iou_type)
+        ref_results = run_lvis_ref(gt_path, dts)
 
         print("\n--- hotcoco ---")
-        got_results = run_hotcoco(gt_path, dt_path, iou_type)
+        got_results = run_hotcoco(gt_path, dt_path)
 
         print(f"\n--- Comparison (tol={TOL}) ---")
-        failures = compare(ref_results, got_results, name)
+        failures = compare(ref_results, got_results)
 
         if failures == 0:
             print(f"  ✓ All metrics match for scenario '{name}'")
@@ -481,8 +470,8 @@ def run_scenario(name):
 
 if __name__ == "__main__":
     total_failures = 0
-    for scenario in ["basic", "three_freq", "edge_cases"]:
-        total_failures += run_scenario(scenario)
+    for name, build in SCENARIOS:
+        total_failures += run_scenario(name, build)
 
     print(f"\n{'=' * 70}")
     if total_failures == 0:

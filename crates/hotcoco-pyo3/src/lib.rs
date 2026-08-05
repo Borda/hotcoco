@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use numpy::{PyArray1, PyArray2, PyArrayMethods};
+use numpy::{PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 
@@ -25,9 +25,39 @@ fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
     }
 }
 
+/// Hand Python a serde-serializable value as plain dicts and lists.
+///
+/// The bindings return plain Python containers rather than wrapped Rust
+/// structs, and the cheapest way to get there for a whole report tree is
+/// serialize-then-`json.loads`. Three methods (`healthcheck`, `report`,
+/// `results`) each wrote that dance by hand, and they disagreed about
+/// failures: one mapped a serialization error to `PyValueError` directly,
+/// the others went through `to_pyerr`. One helper, one convention — a
+/// serialization failure is `Error::Json`, so `to_pyerr` decides its Python
+/// type here as it does everywhere else.
+fn serde_to_py<T: serde::Serialize + ?Sized>(py: Python<'_>, value: &T) -> PyResult<Py<PyAny>> {
+    let json_str =
+        serde_json::to_string(value).map_err(|e| to_pyerr(hotcoco_core::Error::Json(e)))?;
+    let json_mod = py.import("json")?;
+    Ok(json_mod.call_method1("loads", (json_str,))?.unbind())
+}
+
+/// The Python spelling of an LVIS frequency bucket.
+///
+/// Spelled out rather than derived from `Debug`: this string is public API —
+/// `metric_defs()[i]["freq_group"]` — and a `#[derive(Debug)]` rename in the
+/// core crate must not silently rename a key Python code branches on.
+fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
+    match group {
+        hotcoco_core::FreqGroup::Rare => "rare",
+        hotcoco_core::FreqGroup::Common => "common",
+        hotcoco_core::FreqGroup::Frequent => "frequent",
+    }
+}
+
 use convert::{
-    annotation_to_py, category_to_py, dataset_stats_to_py, image_to_py, py_to_annotation,
-    py_to_dataset, rle_to_py,
+    annotation_to_py, category_to_py, confusion_counts_to_py, dataset_stats_to_py, f64_array,
+    image_to_py, map_to_dict, py_to_annotation, py_to_dataset, rle_to_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -297,11 +327,7 @@ impl PyCOCO {
             Some(dt_coco) => self.inner.healthcheck_compatibility(&dt_coco.inner),
             None => self.inner.healthcheck(),
         };
-        let json_str = serde_json::to_string(&report)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        let json_mod = py.import("json")?;
-        let result = json_mod.call_method1("loads", (json_str,))?;
-        Ok(result.into())
+        serde_to_py(py, &report)
     }
 
     /// Filter the dataset by category, image, and/or annotation area.
@@ -1229,6 +1255,24 @@ impl PyCOCOeval {
     /// `img_ids`/`cat_ids` to the whole dataset and sorts them, and pycocotools
     /// likewise leaves the resolved lists on `params`, so a caller reading
     /// `ev.params.imgIds` afterwards sees what actually ran.
+    ///
+    /// **Every method that reads `params` goes through here.** The inventory,
+    /// so the next one added is checked against a list rather than against
+    /// memory:
+    ///
+    /// - drivers: `evaluate`, `accumulate`, `summarize`, `summary_lines`, `run`
+    /// - provenance: `provenance`, `is_benchmark_standard`, `reference_deviations`
+    /// - results: `metric_keys`, `metric_defs`, `get_results`, `report`,
+    ///   `results`, `save_results`, `f_scores`
+    /// - analysis: `confusion_matrix`, `tide_errors`, `calibration`, `slice_by`,
+    ///   `image_diagnostics`
+    ///
+    /// The analysis methods are the ones this was demonstrated on:
+    /// `ev.params.catIds = [1]; ev.confusion_matrix()` silently evaluated every
+    /// category, because `confusion_matrix` is documented as standalone — no
+    /// `evaluate()` first — so nothing else had ever synced `params` for it.
+    /// Adding `py: Python<'_>` to a method's signature to reach this is free:
+    /// PyO3 fills the argument in, and Python sees the same signature.
     fn with_params<R>(
         &mut self,
         py: Python<'_>,
@@ -1300,7 +1344,7 @@ impl PyCOCOeval {
                  Call evaluate() first or the results will be empty."
             );
         }
-        py.detach(|| self.inner.accumulate());
+        self.with_params(py, |ev| py.detach(|| ev.accumulate()));
     }
 
     fn summarize(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -1353,14 +1397,14 @@ Use this instead of ``summarize()`` when you need to capture or restyle the outp
 >>> for line in lines:
 ...     print(line)
 "]
-    fn summary_lines(&mut self) -> Vec<String> {
+    fn summary_lines(&mut self, py: Python<'_>) -> Vec<String> {
         if self.inner.accumulated().is_none() {
             eprintln!(
                 "hotcoco: summary_lines() called before accumulate(). \
                  Call evaluate() then accumulate() first."
             );
         }
-        self.inner.summarize_lines()
+        self.with_params(py, hotcoco_core::COCOeval::summarize_lines)
     }
 
     #[doc = "Run the full evaluation pipeline: evaluate → accumulate → summarize.
@@ -1392,12 +1436,52 @@ Standard COCO bbox/segm returns 12 keys, keypoints 10, LVIS 13.
 >>> ev.metric_keys()
 ['AP', 'AP50', 'AP75', 'APs', 'APm', 'APl', 'AR1', 'AR10', 'AR100', 'ARs', 'ARm', 'ARl']
 "]
-    fn metric_keys(&self) -> Vec<String> {
-        self.inner
-            .metric_keys()
-            .into_iter()
-            .map(String::from)
-            .collect()
+    fn metric_keys(&mut self, py: Python<'_>) -> Vec<String> {
+        self.with_params(py, |ev| {
+            ev.metric_keys().into_iter().map(String::from).collect()
+        })
+    }
+
+    #[doc = "The definition behind every metric key, in the same order as ``metric_keys()``.
+
+Each dict describes one row of the summary table:
+
+- ``name``: ``str`` — the key in ``get_results()``, e.g. ``'AP50'``, ``'ARs'``.
+- ``ap``: ``bool`` — ``True`` for Average Precision, ``False`` for Average Recall.
+- ``iou_thr``: ``float | None`` — a single IoU threshold, or ``None`` when the
+  metric averages over the whole sweep.
+- ``area``: ``str`` — area-range label, e.g. ``'all'``, ``'small'``.
+- ``max_det``: ``int`` — detections per image this metric allows.
+- ``freq_group``: ``str | None`` — ``'rare'``, ``'common'`` or ``'frequent'`` for
+  the LVIS frequency-bucket APs, ``None`` otherwise. When set, the other axes
+  are unused: the value is a mean per-category AP over that bucket.
+
+This exists so a renderer never has to parse a metric name. ``'AP50'`` is not a
+grammar — ``'AR1'`` is a max-det, ``'APs'`` an area range, ``'APr'`` an LVIS
+frequency bucket, and a regex that gets one right gets the next one wrong. Ask
+for the axes instead.
+
+>>> next(d for d in ev.metric_defs() if d['name'] == 'AP50')
+{'name': 'AP50', 'ap': True, 'iou_thr': 0.5, 'area': 'all', 'max_det': 100, 'freq_group': None}
+
+Returns
+-------
+list of dict
+    One dict per metric key, in canonical display order."]
+    fn metric_defs(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let defs = self.with_params(py, |ev| ev.metric_defs());
+        let list = PyList::empty(py);
+        for d in defs {
+            let entry = PyDict::new(py);
+            entry.set_item("name", d.name)?;
+            entry.set_item("ap", d.ap)?;
+            entry.set_item("iou_thr", d.iou_thr)?;
+            entry.set_item("area", d.area_lbl)?;
+            entry.set_item("max_det", d.max_det)?;
+            entry.set_item("freq_group", d.freq_group.map(freq_group_name))?;
+            list.append(entry)?;
+        }
+        Ok(list.into_any().unbind())
     }
 
     #[doc = "Return summary metrics as a dict.
@@ -1414,25 +1498,13 @@ per_class : bool
     (or ``\"{prefix}/AP/{cat_name}\"`` with a prefix)."]
     #[pyo3(signature = (prefix=None, per_class=false))]
     fn get_results(
-        &self,
+        &mut self,
         py: Python<'_>,
         prefix: Option<&str>,
         per_class: bool,
     ) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        // Sorted: Python dicts keep insertion order, so handing this straight out
-        // of a `HashMap` gave callers a different key order on every run and made
-        // any archived or diffed output churn for no reason.
-        let mut items: Vec<_> = self
-            .inner
-            .get_results(prefix, per_class)
-            .into_iter()
-            .collect();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
-        for (k, v) in items {
-            dict.set_item(k, v)?;
-        }
-        Ok(dict.into_any().unbind())
+        let results = self.with_params(py, |ev| ev.get_results(prefix, per_class));
+        Ok(map_to_dict(py, results)?.into_any().unbind())
     }
 
     #[doc = "Print a formatted results table to stdout.
@@ -1486,11 +1558,9 @@ Returns
 -------
 dict
     Metrics, breakdowns, curves, provenance, and parameters."]
-    fn report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let report = self.inner.report().map_err(to_pyerr)?;
-        let json_str = report.to_json().map_err(to_pyerr)?;
-        let json_mod = py.import("json")?;
-        Ok(json_mod.call_method1("loads", (json_str,))?.unbind())
+    fn report(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let report = self.with_params(py, |ev| ev.report()).map_err(to_pyerr)?;
+        serde_to_py(py, &report)
     }
 
     #[doc = "Return this run's provenance without building a full report.
@@ -1523,6 +1593,22 @@ str
         let value = serde_json::to_value(prov)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(value.as_str().unwrap_or("extension").to_string())
+    }
+
+    #[doc = "Whether these numbers may be presented as leaderboard-comparable.
+
+The predicate behind ``provenance()``, exposed so renderers do not re-derive it
+with a string compare. Default-deny: only a parity-verified configuration
+qualifies, so a provenance variant added later reads as *needs a caveat* until
+a renderer is taught what it means.
+
+Returns
+-------
+bool
+    ``True`` only when ``provenance()`` is ``'parity_verified'``."]
+    fn is_benchmark_standard(&mut self, py: Python<'_>) -> bool {
+        // Through `with_params` for the same reason as `provenance()`.
+        self.with_params(py, |ev| ev.provenance().is_benchmark_standard())
     }
 
     #[doc = "Ways this run's parameters depart from the reference configuration.
@@ -1570,12 +1656,11 @@ Returns
 dict
     Serializable evaluation results."]
     #[pyo3(signature = (per_class=false))]
-    fn results(&self, py: Python<'_>, per_class: bool) -> PyResult<Py<PyAny>> {
-        let results = self.inner.results(per_class).map_err(to_pyerr)?;
-        let json_str = results.to_json().map_err(to_pyerr)?;
-        let json_mod = py.import("json")?;
-        let dict = json_mod.call_method1("loads", (json_str,))?;
-        Ok(dict.unbind())
+    fn results(&mut self, py: Python<'_>, per_class: bool) -> PyResult<Py<PyAny>> {
+        let results = self
+            .with_params(py, |ev| ev.results(per_class))
+            .map_err(to_pyerr)?;
+        serde_to_py(py, &results)
     }
 
     #[doc = "Save evaluation results to a JSON file.
@@ -1598,8 +1683,10 @@ Example
     ev.save_results(\"results.json\", per_class=True)
 "]
     #[pyo3(signature = (path, per_class=false))]
-    fn save_results(&self, path: &str, per_class: bool) -> PyResult<()> {
-        let results = self.inner.results(per_class).map_err(to_pyerr)?;
+    fn save_results(&mut self, py: Python<'_>, path: &str, per_class: bool) -> PyResult<()> {
+        let results = self
+            .with_params(py, |ev| ev.results(per_class))
+            .map_err(to_pyerr)?;
         results.save(std::path::Path::new(path)).map_err(to_pyerr)?;
         Ok(())
     }
@@ -1620,7 +1707,8 @@ Returns
 -------
 dict[str, float]
     For ``beta=1.0``: ``{\"F1\": ..., \"F1_50\": ..., \"F1_75\": ...}``.
-    For other beta values: ``{\"F<beta>\": ..., \"F<beta>50\": ..., \"F<beta>75\": ...}``.
+    For other beta values: ``{\"F<beta>\": ..., \"F<beta>_50\": ..., \"F<beta>_75\": ...}``
+    — e.g. ``F0.5``, ``F0.5_50``, ``F0.5_75``.
     Returns an empty dict if ``accumulate()`` has not been run.
 
 Examples
@@ -1632,18 +1720,15 @@ Examples
 >>> ev.f_scores(beta=0.5)   # precision-weighted
 >>> ev.f_scores(beta=2.0)   # recall-weighted"]
     #[pyo3(signature = (beta = 1.0))]
-    fn f_scores(&self, py: Python<'_>, beta: f64) -> PyResult<Py<PyAny>> {
+    fn f_scores(&mut self, py: Python<'_>, beta: f64) -> PyResult<Py<PyAny>> {
         if self.inner.accumulated().is_none() {
             eprintln!(
                 "hotcoco: f_scores() called before accumulate(). \
                  Call evaluate() then accumulate() first. Returning empty dict."
             );
         }
-        let dict = PyDict::new(py);
-        for (k, v) in self.inner.f_scores(beta) {
-            dict.set_item(k, v)?;
-        }
-        Ok(dict.into_any().unbind())
+        let scores = self.with_params(py, |ev| ev.f_scores(beta));
+        Ok(map_to_dict(py, scores)?.into_any().unbind())
     }
 
     #[getter]
@@ -1719,7 +1804,7 @@ This method is standalone — no ``evaluate()`` call is needed first.
 
 Returns a dict with:
 
-- ``matrix``: ``np.ndarray`` of shape ``(K+1, K+1)``, dtype ``int64``.  Rows = GT
+- ``matrix``: ``np.ndarray`` of shape ``(K+1, K+1)``, dtype ``uint64``.  Rows = GT
   category, cols = predicted category.  Index ``K`` is the background row/column
   (unmatched GTs = false negatives end up in the background column; unmatched DTs =
   false positives end up in the background row).
@@ -1752,23 +1837,21 @@ Example
 "]
     #[pyo3(signature = (iou_thr=0.5, max_det=None, min_score=None))]
     fn confusion_matrix(
-        &self,
+        &mut self,
         py: Python<'_>,
         iou_thr: f64,
         max_det: Option<usize>,
         min_score: Option<f64>,
     ) -> PyResult<Py<PyAny>> {
-        let cm = py.detach(|| self.inner.confusion_matrix(iou_thr, max_det, min_score));
+        let cm = self.with_params(py, |ev| {
+            py.detach(|| ev.confusion_matrix(iou_thr, max_det, min_score))
+        });
         let k = cm.num_cats + 1;
 
-        // matrix: Vec<u64> → numpy int64, reshaped to (k, k)
-        let matrix_i64: Vec<i64> = cm.matrix.iter().map(|&v| v as i64).collect();
-        let matrix_arr = PyArray1::<i64>::from_vec(py, matrix_i64);
-        let matrix_arr = matrix_arr.call_method1("reshape", ((k, k),))?.unbind();
-
         // normalized: Vec<f64> → numpy float64, reshaped to (k, k)
-        let norm_arr = PyArray1::<f64>::from_vec(py, cm.normalized());
-        let norm_arr = norm_arr.call_method1("reshape", ((k, k),))?.unbind();
+        let norm_arr = f64_array(py, cm.normalized(), [k, k])?;
+
+        let matrix_arr = confusion_counts_to_py(py, cm.matrix, k)?;
 
         let dict = PyDict::new(py);
         dict.set_item("matrix", matrix_arr)?;
@@ -1789,6 +1872,10 @@ Returns a dict with keys:\n\
 \n\
 - ``delta_ap``: dict mapping error type → ΔAP (how much AP improves if fixed).\n\
   Keys: ``'Cls'``, ``'Loc'``, ``'Both'``, ``'Dupe'``, ``'Bkg'``, ``'Miss'``, ``'FP'``, ``'FN'``.\n\
+  ``'FP'`` and ``'FN'`` are tidecv's special oracles: ``'FP'`` suppresses every\n\
+  false positive (perfect precision, recall untouched); ``'FN'`` drops every\n\
+  missed ground truth from the denominator (perfect recall, precision\n\
+  untouched — a superset of ``'Miss'``).\n\
 - ``counts``: dict mapping error type → count across all categories.\n\
   Keys: ``'Cls'``, ``'Loc'``, ``'Both'``, ``'Dupe'``, ``'Bkg'``, ``'Miss'``.\n\
 - ``ap_base``: float — baseline AP at ``pos_thr`` (mean over categories with GT).\n\
@@ -1813,22 +1900,15 @@ Example\n\
     print(result['counts'])\n\
 "]
     #[pyo3(signature = (pos_thr=0.5, bg_thr=0.1))]
-    fn tide_errors(&self, py: Python<'_>, pos_thr: f64, bg_thr: f64) -> PyResult<Py<PyAny>> {
-        let te = py
-            .detach(|| self.inner.tide_errors(pos_thr, bg_thr))
+    fn tide_errors(&mut self, py: Python<'_>, pos_thr: f64, bg_thr: f64) -> PyResult<Py<PyAny>> {
+        let te = self
+            .with_params(py, |ev| py.detach(|| ev.tide_errors(pos_thr, bg_thr)))
             .map_err(to_pyerr)?;
 
         // `TideErrors` uses `BTreeMap`, so iteration is already key-ordered and
         // the dict comes out byte-stable without sorting here.
-        let delta_ap = PyDict::new(py);
-        for (k, v) in &te.delta_ap {
-            delta_ap.set_item(k, v)?;
-        }
-
-        let counts = PyDict::new(py);
-        for (k, v) in &te.counts {
-            counts.set_item(k, v)?;
-        }
+        let delta_ap = map_to_dict(py, &te.delta_ap)?;
+        let counts = map_to_dict(py, &te.counts)?;
 
         let dict = PyDict::new(py);
         dict.set_item("delta_ap", delta_ap)?;
@@ -1876,13 +1956,13 @@ Example\n\
 "]
     #[pyo3(signature = (n_bins=10, iou_threshold=0.5))]
     fn calibration(
-        &self,
+        &mut self,
         py: Python<'_>,
         n_bins: usize,
         iou_threshold: f64,
     ) -> PyResult<Py<PyAny>> {
-        let cal = py
-            .detach(|| self.inner.calibration(n_bins, iou_threshold))
+        let cal = self
+            .with_params(py, |ev| py.detach(|| ev.calibration(n_bins, iou_threshold)))
             .map_err(to_pyerr)?;
 
         let bins_list = PyList::empty(py);
@@ -1890,16 +1970,16 @@ Example\n\
             bins_list.append(convert::calibration_bin_to_py(py, b)?)?;
         }
 
-        // Map category IDs to names for per_category
-        let per_cat = PyDict::new(py);
-        for (&cat_id, &ece) in &cal.per_category {
-            let name = self
-                .inner
-                .coco_gt
-                .get_cat(cat_id)
-                .map_or_else(|| format!("cat_{cat_id}"), |c| c.name.clone());
-            per_cat.set_item(name, ece)?;
-        }
+        // Map category IDs to names for per_category. Through `COCO::cat_name`,
+        // so the fallback for an id the ground truth does not carry reads the
+        // same here as everywhere else — this site used to spell it `cat_{id}`
+        // while `image_diagnostics` spelled it `?`.
+        let per_cat = map_to_dict(
+            py,
+            cal.per_category
+                .iter()
+                .map(|(&cat_id, &ece)| (self.inner.coco_gt.cat_name(cat_id), ece)),
+        )?;
 
         let dict = PyDict::new(py);
         dict.set_item("ece", cal.ece)?;
@@ -1957,23 +2037,16 @@ Example\n\
             map
         };
 
-        let results = py
-            .detach(|| self.inner.slice_by(slice_map))
+        let results = self
+            .with_params(py, |ev| py.detach(|| ev.slice_by(slice_map)))
             .map_err(to_pyerr)?;
 
         let out = PyDict::new(py);
 
         let to_dict = |sr: &hotcoco_core::SliceResult, py: Python<'_>| -> PyResult<Py<PyAny>> {
-            let d = PyDict::new(py);
-            for (k, v) in &sr.metrics {
-                d.set_item(k, v)?;
-            }
+            let d = map_to_dict(py, &sr.metrics)?;
             d.set_item("num_images", sr.num_images)?;
-            let delta_dict = PyDict::new(py);
-            for (k, v) in &sr.delta {
-                delta_dict.set_item(k, v)?;
-            }
-            d.set_item("delta", delta_dict)?;
+            d.set_item("delta", map_to_dict(py, &sr.delta)?)?;
             Ok(d.into_any().unbind())
         };
 
@@ -2004,13 +2077,15 @@ Example\n\
     ///     ``img_summary``, ``label_errors``, ``iou_thr``.
     #[pyo3(signature = (iou_thr=0.5, score_thr=0.5))]
     fn image_diagnostics(
-        &self,
+        &mut self,
         py: Python<'_>,
         iou_thr: f64,
         score_thr: f64,
     ) -> PyResult<Py<PyAny>> {
-        let diag = py
-            .detach(|| self.inner.image_diagnostics(iou_thr, score_thr))
+        let diag = self
+            .with_params(py, |ev| {
+                py.detach(|| ev.image_diagnostics(iou_thr, score_thr))
+            })
             .map_err(to_pyerr)?;
 
         // dt_status: {ann_id: "tp" | "fp"}
@@ -2070,13 +2145,12 @@ Example\n\
             d.set_item("dt_id", le.dt_id)?;
             d.set_item("dt_score", le.dt_score)?;
 
-            // Category names for display
-            let dt_cat_name = self
-                .inner
-                .coco_gt
-                .get_cat(le.dt_category_id)
-                .map_or("?", |c| c.name.as_str());
-            d.set_item("dt_category", dt_cat_name)?;
+            // Category names for display, through the one owner of the
+            // unknown-id fallback so every surface spells it the same way.
+            d.set_item(
+                "dt_category",
+                self.inner.coco_gt.cat_name(le.dt_category_id),
+            )?;
             d.set_item("dt_category_id", le.dt_category_id)?;
 
             match le.gt_id {
@@ -2084,8 +2158,7 @@ Example\n\
                     d.set_item("gt_id", gt_id)?;
                     let gt_cat_name = le
                         .gt_category_id
-                        .and_then(|cid| self.inner.coco_gt.get_cat(cid))
-                        .map_or("?", |c| c.name.as_str());
+                        .map(|cid| self.inner.coco_gt.cat_name(cid));
                     d.set_item("gt_category", gt_cat_name)?;
                     d.set_item("gt_category_id", le.gt_category_id)?;
                 }
@@ -2140,6 +2213,13 @@ fn eval_imgs_to_py(
     Ok(list.into_any().unbind())
 }
 
+/// Per-threshold rows of a [`hotcoco_core::ThreshMatrix`] as a vec of row
+/// slices — `set_item` converts this to a Python list of lists directly, with
+/// no owned copy on the Rust side.
+fn matrix_rows<T>(m: &hotcoco_core::ThreshMatrix<T>) -> Vec<&[T]> {
+    m.iter_rows().collect()
+}
+
 fn eval_img_to_py(py: Python<'_>, e: &hotcoco_core::EvalImg) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("image_id", e.image_id)?;
@@ -2148,16 +2228,15 @@ fn eval_img_to_py(py: Python<'_>, e: &hotcoco_core::EvalImg) -> PyResult<Py<PyAn
     dict.set_item("maxDet", e.max_det)?;
     dict.set_item("dtIds", e.dt_ids.clone())?;
     dict.set_item("gtIds", e.gt_ids.clone())?;
-    // dt_matches: Vec<Vec<u64>> [T x D] → list of lists
-    dict.set_item("dtMatches", &e.dt_matches)?;
-    // gt_matches: Vec<Vec<u64>> [T x G] → list of lists
-    dict.set_item("gtMatches", &e.gt_matches)?;
-    // dt_matched / gt_matched: Vec<Vec<bool>> [T x D/G] → list of lists
-    dict.set_item("dtMatched", &e.dt_matched)?;
-    dict.set_item("gtMatched", &e.gt_matched)?;
+    // The ThreshMatrix fields are [T x D] / [T x G]; each row becomes one Python
+    // list, so the shape Python sees is the same list-of-lists as before the
+    // flat-storage change.
+    dict.set_item("dtMatches", matrix_rows(&e.dt_matches))?;
+    dict.set_item("gtMatches", matrix_rows(&e.gt_matches))?;
+    dict.set_item("dtMatched", matrix_rows(&e.dt_matched))?;
+    dict.set_item("gtMatched", matrix_rows(&e.gt_matched))?;
     dict.set_item("dtScores", e.dt_scores.clone())?;
-    // dt_ignore: Vec<Vec<bool>> [T x D] → list of lists
-    dict.set_item("dtIgnore", &e.dt_ignore)?;
+    dict.set_item("dtIgnore", matrix_rows(&e.dt_ignore))?;
     dict.set_item("gtIgnore", e.gt_ignore.clone())?;
     dict.set_item("gtInDenominator", e.gt_in_denominator.clone())?;
     Ok(dict.into_any().unbind())
@@ -2201,32 +2280,13 @@ fn accumulated_eval_to_py(
                 .extract()?;
             dict.set_item("date", date_str)?;
 
-            // precision: flat Vec<f64> → numpy array, then reshape to (T, R, K, A, M)
-            let precision = PyArray1::from_vec(py, e.precision.clone());
-            let precision = precision
-                .call_method1(
-                    "reshape",
-                    ((e.shape.t, e.shape.r, e.shape.k, e.shape.a, e.shape.m),),
-                )?
-                .unbind();
-            dict.set_item("precision", precision)?;
-
-            // recall: flat Vec<f64> → numpy array, then reshape to (T, K, A, M)
-            let recall = PyArray1::from_vec(py, e.recall.clone());
-            let recall = recall
-                .call_method1("reshape", ((e.shape.t, e.shape.k, e.shape.a, e.shape.m),))?
-                .unbind();
-            dict.set_item("recall", recall)?;
-
-            // scores: flat Vec<f64> → numpy array, then reshape to (T, R, K, A, M)
-            let scores = PyArray1::from_vec(py, e.scores.clone());
-            let scores = scores
-                .call_method1(
-                    "reshape",
-                    ((e.shape.t, e.shape.r, e.shape.k, e.shape.a, e.shape.m),),
-                )?
-                .unbind();
-            dict.set_item("scores", scores)?;
+            // precision / scores: flat Vec<f64> → numpy (T, R, K, A, M);
+            // recall: flat Vec<f64> → numpy (T, K, A, M).
+            let trkam = [e.shape.t, e.shape.r, e.shape.k, e.shape.a, e.shape.m];
+            let tkam = [e.shape.t, e.shape.k, e.shape.a, e.shape.m];
+            dict.set_item("precision", f64_array(py, e.precision.clone(), trkam)?)?;
+            dict.set_item("recall", f64_array(py, e.recall.clone(), tkam)?)?;
+            dict.set_item("scores", f64_array(py, e.scores.clone(), trkam)?)?;
 
             Ok(dict.into_any().unbind())
         }
@@ -2325,18 +2385,9 @@ fn compare(
         .detach(|| hotcoco_core::compare(&eval_a.inner, &eval_b.inner, &opts))
         .map_err(to_pyerr)?;
 
-    let f64_map_to_dict =
-        |map: &std::collections::HashMap<String, f64>| -> PyResult<Bound<'_, PyDict>> {
-            let d = PyDict::new(py);
-            for (k, v) in map {
-                d.set_item(k, v)?;
-            }
-            Ok(d)
-        };
-
-    let metrics_a = f64_map_to_dict(&result.metrics_a)?;
-    let metrics_b = f64_map_to_dict(&result.metrics_b)?;
-    let deltas = f64_map_to_dict(&result.deltas)?;
+    let metrics_a = map_to_dict(py, &result.metrics_a)?;
+    let metrics_b = map_to_dict(py, &result.metrics_b)?;
+    let deltas = map_to_dict(py, &result.deltas)?;
 
     let ci = match &result.ci {
         Some(ci_map) => {

@@ -33,4 +33,30 @@ if [ -n "$PY_STAGED" ]; then
     uv run ruff check python/ scripts/
 fi
 
+# Disk guard. Both checks warn and never block — a full disk is not a reason to
+# reject a commit, but it should not take a full disk to notice either. Together
+# they cost ~0.15s on a healthy tree.
+#
+# The .o check is the precise one. Cargo's macOS default is
+# `split-debuginfo = "unpacked"`, which leaves one loose object file per
+# compilation unit in target/debug/deps and never collects them; this repo
+# reached 87,134 of them (18 GB, 96% of target/) before anyone looked. The
+# profiles in Cargo.toml set `packed` to stop it, so a nonzero count here means
+# that setting was dropped or Cargo changed its defaults — caught on the first
+# commit after the regression rather than after weeks of growth.
+STRAY_O=$(find target/debug/deps -maxdepth 1 -name '*.o' 2>/dev/null | wc -l | tr -d ' ')
+if [ "${STRAY_O:-0}" -gt 0 ]; then
+    echo "warning: ${STRAY_O} stray .o files in target/debug/deps." >&2
+    echo "  split-debuginfo=\"packed\" is not taking effect (see [profile.dev] in Cargo.toml)." >&2
+    echo "  These accumulate without bound. Run 'just clean' after fixing the profile." >&2
+fi
+
+# The size check is the backstop: it catches growth from any cause, not just
+# this one. A full cold build of every target is ~1.1 GB, so 8 GB only trips on
+# real pathology.
+TARGET_MB=$(du -sm target 2>/dev/null | cut -f1)
+if [ "${TARGET_MB:-0}" -gt 8000 ]; then
+    echo "warning: target/ is ${TARGET_MB} MB. Run 'just disk' to see what, 'just clean' to reclaim." >&2
+fi
+
 echo "All pre-commit checks passed."

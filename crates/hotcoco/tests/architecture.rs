@@ -175,6 +175,39 @@ fn exactly_one_min_parallel_work_constant() {
     );
 }
 
+/// The detection cap is derived in `Params::max_det()` — nowhere else.
+///
+/// Five sites derived it independently: four spelled `max_dets.last()` and one
+/// spelled `.iter().max()`. Identical on the sorted default `[1, 10, 100]`,
+/// divergent on unsorted input — `evaluate()` stamped eval_imgs with one value
+/// while `image_diagnostics` filtered on the other, returning nothing. The
+/// `MIN_PARALLEL_WORK` failure mode, again. Indexing `max_dets[m_idx]` to walk
+/// the M axis is fine and not caught; *reducing* the list to a single cap is
+/// what must go through the owner.
+#[test]
+fn detection_cap_only_derived_in_params() {
+    /// The one sanctioned reduction of `max_dets` to a cap.
+    const CAP_OWNER: &[&str] = &["crates/hotcoco/src/params.rs"];
+
+    let violations = scan(
+        |path| CAP_OWNER.contains(&path),
+        |line| {
+            line.contains("max_dets.last(")
+                || (line.contains("max_dets") && line.contains(".max()"))
+        },
+    );
+
+    assert!(
+        violations.is_empty(),
+        "the per-image detection cap may only be derived in: {}.\n\
+         Found another derivation at:\n  {}\n\n\
+         Call `params.max_det()` instead — positional and max-based spellings \
+         agree on sorted input and silently diverge on unsorted input.",
+        CAP_OWNER.join(", "),
+        violations.join("\n  ")
+    );
+}
+
 /// Matching lives in `primitives/` — no hand-rolled greedy loops elsewhere.
 ///
 /// `best_iou`/`best_gi` is the signature of the pycocotools greedy scan; a second

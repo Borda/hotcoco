@@ -299,6 +299,33 @@ pub(crate) fn intersection_area(a: &Rle, b: &Rle) -> u64 {
 /// Uses upsampling by 5x, Bresenham-like edge walking, y-boundary detection,
 /// and differential RLE encoding — exactly matching the C implementation.
 pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
+    POLY_SCRATCH.with(|s| fr_poly_impl(&mut s.borrow_mut(), xy, h, w))
+}
+
+/// Reusable buffers for [`fr_poly`]'s three rasterization stages.
+///
+/// Every field is scratch — cleared on entry, meaningless after return. Only
+/// the `counts` vector of the produced [`Rle`] is allocated per call, because
+/// it is the value handed back. Rasterizing a val2017 segm run makes ~10⁵
+/// `fr_poly` calls from rayon workers, and the five buffers below were five
+/// mallocs each against one process-wide allocator lock; per-thread reuse
+/// leaves each buffer sized for the largest polygon its thread has seen
+/// (kilobytes) and takes the rasterizer off the lock entirely.
+#[derive(Default)]
+struct PolyScratch {
+    x_int: Vec<i32>,
+    y_int: Vec<i32>,
+    u: Vec<i32>,
+    v: Vec<i32>,
+    a: Vec<u32>,
+}
+
+thread_local! {
+    static POLY_SCRATCH: std::cell::RefCell<PolyScratch> =
+        std::cell::RefCell::new(PolyScratch::default());
+}
+
+fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32) -> Rle {
     let k = xy.len() / 2;
     if k < 3 {
         return Rle {
@@ -314,8 +341,12 @@ pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
 
     // Stage 1: Upsample polygon vertices by 5x and walk each edge using a
     // Bresenham-like algorithm to produce dense boundary points (u, v).
-    let mut x_int: Vec<i32> = Vec::with_capacity(k + 1);
-    let mut y_int: Vec<i32> = Vec::with_capacity(k + 1);
+    let x_int = &mut scratch.x_int;
+    let y_int = &mut scratch.y_int;
+    x_int.clear();
+    y_int.clear();
+    x_int.reserve(k + 1);
+    y_int.reserve(k + 1);
     for j in 0..k {
         x_int.push((scale * xy[j * 2] + 0.5) as i32);
         y_int.push((scale * xy[j * 2 + 1] + 0.5) as i32);
@@ -333,8 +364,12 @@ pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
             + 1;
     }
 
-    let mut u: Vec<i32> = Vec::with_capacity(m_total);
-    let mut v: Vec<i32> = Vec::with_capacity(m_total);
+    let u = &mut scratch.u;
+    let v = &mut scratch.v;
+    u.clear();
+    v.clear();
+    u.reserve(m_total);
+    v.reserve(m_total);
 
     // Walk each edge, stepping along the longer axis (dx or dy).
     // If the edge runs "backwards" (right-to-left or bottom-to-top), flip the
@@ -398,7 +433,9 @@ pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
     // boundary, downsample back to original resolution, and convert directly to
     // column-major flat indices (skipping intermediate bx/by storage).
     let m = u.len();
-    let mut a: Vec<u32> = Vec::with_capacity(m);
+    let a = &mut scratch.a;
+    a.clear();
+    a.reserve(m);
 
     for j in 1..m {
         // Only process points where the x-coordinate changed (column crossing)
@@ -433,7 +470,7 @@ pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
 
     // Convert sorted positions to run lengths via successive differences
     let mut prev: u32 = 0;
-    for val in &mut a {
+    for val in a.iter_mut() {
         let t = *val;
         *val = t - prev;
         prev = t;

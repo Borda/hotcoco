@@ -7,7 +7,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .core import _annotate_f1_peak, _configure_axes, _import_mpl, _mask_invalid_prec, _new_figure, _save_and_return
+from .core import (
+    TIDE_ERROR_ORDER,
+    _annotate_f1_peak,
+    _configure_axes,
+    _import_mpl,
+    _mask_invalid_prec,
+    _new_figure,
+    _save_and_return,
+    _top_confusion_keep,
+)
 from .data import PlotData
 from .theme import _build_rc
 
@@ -49,8 +58,6 @@ def pr_curve_iou_sweep(
     -------
     (Figure, Axes)
     """
-    import numpy as np
-
     mpl, _, _ = _import_mpl()
     data = PlotData.from_coco_eval(coco_eval)
     a_idx = data.area_idx(area_rng)
@@ -66,7 +73,7 @@ def pr_curve_iou_sweep(
         fig, ax = _new_figure((6, 6), ax, layout="compressed")
 
         for line_idx, t_idx in enumerate(t_indices):
-            prec = np.nanmean(_mask_invalid_prec(data.precision[t_idx, :, :, a_idx, m_idx]), axis=1)
+            prec = data.mean_precision(t_idx, a_idx, m_idx)
             lw = 2 if line_idx == 0 else 1
             (line,) = ax.plot(data.recall_pts, prec, linewidth=lw, label=f"IoU={data.iou_thresholds[t_idx]:.2f}")
             if line_idx == 0:
@@ -360,23 +367,19 @@ def confusion_matrix(
             data = grouped
 
         labels = group_names + ["BG"]
+        n_cats = G
     else:
         labels = cat_names + ["BG"]
         data = norm_matrix if normalize else raw_matrix
+        n_cats = K
 
-        if top_n is None and K > 30:
-            top_n = 25
-
-        if top_n is not None and top_n < K:
-            cat_block = data[:K, :K]
-            row_total = cat_block.sum(axis=1)
-            col_total = cat_block.sum(axis=0)[:K]
-            diag = np.diag(cat_block)
-            confusion_mass = (row_total - diag) + (col_total - diag)
-            top_indices = np.argsort(confusion_mass)[::-1][:top_n]
-            keep = sorted(top_indices.tolist()) + [len(labels) - 1]
-            data = data[np.ix_(keep, keep)]
-            labels = [labels[i] for i in keep]
+    # One tail for both branches. When this only ran on the ungrouped branch,
+    # `top_n` was silently ignored alongside `group_by` — and a grouped matrix
+    # with many supercategories got no auto-subset either.
+    keep = _top_confusion_keep(data, n_cats, top_n)
+    if keep is not None:
+        data = data[np.ix_(keep, keep)]
+        labels = [labels[i] for i in keep]
 
     n = len(labels)
     size = min(max(6, 0.35 * n), 20)
@@ -600,7 +603,7 @@ def tide_errors(
     delta_ap = tide_dict["delta_ap"]
     ap_base = tide_dict["ap_base"]
 
-    error_types = ["Cls", "Loc", "Both", "Dupe", "Bkg", "Miss"]
+    error_types = list(TIDE_ERROR_ORDER)
     values = [delta_ap.get(e, 0.0) for e in error_types]
 
     with mpl.rc_context(_build_rc(theme, paper_mode)):
@@ -788,8 +791,6 @@ def comparison_bar(
         keys = [k for k in keys if metrics_a.get(k, -1) >= 0 or metrics_b.get(k, -1) >= 0]
     else:
         keys = sorted(k for k in metrics_a if metrics_a[k] >= 0 or metrics_b.get(k, -1) >= 0)
-    # Filter out -1 sentinels
-    keys = [k for k in keys if metrics_a.get(k, -1) >= 0 or metrics_b.get(k, -1) >= 0]
 
     vals_a = np.array([max(metrics_a.get(k, 0), 0) for k in keys])
     vals_b = np.array([max(metrics_b.get(k, 0), 0) for k in keys])

@@ -12,7 +12,18 @@ use super::EvalMode;
 use super::mode::FreqGroup;
 
 /// Definition of a single summary metric (one row in the COCO output table).
-pub(super) struct MetricDef {
+///
+/// The catalog entry behind every headline number: what the metric is called,
+/// which axis slices it reads, and — for LVIS frequency buckets — which group of
+/// categories it averages. [`COCOeval::metric_defs`](super::COCOeval::metric_defs)
+/// hands out the list for the current mode, in the same order as
+/// [`metric_keys`](super::COCOeval::metric_keys) and `stats`.
+///
+/// Public so a renderer can label a metric from its definition rather than by
+/// parsing its name. Deriving `IoU=0.50 | area=small | maxDets=100` back out of
+/// the string `"APs"` is exactly the re-derivation this type exists to prevent.
+#[derive(Debug, Clone)]
+pub struct MetricDef {
     /// Short metric name, e.g. "AP", "AP50", "ARs". Used as the key in `get_results()`.
     pub name: &'static str,
     /// true = Average Precision, false = Average Recall.
@@ -28,327 +39,116 @@ pub(super) struct MetricDef {
     pub freq_group: Option<FreqGroup>,
 }
 
+impl MetricDef {
+    /// An Average Precision row, averaged over the whole IoU sweep.
+    const fn ap(name: &'static str, area_lbl: &'static str, max_det: usize) -> Self {
+        MetricDef {
+            name,
+            ap: true,
+            iou_thr: None,
+            area_lbl,
+            max_det,
+            freq_group: None,
+        }
+    }
+
+    /// An Average Recall row, averaged over the whole IoU sweep.
+    const fn ar(name: &'static str, area_lbl: &'static str, max_det: usize) -> Self {
+        MetricDef {
+            name,
+            ap: false,
+            iou_thr: None,
+            area_lbl,
+            max_det,
+            freq_group: None,
+        }
+    }
+
+    /// Pin this row to a single IoU threshold — `AP50`, `AR75`.
+    const fn at(mut self, iou_thr: f64) -> Self {
+        self.iou_thr = Some(iou_thr);
+        self
+    }
+
+    /// Make this row an LVIS frequency-bucket AP. Every other axis goes unused;
+    /// the value is the mean per-category AP over that bucket.
+    const fn freq(mut self, group: FreqGroup) -> Self {
+        self.freq_group = Some(group);
+        self
+    }
+}
+
 pub(super) fn metrics_bbox_segm(max_d: usize, max_d_s: usize, max_d_m: usize) -> Vec<MetricDef> {
     vec![
-        MetricDef {
-            name: "AP",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AP50",
-            ap: true,
-            iou_thr: Some(0.5),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AP75",
-            ap: true,
-            iou_thr: Some(0.75),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APs",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "small",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APm",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "medium",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APl",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "large",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AR1",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d_s,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AR10",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d_m,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AR100",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARs",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "small",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARm",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "medium",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARl",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "large",
-            max_det: max_d,
-            freq_group: None,
-        },
+        MetricDef::ap("AP", "all", max_d),
+        MetricDef::ap("AP50", "all", max_d).at(0.5),
+        MetricDef::ap("AP75", "all", max_d).at(0.75),
+        MetricDef::ap("APs", "small", max_d),
+        MetricDef::ap("APm", "medium", max_d),
+        MetricDef::ap("APl", "large", max_d),
+        MetricDef::ar("AR1", "all", max_d_s),
+        MetricDef::ar("AR10", "all", max_d_m),
+        MetricDef::ar("AR100", "all", max_d),
+        MetricDef::ar("ARs", "small", max_d),
+        MetricDef::ar("ARm", "medium", max_d),
+        MetricDef::ar("ARl", "large", max_d),
     ]
 }
 
 pub(super) fn metrics_kp(max_d: usize) -> Vec<MetricDef> {
     vec![
-        MetricDef {
-            name: "AP",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AP50",
-            ap: true,
-            iou_thr: Some(0.5),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AP75",
-            ap: true,
-            iou_thr: Some(0.75),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APm",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "medium",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APl",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "large",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AR",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AR50",
-            ap: false,
-            iou_thr: Some(0.5),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AR75",
-            ap: false,
-            iou_thr: Some(0.75),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARm",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "medium",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARl",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "large",
-            max_det: max_d,
-            freq_group: None,
-        },
+        MetricDef::ap("AP", "all", max_d),
+        MetricDef::ap("AP50", "all", max_d).at(0.5),
+        MetricDef::ap("AP75", "all", max_d).at(0.75),
+        MetricDef::ap("APm", "medium", max_d),
+        MetricDef::ap("APl", "large", max_d),
+        MetricDef::ar("AR", "all", max_d),
+        MetricDef::ar("AR50", "all", max_d).at(0.5),
+        MetricDef::ar("AR75", "all", max_d).at(0.75),
+        MetricDef::ar("ARm", "medium", max_d),
+        MetricDef::ar("ARl", "large", max_d),
     ]
 }
 
 pub(super) fn metrics_lvis(max_d: usize) -> Vec<MetricDef> {
     vec![
-        MetricDef {
-            name: "AP",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AP50",
-            ap: true,
-            iou_thr: Some(0.5),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "AP75",
-            ap: true,
-            iou_thr: Some(0.75),
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APs",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "small",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APm",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "medium",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APl",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "large",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "APr",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: Some(FreqGroup::Rare),
-        },
-        MetricDef {
-            name: "APc",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: Some(FreqGroup::Common),
-        },
-        MetricDef {
-            name: "APf",
-            ap: true,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: Some(FreqGroup::Frequent),
-        },
-        MetricDef {
-            name: "AR@300",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "all",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARs@300",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "small",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARm@300",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "medium",
-            max_det: max_d,
-            freq_group: None,
-        },
-        MetricDef {
-            name: "ARl@300",
-            ap: false,
-            iou_thr: None,
-            area_lbl: "large",
-            max_det: max_d,
-            freq_group: None,
-        },
+        MetricDef::ap("AP", "all", max_d),
+        MetricDef::ap("AP50", "all", max_d).at(0.5),
+        MetricDef::ap("AP75", "all", max_d).at(0.75),
+        MetricDef::ap("APs", "small", max_d),
+        MetricDef::ap("APm", "medium", max_d),
+        MetricDef::ap("APl", "large", max_d),
+        MetricDef::ap("APr", "all", max_d).freq(FreqGroup::Rare),
+        MetricDef::ap("APc", "all", max_d).freq(FreqGroup::Common),
+        MetricDef::ap("APf", "all", max_d).freq(FreqGroup::Frequent),
+        MetricDef::ar("AR@300", "all", max_d),
+        MetricDef::ar("ARs@300", "small", max_d),
+        MetricDef::ar("ARm@300", "medium", max_d),
+        MetricDef::ar("ARl@300", "large", max_d),
     ]
 }
 
 /// Resolve max_dets into (default, small, medium) triple.
+///
+/// Positions are read from a sorted view so the triple is independent of the
+/// caller's ordering — pycocotools sorts `maxDets` before its positional reads,
+/// and `Params::max_det()` (the `default` here) is order-insensitive by
+/// definition.
 fn resolve_max_dets(params: &Params) -> (usize, usize, usize) {
-    let default = *params.max_dets.last().unwrap_or(&100);
-    let small = if params.max_dets.len() >= 3 {
-        params.max_dets[0]
+    let default = params.max_det();
+    let (small, med) = if params.max_dets.len() >= 3 {
+        let mut sorted = params.max_dets.clone();
+        sorted.sort_unstable();
+        (sorted[0], sorted[1])
     } else {
-        default
-    };
-    let med = if params.max_dets.len() >= 3 {
-        params.max_dets[1]
-    } else {
-        default
+        (default, default)
     };
     (default, small, med)
 }
 
 /// Open Images metrics: single AP at IoU=0.5.
 fn metrics_oid(max_d: usize) -> Vec<MetricDef> {
-    vec![MetricDef {
-        name: "AP",
-        ap: true,
-        iou_thr: Some(0.5),
-        area_lbl: "all",
-        max_det: max_d,
-        freq_group: None,
-    }]
+    vec![MetricDef::ap("AP", "all", max_d).at(0.5)]
 }
 
 /// Build the MetricDef vec for the current evaluation mode.

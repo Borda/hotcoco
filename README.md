@@ -5,7 +5,7 @@
 [![Crates.io](https://img.shields.io/crates/v/hotcoco)](https://crates.io/crates/hotcoco)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Fast enough for every epoch, lean enough for every dataset. A drop-in replacement for [pycocotools](https://github.com/ppwwyyxx/cocoapi) that doesn't become the bottleneck — in your training loop or at foundation model scale. Up to 23× faster on standard COCO, 39× faster on Objects365, and fits comfortably in memory where alternatives run out.
+Fast enough for every epoch, lean enough for every dataset. A drop-in replacement for [pycocotools](https://github.com/ppwwyyxx/cocoapi) that doesn't become the bottleneck — in your training loop or at foundation model scale. Up to 33× faster on standard COCO, 39× faster on Objects365, and fits comfortably in memory where alternatives run out.
 
 Available as a **Python package**, **CLI tool**, and **Rust library**. Pure Rust — no Cython, no C compiler, no Microsoft Build Tools. Prebuilt wheels for Linux, macOS, and Windows.
 
@@ -19,9 +19,9 @@ Benchmarked on COCO val2017 (5,000 images, 36,781 synthetic detections), Apple M
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 9.46s | 2.45s (3.9×) | **0.41s (23.0×)** |
-| segm      | 9.16s | 4.36s (2.1×) | **0.49s (18.6×)** |
-| keypoints | 2.62s | 1.78s (1.5×) | **0.21s (12.7×)** |
+| bbox      | 6.01s | 1.45s (4.1×) | **0.18s (33.4×)** |
+| segm      | 6.79s | 3.46s (2.0×) | **0.36s (18.9×)** |
+| keypoints | 2.72s | 1.73s (1.6×) | **0.16s (17.0×)** |
 
 Speedups in parentheses are vs pycocotools. All 34 COCO metrics match pycocotools to floating-point precision on val2017 — worst measured difference 3.7e-14, so your AP scores don't change. A hypothesis-based fuzzer separately checks ~10,000 generated datasets against pycocotools at 1e-10.
 

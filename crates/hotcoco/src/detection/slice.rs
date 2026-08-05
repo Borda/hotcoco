@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::COCOeval;
-use super::accumulate::accumulate_impl;
+use super::accumulate::EvalGrouping;
 use super::catalog::build_metric_defs;
-use super::summarize::summarize_impl;
+use super::summarize::{accumulate_and_summarize, metric_delta, stats_to_map};
 
 /// Metrics for a single evaluation slice.
 #[derive(Debug, Clone)]
@@ -51,21 +51,13 @@ impl COCOeval {
         let metrics = build_metric_defs(&self.params, self.eval_mode);
         let metric_keys: Vec<&str> = metrics.iter().map(|m| m.name).collect();
 
-        // Compute overall (no filter)
-        let overall_acc = accumulate_impl(&self.eval_imgs, &self.params, None, self.eval_mode);
-        let overall_stats = summarize_impl(
-            &overall_acc,
-            &self.params,
-            self.eval_mode,
-            self.freq_groups(),
-            &metrics,
-        );
+        // One bucketing for the baseline and every slice — only the image filter
+        // differs between them.
+        let grouping = EvalGrouping::build(self);
 
-        let overall_metrics: BTreeMap<String, f64> = metric_keys
-            .iter()
-            .zip(overall_stats.iter())
-            .map(|(&k, &v): (&&str, &f64)| (k.to_string(), v))
-            .collect();
+        // Compute overall (no filter)
+        let (_, overall_stats) = accumulate_and_summarize(&grouping, None, &metrics);
+        let overall_metrics = stats_to_map(&metric_keys, &overall_stats);
 
         let overall = SliceResult {
             name: "_overall".to_string(),
@@ -80,39 +72,27 @@ impl COCOeval {
             let filter: HashSet<u64> = img_ids.iter().copied().collect();
             let num_images = filter.len();
 
-            let acc = accumulate_impl(&self.eval_imgs, &self.params, Some(&filter), self.eval_mode);
-            let stats = summarize_impl(
-                &acc,
-                &self.params,
-                self.eval_mode,
-                self.freq_groups(),
-                &metrics,
-            );
+            let (_, stats) = accumulate_and_summarize(&grouping, Some(&filter), &metrics);
+            let slice_metrics = stats_to_map(&metric_keys, &stats);
 
-            let metrics: BTreeMap<String, f64> = metric_keys
-                .iter()
-                .zip(stats.iter())
-                .map(|(&k, &v): (&&str, &f64)| (k.to_string(), v))
-                .collect();
-
+            // Zipped against the two stat vectors, which are what `metric_keys`
+            // is parallel to. Reading each key back out of the maps needed an
+            // `unwrap_or(-1.0)` for a miss that cannot happen — and that
+            // unreachable default is the crate's "not computed" sentinel, so a
+            // lookup bug would have surfaced as a plausible-looking zero delta.
             let delta: BTreeMap<String, f64> = metric_keys
                 .iter()
-                .map(|&k| {
-                    let slice_val = metrics.get(k).copied().unwrap_or(-1.0);
-                    let overall_val = overall_metrics.get(k).copied().unwrap_or(-1.0);
-                    let d = if slice_val >= 0.0 && overall_val >= 0.0 {
-                        slice_val - overall_val
-                    } else {
-                        0.0
-                    };
-                    (k.to_string(), d)
+                .zip(overall_stats.iter().zip(stats.iter()))
+                .map(|(&k, (&overall_val, &slice_val))| {
+                    // Baseline first: the delta reads "slice minus overall".
+                    (k.to_string(), metric_delta(overall_val, slice_val))
                 })
                 .collect();
 
             slice_results.push(SliceResult {
                 name: name.clone(),
                 num_images,
-                metrics,
+                metrics: slice_metrics,
                 delta,
             });
         }

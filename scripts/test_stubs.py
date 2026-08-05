@@ -6,13 +6,16 @@ Run with: uv run pytest scripts/test_stubs.py -v
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 import hotcoco
+import pytest
 
 STUB_PATH = Path(__file__).resolve().parent.parent / "python" / "hotcoco" / "__init__.pyi"
 
 
+@functools.cache
 def _parse_stub_names() -> dict[str, set[str]]:
     """Parse the .pyi file and return {class_name: {method_names}} and top-level names."""
     source = STUB_PATH.read_text()
@@ -95,49 +98,20 @@ def test_top_level_exports_covered():
     assert not missing, f"Public names missing from stubs: {sorted(missing)}"
 
 
-def test_coco_methods_covered():
-    """Every public method on COCO should appear in the stub."""
-    stub_members = _parse_stub_names().get("COCO", set())
-    runtime_members = _public_names(hotcoco.COCO)
+@pytest.mark.parametrize("name", ["COCO", "COCOeval", "Params", "mask", "Hierarchy"])
+def test_members_covered(name):
+    """Every public member of each stubbed top-level object appears in the stub.
+
+    One parametrized case per object rather than five identical functions: adding
+    a class to the stub should be a one-line edit here, not a copy-paste that
+    invites a drifting message. `mask` is a module and the rest are classes —
+    `dir()` treats them the same, and so does the stub parser.
+    """
+    stub_members = _parse_stub_names().get(name, set())
+    runtime_members = _public_names(getattr(hotcoco, name))
 
     missing = runtime_members - stub_members
-    assert not missing, f"COCO methods missing from stubs: {sorted(missing)}"
-
-
-def test_cocoeval_methods_covered():
-    """Every public method on COCOeval should appear in the stub."""
-    stub_members = _parse_stub_names().get("COCOeval", set())
-    runtime_members = _public_names(hotcoco.COCOeval)
-
-    missing = runtime_members - stub_members
-    assert not missing, f"COCOeval methods missing from stubs: {sorted(missing)}"
-
-
-def test_params_attrs_covered():
-    """Every public attr on Params should appear in the stub."""
-    stub_members = _parse_stub_names().get("Params", set())
-    runtime_members = _public_names(hotcoco.Params)
-
-    missing = runtime_members - stub_members
-    assert not missing, f"Params attrs missing from stubs: {sorted(missing)}"
-
-
-def test_mask_methods_covered():
-    """Every public function in mask should appear in the stub."""
-    stub_members = _parse_stub_names().get("mask", set())
-    runtime_members = _public_names(hotcoco.mask)
-
-    missing = runtime_members - stub_members
-    assert not missing, f"mask methods missing from stubs: {sorted(missing)}"
-
-
-def test_hierarchy_methods_covered():
-    """Every public method on Hierarchy should appear in the stub."""
-    stub_members = _parse_stub_names().get("Hierarchy", set())
-    runtime_members = _public_names(hotcoco.Hierarchy)
-
-    missing = runtime_members - stub_members
-    assert not missing, f"Hierarchy methods missing from stubs: {sorted(missing)}"
+    assert not missing, f"{name} members missing from stubs: {sorted(missing)}"
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +172,7 @@ def test_detection_stub_matches_runtime():
 # ---------------------------------------------------------------------------
 
 
+@functools.cache
 def _stub_function_names(filename: str) -> set[str]:
     """Top-level `def` names declared in a sibling stub file."""
     tree = ast.parse((STUB_PATH.parent / filename).read_text())
@@ -263,6 +238,51 @@ def test_functional_layer_needs_no_evaluator():
     assert len(metrics.calibration_curve([0.5], [True], n_bins=4)) == 4
     rows, _ = primitives.lsap([[1.0, 2.0], [3.0, 4.0]])
     assert len(rows) == 2
+
+
+def test_metric_functions_accept_numpy_arrays():
+    """The module docstring advertises "lists or numpy arrays" — hold it to that.
+
+    float64/bool arrays take the fast path in the bindings; float32 and strided
+    views take the per-element fallback. All four must produce exactly the
+    answer the list path produces.
+    """
+    import numpy as np
+    from hotcoco import metrics
+
+    scores = [0.9, 0.8, 0.7, 0.3]
+    matched = [True, False, True, True]
+    expected_ap = metrics.average_precision(scores, matched, num_gt=4)
+    expected_cal = metrics.calibration_error(scores, matched)
+
+    # Fast path: float64 and bool ndarrays.
+    np_scores = np.array(scores)
+    np_matched = np.array(matched)
+    assert metrics.average_precision(np_scores, np_matched, num_gt=4) == expected_ap
+    assert metrics.calibration_error(np_scores, np_matched) == expected_cal
+
+    # Fallback path: float32 still works, at the old per-element cost.
+    assert metrics.average_precision(np_scores.astype(np.float32), np_matched, num_gt=4) == expected_ap
+
+    # Strided views must be read honestly, not rejected or mis-copied.
+    every_other = metrics.average_precision(np_scores[::2], np_matched[::2], num_gt=2)
+    assert every_other == metrics.average_precision(scores[::2], matched[::2], num_gt=2)
+
+    # Optional array parameters go through the same conversion.
+    ig = np.array([False, True, False, False])
+    assert metrics.average_precision(np_scores, np_matched, num_gt=4, ignored=ig) == metrics.average_precision(
+        scores, matched, num_gt=4, ignored=ig.tolist()
+    )
+
+    curve_list = metrics.precision_recall_curve([1.0, 2.0], [0.0, 1.0], num_gt=3)
+    curve_np = metrics.precision_recall_curve(np.array([1.0, 2.0]), np.array([0.0, 1.0]), num_gt=3)
+    assert curve_list == curve_np
+
+    # A 2-D array is not a flat argument list — it must raise, not flatten.
+    import pytest
+
+    with pytest.raises(TypeError):
+        metrics.average_precision(np.zeros((2, 2)), np_matched, num_gt=4)
 
 
 def test_metric_functions_reject_mismatched_arrays():

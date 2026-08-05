@@ -184,6 +184,14 @@ Panoptic Quality metric (Kirillov et al.) for unified "stuff" + "things" evaluat
 - Per-class PQ, PQ_things, PQ_stuff breakdown
 - Panoptic PNG format support (category_id × 256 + instance_id encoding)
 
+### Open-Vocabulary Detection & Grounding
+
+Open-vocabulary detectors (Grounding DINO, OWL-ViT, YOLO-World) are evaluated with standard AP — OV-LVIS, the standard open-vocab benchmark, is federated LVIS AP over rare categories, which hotcoco already computes correctly. The near-term work is documentation, not code: a guide to evaluating open-vocabulary detector outputs with hotcoco, including mapping text-prompted predictions onto COCO category IDs.
+
+If demand shows up, a `grounding` metric family (Recall@k over box–phrase matches, RefCOCO-style Acc@IoU≥0.5) composes directly from the existing `primitives` layer as a sibling of `detection`.
+
+**Out of scope:** caption metrics (CIDEr, SPICE, METEOR) and model-in-the-loop metrics (CLIPScore, FID). Every hotcoco metric is a pure function from predictions and ground truth to numbers, verified against a reference implementation. Caption metrics aren't compute-bound and are being displaced by LLM-as-judge; CLIPScore and FID require running a model and their values depend on the checkpoint, so no parity claim is possible.
+
 ### TIDE Error Analysis
 
 **Shipped.**

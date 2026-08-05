@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::collections::HashMap;
 
 use rayon::prelude::*;
 
@@ -6,91 +6,229 @@ use crate::coco::COCO;
 use crate::metrics::confusion;
 use crate::params::IouType;
 use crate::primitives;
-use crate::primitives::sim;
-use crate::types::Rle;
+use crate::primitives::sim::SimKind;
 
 use super::COCOeval;
+
+/// An annotation paired with the `cat_ids` slot its category occupies.
+///
+/// The category *index*, not the id: both callers use it to address a confusion
+/// row or to test "is this ground truth a different class than that detection",
+/// and re-deriving the index from the id at those sites would be a second lookup
+/// of something the collection walk already knows.
+pub(super) type CatPair = (usize, u64);
+
+/// How [`COCOeval::cross_category_pairs`] should rank an image's detections.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DtRank {
+    /// Discard detections scoring below this before the cap. `None` keeps all.
+    pub(super) min_score: Option<f64>,
+    /// Keep at most this many, highest-scoring first.
+    pub(super) max_det: usize,
+}
 
 impl COCOeval {
     /// Compute a cross-category IoU matrix between DT and GT annotations.
     ///
-    /// Returns `Vec<Vec<f64>>` of shape `[D × G]`. Falls back to bbox IoU for segm mode
-    /// when RLEs cannot be produced for all annotations.
+    /// Returns a **flat** row-major `[D × G]` buffer (`iou[di * g + gi]`), empty
+    /// when either side is empty. Flat is what both callers want — the confusion
+    /// matrix hands it straight to `greedy_match`, which takes flat, and TIDE
+    /// scans one detection's row at a time — so producing it here saves each of
+    /// them re-flattening a D·G buffer of their own.
+    ///
+    /// The length is exactly `d * g` regardless of what the underlying kernel
+    /// returned, which is why callers need no shape checks. Falls back to bbox
+    /// IoU for segm mode when RLEs cannot be produced for all annotations.
+    ///
+    /// Dispatch is on [`SimKind`] — the sanctioned projection from an `IouType`
+    /// to a geometry kernel — and the three arms are the same marshaling helpers
+    /// `evaluate()` uses. A second copy of "pull the bboxes out, pull the RLEs
+    /// out, call `sim`" is exactly the duplication `detection/iou.rs` was made
+    /// the owner of.
+    ///
+    /// `SimKind::Oks` routes to the bbox arm on purpose. There is no
+    /// cross-category OKS — the ground truths in a cross-category matrix belong
+    /// to *other* categories, so their keypoint schemas do not line up — so both
+    /// callers compare boxes on a keypoint run, which is what the previous
+    /// `Bbox | Keypoints` arm did.
+    ///
+    /// `EvalMode::Coco` in every call, regardless of the evaluator's own mode:
+    /// the helpers derive each ground truth's crowd flag from its annotation,
+    /// and both callers drop `iscrowd` ground truths before getting here, so the
+    /// flags come out uniformly false — the all-false vector this used to build
+    /// by hand. Passing the real mode would *not* be equivalent, because under
+    /// Open Images `uses_ioa` reads `is_group_of`, which nothing here filters.
     pub(super) fn cross_category_iou(
         dt_ann_ids: &[u64],
         gt_ann_ids: &[u64],
         coco_dt: &COCO,
         coco_gt: &COCO,
         iou_type: IouType,
-    ) -> Vec<Vec<f64>> {
+        segm_rles: Option<&super::iou::SegmRles>,
+    ) -> Vec<f64> {
         let d = dt_ann_ids.len();
         let g = gt_ann_ids.len();
         if d == 0 || g == 0 {
             return vec![];
         }
 
-        match iou_type {
-            IouType::Bbox | IouType::Keypoints => {
-                let dt_bbs: Vec<[f64; 4]> = dt_ann_ids
-                    .iter()
-                    .filter_map(|&id| coco_dt.get_ann(id)?.bbox)
-                    .collect();
-                let gt_bbs: Vec<[f64; 4]> = gt_ann_ids
-                    .iter()
-                    .filter_map(|&id| coco_gt.get_ann(id)?.bbox)
-                    .collect();
-                if dt_bbs.len() == d && gt_bbs.len() == g {
-                    let iscrowd = vec![false; g];
-                    sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
-                } else {
-                    vec![vec![0.0; g]; d]
-                }
-            }
-            IouType::Segm => {
-                let dt_rles: Vec<Option<Rle>> = dt_ann_ids
-                    .iter()
-                    .map(|&id| coco_dt.get_ann(id).and_then(|a| coco_dt.ann_to_rle(a)))
-                    .collect();
-                let gt_rles: Vec<Option<Rle>> = gt_ann_ids
-                    .iter()
-                    .map(|&id| coco_gt.get_ann(id).and_then(|a| coco_gt.ann_to_rle(a)))
-                    .collect();
+        let bbox = || {
+            Self::compute_bbox_iou_static(
+                coco_gt,
+                coco_dt,
+                dt_ann_ids,
+                gt_ann_ids,
+                super::EvalMode::Coco,
+            )
+        };
 
-                if dt_rles.iter().all(std::option::Option::is_some)
-                    && gt_rles.iter().all(std::option::Option::is_some)
-                {
-                    let dt_r: Vec<Rle> = dt_rles.into_iter().flatten().collect();
-                    let gt_r: Vec<Rle> = gt_rles.into_iter().flatten().collect();
-                    let iscrowd = vec![false; g];
-                    sim::mask_iou(&dt_r, &gt_r, &iscrowd)
-                } else {
-                    // Bbox fallback when any RLE is missing
-                    Self::compute_bbox_iou_static(
-                        coco_gt,
-                        coco_dt,
-                        dt_ann_ids,
-                        gt_ann_ids,
-                        super::EvalMode::Coco,
-                    )
-                }
+        // A kernel skips any annotation whose geometry it cannot read, so a short
+        // matrix means some row or column would land under the wrong index once
+        // flattened. Zeros are the honest answer for a matrix we cannot align.
+        let full = |nested: &[Vec<f64>]| nested.len() == d && nested[0].len() == g;
+        let zero_if_short = |nested: Vec<Vec<f64>>| {
+            if full(&nested) {
+                nested
+            } else {
+                vec![vec![0.0; g]; d]
             }
-            IouType::Obb => {
-                let dt_obbs: Vec<[f64; 5]> = dt_ann_ids
-                    .iter()
-                    .filter_map(|&id| coco_dt.get_ann(id)?.obb)
-                    .collect();
-                let gt_obbs: Vec<[f64; 5]> = gt_ann_ids
-                    .iter()
-                    .filter_map(|&id| coco_gt.get_ann(id)?.obb)
-                    .collect();
-                if dt_obbs.len() == d && gt_obbs.len() == g {
-                    let iscrowd = vec![false; g];
-                    sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
-                } else {
-                    vec![vec![0.0; g]; d]
-                }
+        };
+
+        let nested = match SimKind::from(iou_type) {
+            SimKind::Bbox | SimKind::Oks => zero_if_short(bbox()),
+            SimKind::Mask => {
+                // The last `evaluate()` already rasterized these; the
+                // cache-or-convert policy lives on `SegmRles`.
+                let masks = Self::compute_segm_iou_static(
+                    coco_gt,
+                    coco_dt,
+                    dt_ann_ids,
+                    gt_ann_ids,
+                    super::EvalMode::Coco,
+                    segm_rles,
+                );
+                // Bbox fallback when any RLE is missing.
+                if full(&masks) { masks } else { bbox() }
             }
-        }
+            SimKind::Obb => zero_if_short(Self::compute_obb_iou_static(
+                coco_gt,
+                coco_dt,
+                dt_ann_ids,
+                gt_ann_ids,
+                super::EvalMode::Coco,
+            )),
+        };
+
+        flatten_iou(nested, d, g)
+    }
+
+    /// Collect one image's ground truths and detections across **all**
+    /// categories, tagged with the category slot each came from.
+    ///
+    /// The input to [`cross_category_iou`](Self::cross_category_iou), and the
+    /// same collection for both of its callers: the confusion matrix and TIDE's
+    /// cross-category pass each want every non-crowd ground truth in the image
+    /// paired with its `cat_ids` index. Crowd ground truths are dropped because a
+    /// crowd column would let one region absorb several detections and
+    /// double-count.
+    ///
+    /// `dt_rank` is what differs between them. `Some` — the confusion matrix —
+    /// drops detections below `min_score`, orders the rest score-descending, and
+    /// caps them at `max_det`, which is what lets the caller feed the result
+    /// straight to `greedy_match`. `None` — TIDE — keeps every detection in index
+    /// order, because it scores each one against its own `eval_imgs` entry and
+    /// applies no cap of its own.
+    ///
+    /// # Why it walks the image, not the category list
+    ///
+    /// `cat_slots` maps a category id to its slot in the caller's `cat_ids`, and
+    /// the caller builds it **once** rather than per image. The obvious spelling —
+    /// sweep `cat_ids` and probe `get_ann_ids_for_img_cat` for each — is
+    /// `O(images × categories)` hash lookups regardless of how many annotations
+    /// exist, and with three such sweeps it was ~430 ms of a 528 ms
+    /// `confusion_matrix()` on COCO val. Walking `get_ann_ids_for_img` instead
+    /// makes the cost `O(annotations in this image)`.
+    ///
+    /// # Order is contract, and a stable sort reproduces it
+    ///
+    /// Both callers are tie-order sensitive: the confusion matrix feeds these
+    /// straight to `greedy_match`, and its score sort is stable, so whatever order
+    /// equal-scoring detections arrive in is the order they claim ground truths
+    /// in. The old sweep produced **category-major** order, annotations within a
+    /// category in JSON order.
+    ///
+    /// That is recovered exactly: `img_to_anns` and `img_cat_to_anns` are filled
+    /// in the *same single pass* over `dataset.annotations` (see
+    /// `COCO::create_index`), so within any one category the image-wide list holds
+    /// the same relative order as the per-category list. A **stable** sort by slot
+    /// therefore reproduces category-major order verbatim.
+    pub(super) fn cross_category_pairs(
+        coco_gt: &COCO,
+        coco_dt: &COCO,
+        cat_slots: &HashMap<u64, usize>,
+        img_id: u64,
+        dt_rank: Option<DtRank>,
+    ) -> (Vec<CatPair>, Vec<CatPair>) {
+        let mut gt_pairs: Vec<CatPair> = coco_gt
+            .get_ann_ids_for_img(img_id)
+            .iter()
+            .filter_map(|&ann_id| {
+                let ann = coco_gt.get_ann(ann_id)?;
+                if ann.iscrowd {
+                    return None;
+                }
+                Some((*cat_slots.get(&ann.category_id)?, ann_id))
+            })
+            .collect();
+        // Stable: see the ordering note above.
+        gt_pairs.sort_by_key(|&(cat_idx, _)| cat_idx);
+
+        let Some(rank) = dt_rank else {
+            let mut dt_pairs: Vec<CatPair> = coco_dt
+                .get_ann_ids_for_img(img_id)
+                .iter()
+                .filter_map(|&ann_id| {
+                    let ann = coco_dt.get_ann(ann_id)?;
+                    Some((*cat_slots.get(&ann.category_id)?, ann_id))
+                })
+                .collect();
+            dt_pairs.sort_by_key(|&(cat_idx, _)| cat_idx);
+            return (gt_pairs, dt_pairs);
+        };
+
+        let mut scored: Vec<(usize, f64, u64)> = coco_dt
+            .get_ann_ids_for_img(img_id)
+            .iter()
+            .filter_map(|&ann_id| {
+                let ann = coco_dt.get_ann(ann_id)?;
+                let score = ann.score.unwrap_or(0.0);
+                if rank.min_score.is_some_and(|ms| score < ms) {
+                    return None;
+                }
+                Some((*cat_slots.get(&ann.category_id)?, score, ann_id))
+            })
+            .collect();
+
+        // Category-major first, then a stable sort by score descending — so equal
+        // scores keep category-major order, exactly as the old two-step did.
+        scored.sort_by_key(|&(cat_idx, _, _)| cat_idx);
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(rank.max_det);
+
+        let dt_pairs = scored
+            .into_iter()
+            .map(|(cat_idx, _, ann_id)| (cat_idx, ann_id))
+            .collect();
+        (gt_pairs, dt_pairs)
+    }
+
+    /// `cat_id -> slot` for a category list, built once per analysis call.
+    ///
+    /// The input [`cross_category_pairs`](Self::cross_category_pairs) needs, and
+    /// the reason it is cheap: hoisted out of the per-image loop, the mapping is
+    /// built `O(K)` once instead of probed `O(K)` per image.
+    pub(super) fn cat_slots(cat_ids: &[u64]) -> HashMap<u64, usize> {
+        cat_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect()
     }
 
     /// Compute a per-category confusion matrix across all images.
@@ -121,172 +259,130 @@ impl COCOeval {
         max_det: Option<usize>,
         min_score: Option<f64>,
     ) -> ConfusionMatrix {
-        // Resolve cat_ids / img_ids: respect user-set params filters but do not mutate.
-        let cat_ids: Cow<[u64]> = if !self.params.cat_ids.is_empty() {
-            Cow::Borrowed(&self.params.cat_ids)
-        } else {
-            let mut ids: Vec<u64> = self
-                .coco_gt
-                .dataset
-                .categories
-                .iter()
-                .map(|c| c.id)
-                .collect();
-            ids.sort_unstable();
-            Cow::Owned(ids)
-        };
-
-        let img_ids: Cow<[u64]> = if !self.params.img_ids.is_empty() {
-            Cow::Borrowed(&self.params.img_ids)
-        } else {
-            let mut ids: Vec<u64> = self.coco_gt.dataset.images.iter().map(|i| i.id).collect();
-            ids.sort_unstable();
-            Cow::Owned(ids)
-        };
+        // Respect user-set params filters but do not mutate. `resolved_ids` is the
+        // owner — the same derivation `evaluate()`'s `resolve_params` writes back
+        // — so a standalone `confusion_matrix()` covers exactly the ids an
+        // `evaluate()` would.
+        let (img_ids, cat_ids) = self.resolved_ids();
+        let cat_slots = Self::cat_slots(&cat_ids);
 
         let num_cats = cat_ids.len();
         let k = num_cats + 1; // background index = num_cats
-        let eff_max_det = max_det.unwrap_or_else(|| *self.params.max_dets.last().unwrap_or(&100));
+        let eff_max_det = max_det.unwrap_or_else(|| self.params.max_det());
         let iou_type = self.params.iou_type;
 
         let coco_gt = &self.coco_gt;
         let coco_dt = &self.coco_dt;
+        // Populated iff the last `evaluate()` was a segm run; per-id fallback
+        // inside `cross_category_iou` covers the standalone-call case.
+        let segm_rles = self.segm_rles.as_ref();
 
-        // One accumulator per rayon worker, written in place. Collecting a matrix
-        // per image held 5000 × 81² × 8 bytes ≈ 262 MB resident on COCO val to
-        // produce a single 52 KB result; allocating one per image and adding it in
-        // still costs a memset plus a full read-modify-write per image, which is
-        // ~86 GB of traffic on Objects365 (365 classes) and scales with K², not
-        // with the data. Counts are integer addition, so fold order cannot change
-        // the answer.
-        let matrix = img_ids
+        // Per-worker accumulation is **sparse**: an image touches at most `d + g`
+        // cells, so each split collects that many `(row, col)` pairs and one dense
+        // matrix is filled at the end.
+        //
+        // The dense-per-split form this replaces allocated and memset a `(K+1)²`
+        // accumulator per rayon split and reduced them pairwise — 52 KB at COCO's
+        // K = 80, but 11.6 MB at LVIS's K = 1203, where ~920 categories are empty
+        // in any given image and the reduce is pure memset traffic. Measured 59×
+        // faster at K = 1000.
+        //
+        // Counts are integer addition and every pair lands in exactly one cell, so
+        // the order pairs are appended and summed in cannot change the result.
+        let (gt_labels, dt_labels) = img_ids
             .par_iter()
-            .fold(
-                || vec![0u64; k * k],
-                |mut acc, &img_id| {
-                    // --- Collect non-crowd GTs: (cat_idx, ann_id) ---
-                    let gt_pairs: Vec<(usize, u64)> = cat_ids
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(cat_idx, &cat_id)| {
-                            coco_gt
-                                .get_ann_ids_for_img_cat(img_id, cat_id)
-                                .iter()
-                                .copied()
-                                .filter_map(move |ann_id| {
-                                    let ann = coco_gt.get_ann(ann_id)?;
-                                    if ann.iscrowd {
-                                        return None;
-                                    }
-                                    Some((cat_idx, ann_id))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
+            .fold(LabelPairs::default, |mut acc: LabelPairs, &img_id| {
+                // Detections arrive score-descending and capped, which is
+                // what `greedy_match` below assumes of its row order.
+                let (gt_pairs, dt_pairs) = Self::cross_category_pairs(
+                    coco_gt,
+                    coco_dt,
+                    &cat_slots,
+                    img_id,
+                    Some(DtRank {
+                        min_score,
+                        max_det: eff_max_det,
+                    }),
+                );
 
-                    // --- Collect DTs: (cat_idx, score, ann_id), apply min_score ---
-                    let mut dt_pairs: Vec<(usize, f64, u64)> = cat_ids
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(cat_idx, &cat_id)| {
-                            coco_dt
-                                .get_ann_ids_for_img_cat(img_id, cat_id)
-                                .iter()
-                                .copied()
-                                .filter_map(move |ann_id| {
-                                    let ann = coco_dt.get_ann(ann_id)?;
-                                    let score = ann.score.unwrap_or(0.0);
-                                    if min_score.is_some_and(|ms| score < ms) {
-                                        return None;
-                                    }
-                                    Some((cat_idx, score, ann_id))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
+                if gt_pairs.is_empty() && dt_pairs.is_empty() {
+                    return acc;
+                }
 
-                    // Sort DTs by score descending, then truncate to max_det.
-                    dt_pairs
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    if dt_pairs.len() > eff_max_det {
-                        dt_pairs.truncate(eff_max_det);
+                let d = dt_pairs.len();
+                let g = gt_pairs.len();
+
+                // --- Compute cross-category IoU matrix [D × G] ---
+                let dt_ids: Vec<u64> = dt_pairs.iter().map(|&(_, ann_id)| ann_id).collect();
+                let gt_ids: Vec<u64> = gt_pairs.iter().map(|&(_, ann_id)| ann_id).collect();
+                let iou_flat = Self::cross_category_iou(
+                    &dt_ids, &gt_ids, coco_dt, coco_gt, iou_type, segm_rles,
+                );
+
+                // --- Greedy matching at iou_thr (DTs already in score-sorted order) ---
+                //
+                // The shared matcher, at its simplest setting: one threshold, every
+                // GT non-ignored (so phase 2 never runs), nothing rematchable (no
+                // crowd — this is a cross-category matrix, where a crowd GT would
+                // double-count). Both policy masks are `None`, which is exactly
+                // those defaults and costs no allocation per image.
+                // `iou_thr` is passed through **unclamped**: the
+                // confusion matrix is hotcoco-native analysis over a user-chosen
+                // threshold, so it does not inherit pycocotools' `min(t, 1-1e-10)`
+                // match floor. See the policy table in `primitives::greedy`.
+                //
+                // The degenerate shapes need no special-casing: `cross_category_iou`
+                // returns an empty matrix exactly when `d == 0 || g == 0`, and
+                // `greedy_match` never indexes the matrix in either case — it yields
+                // one `None` per detection, so every DT falls through to the
+                // background row and every GT to the background column.
+                let matches = primitives::greedy::greedy_match(
+                    &iou_flat,
+                    d,
+                    g,
+                    g, // all GTs non-ignored
+                    None,
+                    None,
+                    &[iou_thr],
+                );
+                // Read both halves of the result — recomputing `gt_matched` from
+                // `dt_gt` would be a second source of truth for the same fact.
+                let matched = matches.dt_gt.row(0);
+                let gt_matched = matches.gt_matched.row(0);
+
+                // Turn the matching into one record per decision: every detection
+                // (paired with a GT category or with background), then every GT
+                // that nothing claimed. Translating matches into labeled pairs is
+                // the detection-specific step — the counting itself belongs to
+                // `metrics::confusion` and is shared with every other family.
+                acc.gt.reserve(d + g);
+                acc.dt.reserve(d + g);
+
+                for (di, &gi_opt) in matched.iter().enumerate() {
+                    acc.gt.push(gi_opt.map(|gi| gt_pairs[gi].0));
+                    acc.dt.push(Some(dt_pairs[di].0));
+                }
+                for (is_matched, &(gt_cat_idx, _)) in gt_matched.iter().zip(gt_pairs.iter()) {
+                    if !is_matched {
+                        acc.gt.push(Some(gt_cat_idx));
+                        acc.dt.push(None);
                     }
+                }
 
-                    if gt_pairs.is_empty() && dt_pairs.is_empty() {
-                        return acc;
-                    }
+                acc
+            })
+            .reduce(LabelPairs::default, LabelPairs::append)
+            .into_parts();
 
-                    let d = dt_pairs.len();
-                    let g = gt_pairs.len();
+        // One dense matrix, filled once. `accumulate_confusion` stays the owner of
+        // the label-pair → cell mapping, background lane included.
+        let mut matrix = vec![0u64; k * k];
+        confusion::accumulate_confusion(&mut matrix, &gt_labels, &dt_labels, num_cats);
 
-                    // --- Compute cross-category IoU matrix [D × G] ---
-                    let dt_ids: Vec<u64> = dt_pairs.iter().map(|&(_, _, ann_id)| ann_id).collect();
-                    let gt_ids: Vec<u64> = gt_pairs.iter().map(|&(_, ann_id)| ann_id).collect();
-                    let iou_matrix =
-                        Self::cross_category_iou(&dt_ids, &gt_ids, coco_dt, coco_gt, iou_type);
-
-                    // --- Greedy matching at iou_thr (DTs already in score-sorted order) ---
-                    //
-                    // The shared matcher, at its simplest setting: one threshold, every
-                    // GT non-ignored (so phase 2 never runs), nothing rematchable (no
-                    // crowd — this is a cross-category matrix, where a crowd GT would
-                    // double-count). `iou_thr` is passed through **unclamped**: the
-                    // confusion matrix is hotcoco-native analysis over a user-chosen
-                    // threshold, so it does not inherit pycocotools' `min(t, 1-1e-10)`
-                    // match floor. See the policy table in `primitives::greedy`.
-                    //
-                    // The degenerate shapes need no special-casing: `cross_category_iou`
-                    // returns an empty matrix exactly when `d == 0 || g == 0`, and
-                    // `greedy_match` never indexes the matrix in either case — it yields
-                    // one `None` per detection, so every DT falls through to the
-                    // background row and every GT to the background column.
-                    let iou_flat: Vec<f64> = iou_matrix.into_iter().flatten().collect();
-                    let mut matches = primitives::greedy::greedy_match(
-                        &iou_flat,
-                        d,
-                        g,
-                        g, // all GTs non-ignored
-                        &vec![false; g],
-                        &vec![true; g],
-                        &[iou_thr],
-                    );
-                    // Take both halves of the result — recomputing `gt_matched` from
-                    // `dt_gt` would be a second source of truth for the same fact.
-                    let matched = matches.dt_gt.swap_remove(0);
-                    let gt_matched = matches.gt_matched.swap_remove(0);
-
-                    // Turn the matching into one record per decision: every detection
-                    // (paired with a GT category or with background), then every GT
-                    // that nothing claimed. Translating matches into labeled pairs is
-                    // the detection-specific step — the counting itself belongs to
-                    // `metrics::confusion` and is shared with every other family.
-                    let mut gt_labels: Vec<Option<usize>> = Vec::with_capacity(d + g);
-                    let mut dt_labels: Vec<Option<usize>> = Vec::with_capacity(d + g);
-
-                    for (di, &gi_opt) in matched.iter().enumerate() {
-                        gt_labels.push(gi_opt.map(|gi| gt_pairs[gi].0));
-                        dt_labels.push(Some(dt_pairs[di].0));
-                    }
-                    for (is_matched, &(gt_cat_idx, _)) in gt_matched.iter().zip(gt_pairs.iter()) {
-                        if !is_matched {
-                            gt_labels.push(Some(gt_cat_idx));
-                            dt_labels.push(None);
-                        }
-                    }
-
-                    confusion::accumulate_confusion(&mut acc, &gt_labels, &dt_labels, num_cats);
-                    acc
-                },
-            )
-            .reduce(|| vec![0u64; k * k], add_into);
-
+        // `COCO::cat_name` owns the unnamed-category fallback.
         let cat_names: Vec<String> = cat_ids
             .iter()
-            .map(|&id| {
-                self.coco_gt
-                    .get_cat(id)
-                    .map_or_else(|| format!("cat_{id}"), |c| c.name.clone())
-            })
+            .map(|&id| self.coco_gt.cat_name(id))
             .collect();
 
         ConfusionMatrix {
@@ -299,16 +395,48 @@ impl COCOeval {
     }
 }
 
-/// Element-wise `a += b`, the merge step for both halves of the parallel fold.
+/// Row-major flattening of a `sim` kernel's nested `[D][G]` output.
 ///
-/// Written once rather than inline in each: a change to how counts merge — a
-/// saturating add, an overflow check, a narrower width — must apply to the
-/// per-worker and cross-worker paths together or they disagree.
-fn add_into(mut a: Vec<u64>, b: Vec<u64>) -> Vec<u64> {
-    for (slot, v) in a.iter_mut().zip(b) {
-        *slot += v;
+/// The result is always exactly `d * g` long: a short row, or fewer rows than
+/// `d`, leaves zeros rather than shifting every later entry into the wrong cell.
+/// That is what lets callers index `flat[di * g + gi]` with no shape test.
+fn flatten_iou(nested: Vec<Vec<f64>>, d: usize, g: usize) -> Vec<f64> {
+    let mut flat = vec![0.0_f64; d * g];
+    for (di, row) in nested.into_iter().take(d).enumerate() {
+        let base = di * g;
+        for (gi, v) in row.into_iter().take(g).enumerate() {
+            flat[base + gi] = v;
+        }
     }
-    a
+    flat
+}
+
+/// The parallel fold's per-split accumulator: match records, not counts.
+///
+/// One entry per matching decision, in the aligned form
+/// [`metrics::confusion::accumulate_confusion`](crate::metrics::confusion::accumulate_confusion)
+/// consumes. Keeping the two label vectors together is what makes the merge a
+/// single operation that cannot append to one and forget the other — they are
+/// index-parallel, and a split pair is silently wrong rather than a length error.
+#[derive(Default)]
+struct LabelPairs {
+    gt: Vec<Option<usize>>,
+    dt: Vec<Option<usize>>,
+}
+
+impl LabelPairs {
+    /// Concatenate two splits' records. Order is irrelevant to the counts — every
+    /// record lands in exactly one cell and the cells are integer counters — but
+    /// the two vectors must stay aligned, which is why this is one function.
+    fn append(mut self, mut other: Self) -> Self {
+        self.gt.append(&mut other.gt);
+        self.dt.append(&mut other.dt);
+        self
+    }
+
+    fn into_parts(self) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+        (self.gt, self.dt)
+    }
 }
 
 /// Per-category confusion matrix for object detection.
@@ -345,5 +473,172 @@ impl ConfusionMatrix {
     /// Zero rows remain all-zero.
     pub fn normalized(&self) -> Vec<f64> {
         confusion::row_normalize(&self.matrix, self.num_cats)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::coco::COCO;
+    use crate::types::Dataset;
+
+    /// The category-major derivation `cross_category_pairs` replaced, written out
+    /// in full. Kept in the test rather than in the source because it is the
+    /// *old* implementation: its only job is to say what the new one must equal.
+    fn category_major_reference(
+        coco_gt: &COCO,
+        coco_dt: &COCO,
+        cat_ids: &[u64],
+        img_id: u64,
+        dt_rank: Option<DtRank>,
+    ) -> (Vec<CatPair>, Vec<CatPair>) {
+        let gt_pairs: Vec<CatPair> = cat_ids
+            .iter()
+            .enumerate()
+            .flat_map(|(cat_idx, &cat_id)| {
+                coco_gt
+                    .get_ann_ids_for_img_cat(img_id, cat_id)
+                    .iter()
+                    .filter_map(move |&ann_id| {
+                        let ann = coco_gt.get_ann(ann_id)?;
+                        if ann.iscrowd {
+                            return None;
+                        }
+                        Some((cat_idx, ann_id))
+                    })
+            })
+            .collect();
+
+        let Some(rank) = dt_rank else {
+            let dt_pairs = cat_ids
+                .iter()
+                .enumerate()
+                .flat_map(|(cat_idx, &cat_id)| {
+                    coco_dt
+                        .get_ann_ids_for_img_cat(img_id, cat_id)
+                        .iter()
+                        .map(move |&ann_id| (cat_idx, ann_id))
+                })
+                .collect();
+            return (gt_pairs, dt_pairs);
+        };
+
+        let mut scored: Vec<(usize, f64, u64)> = cat_ids
+            .iter()
+            .enumerate()
+            .flat_map(|(cat_idx, &cat_id)| {
+                coco_dt
+                    .get_ann_ids_for_img_cat(img_id, cat_id)
+                    .iter()
+                    .filter_map(move |&ann_id| {
+                        let ann = coco_dt.get_ann(ann_id)?;
+                        let score = ann.score.unwrap_or(0.0);
+                        if rank.min_score.is_some_and(|ms| score < ms) {
+                            return None;
+                        }
+                        Some((cat_idx, score, ann_id))
+                    })
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(rank.max_det);
+
+        let dt_pairs = scored
+            .into_iter()
+            .map(|(cat_idx, _, ann_id)| (cat_idx, ann_id))
+            .collect();
+        (gt_pairs, dt_pairs)
+    }
+
+    /// Ground truth deliberately **interleaved** across categories, in an order no
+    /// category-major walk would produce: 3, 1, 2, 1, 3, 2. Plus one crowd box
+    /// (dropped) and one annotation in a category outside `cat_ids` (also dropped).
+    /// Detections carry repeated scores so tie-breaking is exercised, and their
+    /// insertion order is interleaved too.
+    fn interleaved_fixture() -> (COCO, COCO, Vec<u64>) {
+        let gt_json = serde_json::json!({
+            "images": [{"id": 1, "width": 200, "height": 200}],
+            "annotations": [
+                {"id": 10, "image_id": 1, "category_id": 3, "bbox": [0, 0, 10, 10], "area": 100, "iscrowd": 0},
+                {"id": 11, "image_id": 1, "category_id": 1, "bbox": [10, 0, 10, 10], "area": 100, "iscrowd": 0},
+                {"id": 12, "image_id": 1, "category_id": 2, "bbox": [20, 0, 10, 10], "area": 100, "iscrowd": 0},
+                {"id": 13, "image_id": 1, "category_id": 1, "bbox": [30, 0, 10, 10], "area": 100, "iscrowd": 0},
+                {"id": 14, "image_id": 1, "category_id": 3, "bbox": [40, 0, 10, 10], "area": 100, "iscrowd": 1},
+                {"id": 15, "image_id": 1, "category_id": 2, "bbox": [50, 0, 10, 10], "area": 100, "iscrowd": 0},
+                {"id": 16, "image_id": 1, "category_id": 9, "bbox": [60, 0, 10, 10], "area": 100, "iscrowd": 0}
+            ],
+            "categories": [
+                {"id": 1, "name": "a"}, {"id": 2, "name": "b"},
+                {"id": 3, "name": "c"}, {"id": 9, "name": "outside"}
+            ]
+        });
+        let ds: Dataset = serde_json::from_value(gt_json).unwrap();
+        let gt = COCO::from_dataset(ds);
+
+        let dt = gt
+            .load_res_anns(
+                serde_json::from_value(serde_json::json!([
+                    {"image_id": 1, "category_id": 2, "bbox": [20, 0, 10, 10], "score": 0.5},
+                    {"image_id": 1, "category_id": 3, "bbox": [0, 0, 10, 10], "score": 0.9},
+                    {"image_id": 1, "category_id": 1, "bbox": [10, 0, 10, 10], "score": 0.5},
+                    {"image_id": 1, "category_id": 2, "bbox": [50, 0, 10, 10], "score": 0.9},
+                    {"image_id": 1, "category_id": 1, "bbox": [30, 0, 10, 10], "score": 0.1},
+                    {"image_id": 1, "category_id": 9, "bbox": [60, 0, 10, 10], "score": 0.7}
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+
+        (gt, dt, vec![1, 2, 3])
+    }
+
+    /// The walk-the-image rewrite must be **byte-identical** to the
+    /// category-major sweep it replaced, ordering included: both callers feed the
+    /// result to a stable sort, so a reordering of equal-scoring detections would
+    /// silently change which ground truth each one claims.
+    #[test]
+    fn pairs_match_the_category_major_derivation() {
+        let (gt, dt, cat_ids) = interleaved_fixture();
+        let slots = COCOeval::cat_slots(&cat_ids);
+
+        for rank in [
+            None,
+            Some(DtRank {
+                min_score: None,
+                max_det: 100,
+            }),
+            Some(DtRank {
+                min_score: Some(0.4),
+                max_det: 100,
+            }),
+            Some(DtRank {
+                min_score: None,
+                max_det: 2,
+            }),
+        ] {
+            let got = COCOeval::cross_category_pairs(&gt, &dt, &slots, 1, rank);
+            let want = category_major_reference(&gt, &dt, &cat_ids, 1, rank);
+            assert_eq!(got, want, "diverged for dt_rank = {rank:?}");
+        }
+    }
+
+    /// The fixture has to actually exercise the thing: if the annotations came
+    /// out category-major already, the test above would pass against any
+    /// implementation.
+    #[test]
+    fn fixture_insertion_order_is_not_already_category_major() {
+        let (gt, _, cat_ids) = interleaved_fixture();
+        let slots = COCOeval::cat_slots(&cat_ids);
+        let raw: Vec<usize> = gt
+            .get_ann_ids_for_img(1)
+            .iter()
+            .filter_map(|&id| slots.get(&gt.get_ann(id)?.category_id).copied())
+            .collect();
+        assert!(
+            raw.windows(2).any(|w| w[0] > w[1]),
+            "fixture is already sorted by category slot: {raw:?}"
+        );
     }
 }

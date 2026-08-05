@@ -17,8 +17,12 @@ pub enum EvalMode {
 }
 
 /// LVIS category frequency bucket, as stored in `Category.frequency`.
+///
+/// Public because it is a field of [`MetricDef`](super::MetricDef): a renderer
+/// walking the metric catalog has to be able to tell `APr` from `APc` without
+/// string-matching the display name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FreqGroup {
+pub enum FreqGroup {
     Rare,
     Common,
     Frequent,

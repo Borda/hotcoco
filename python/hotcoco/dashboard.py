@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from .plot.core import TIDE_ERROR_ORDER, _report_curves, _top_confusion_keep
 from .plot.data import PlotData
+from .plot.report import _build_metric_rows
+from .plot.theme import SERIES_COLORS
 
 # ── Theme constants matching browse CSS tokens (Cold Brew) ───────────
 _BG_SURFACE = "#28221a"
@@ -18,19 +21,6 @@ _ACCENT = "#8694A8"
 _EVAL_TP = "#22c55e"
 _EVAL_FP = "#ef4444"
 _EVAL_FN = "#3b82f6"
-
-_COLORWAY = [
-    "#5E81AC",
-    "#C47A52",
-    "#5A9E78",
-    "#D4A03E",
-    "#9673A6",
-    "#3D9B96",
-    "#C46070",
-    "#7B8C42",
-    "#6E6EAA",
-    "#B5694A",
-]
 
 _FONT_BODY = "DM Sans, -apple-system, BlinkMacSystemFont, sans-serif"
 _FONT_MONO = "JetBrains Mono, ui-monospace, SFMono-Regular, monospace"
@@ -62,7 +52,7 @@ def _dark_layout(**overrides):
         font=dict(family=_FONT_BODY, color=_TEXT_PRIMARY, size=13),
         hoverlabel=dict(bgcolor=_BG_SURFACE, font_color=_TEXT_PRIMARY, bordercolor=_BORDER_SUBTLE),
         modebar=dict(bgcolor="rgba(0,0,0,0)", color=_TEXT_TERTIARY, activecolor=_ACCENT),
-        colorway=_COLORWAY,
+        colorway=SERIES_COLORS,
         margin=dict(l=60, r=20, t=20, b=40),
         xaxis=_axis,
         yaxis=_axis,
@@ -86,32 +76,46 @@ def _to_html(fig, div_id, *, post_script=None):
 # ── KPI tiles ────────────────────────────────────────────────────────
 
 
-def kpi_tiles(coco_eval) -> list[dict]:
+def kpi_tiles(data_or_eval) -> list[dict]:
     """Extract headline metrics for KPI tile display.
 
-    Returns a list of {key, value} dicts in display order.
-    Picks AP, AP50, AP75, and the first AR metric (AR100 for bbox/segm,
-    AR10 for keypoints) as the 4 most useful headlines.
+    Accepts a ``PlotData`` (the orchestrator already built one) or a COCOeval.
+
+    Returns a list of {key, value} dicts in display order: the first three AP
+    metrics plus the primary AR metric, in the evaluator's canonical order.
+
+    Derived from `metric_defs()` through the same helper the PDF report uses,
+    never from a hardcoded list of names. The hardcoded version listed AR100 /
+    AR10 / AR1 and so found no AR metric at all on keypoints (which reports
+    "AR") or LVIS (which reports "AR@300"), silently rendering three tiles
+    instead of four.
     """
-    metrics = coco_eval.get_results()
+    data = data_or_eval if isinstance(data_or_eval, PlotData) else PlotData.from_coco_eval(data_or_eval)
+    ap_rows, _, ar_kpi_key = _build_metric_rows(data)
 
-    # Pick the 4 most informative headline metrics
-    preferred = ["AP", "AP50", "AP75", "AR100", "AR10", "AR1"]
-    headline_keys = [k for k in preferred if k in metrics][:4]
+    headline_keys = [key for key, _, _ in ap_rows][:3]
+    if ar_kpi_key:
+        headline_keys.append(ar_kpi_key)
 
-    return [{"key": k, "value": metrics.get(k, 0.0)} for k in headline_keys]
+    return [{"key": k, "value": data.metrics.get(k, 0.0)} for k in headline_keys]
 
 
 # ── PR Curves ────────────────────────────────────────────────────────
 
 
 def chart_pr_curves(coco_eval) -> str:
-    """IoU-sweep PR curves with hover showing threshold values."""
+    """IoU-sweep PR curves with hover showing threshold values.
+
+    The curves come from `report()["curves"]`, which exists precisely to hand a
+    renderer "the slice a chart actually draws": one aggregate precision curve
+    per IoU threshold, already averaged over categories with the -1.0 sentinel
+    excluded, sharing the evaluator's own `rec_thrs` x-axis. Re-deriving that
+    here from the raw 5-D precision array meant a second place that had to agree
+    about which area range, which maxDets, and what -1.0 means.
+    """
     import plotly.graph_objects as go
 
-    data = PlotData.from_coco_eval(coco_eval)
-    a_idx = data.area_idx("all")
-    m_idx = data.max_det_idx(None)
+    recall_pts, iou_thrs, precision = _report_curves(coco_eval.report()["curves"])
 
     fig = go.Figure(
         layout=_dark_layout(
@@ -123,16 +127,15 @@ def chart_pr_curves(coco_eval) -> str:
         )
     )
 
-    for t_idx, iou_thr in enumerate(data.iou_thresholds):
-        prec_raw = data.precision[t_idx, :, :, a_idx, m_idx]  # (R, K)
-        # Mask invalid (-1 sentinel) then mean across categories
-        prec_masked = np.where(prec_raw < 0, np.nan, prec_raw)
-        prec_mean = np.nanmean(prec_masked, axis=1)
+    for t_idx, iou_thr in enumerate(iou_thrs):
+        # The sentinel is already NaN by here; None makes Plotly break the line
+        # instead of plotting a value.
+        y = [None if np.isnan(p) else float(p) for p in precision[t_idx]]
 
         fig.add_trace(
             go.Scatter(
-                x=data.recall_pts.tolist(),
-                y=prec_mean.tolist(),
+                x=recall_pts,
+                y=y,
                 mode="lines",
                 name=f"IoU={iou_thr:.2f}",
                 line=dict(width=2.5 if t_idx == 0 else 1.5),
@@ -236,27 +239,16 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
     K = len(cat_names)
     labels = cat_names + ["BG"]
 
-    # Auto top-N for large category sets
-    top_n = 25 if K > 30 else None
     data = norm_matrix
     counts = raw_matrix
 
-    if top_n is not None and top_n < K:
-        cat_block = data[:K, :K]
-        row_total = cat_block.sum(axis=1)
-        diag = np.diag(cat_block)
-        col_total = cat_block.sum(axis=0)
-        confusion_mass = (row_total - diag) + (col_total - diag)
-        top_indices = np.argsort(confusion_mass)[::-1][:top_n]
-        keep = sorted(top_indices.tolist()) + [len(labels) - 1]
+    keep = _top_confusion_keep(data, K)
+    if keep is not None:
         data = data[np.ix_(keep, keep)]
         counts = counts[np.ix_(keep, keep)]
         labels = [labels[i] for i in keep]
 
     n = len(labels)
-
-    # Build customdata: gt_name for each cell (row label)
-    customdata = [[labels[i] for _ in range(n)] for i in range(n)]
 
     # Hover text with counts — the rate alone hides whether a cell is one stray
     # detection or a systematic confusion, so show the raw count behind it.
@@ -299,7 +291,6 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
             text=text,
             texttemplate="%{text}" if show_text else None,
             textfont=dict(size=max(7, min(11, 200 // n))),
-            customdata=customdata,
             hovertext=hover_text,
             hoverinfo="text",
             colorscale=[[0, _BG_ELEVATED], [0.5, "#6A7A90"], [1, _ACCENT]],
@@ -325,26 +316,34 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
 # ── TIDE Errors ──────────────────────────────────────────────────────
 
 
-def chart_tide_errors(coco_eval) -> str:
-    """TIDE error breakdown as native HTML bars."""
-    tide = coco_eval.tide_errors()
+def chart_tide_errors(tide_or_eval) -> str:
+    """TIDE error breakdown as native HTML bars.
+
+    Accepts the output of ``coco_eval.tide_errors()`` or a COCOeval to call it
+    on — the orchestrator needs the same dict for the card subtitle, and TIDE is
+    a full re-walk of the matches.
+    """
+    tide = tide_or_eval if isinstance(tide_or_eval, dict) else tide_or_eval.tide_errors()
     delta_ap = tide["delta_ap"]
     ap_base = tide["ap_base"]
     counts = tide.get("counts", {})
 
-    error_types = [
-        ("Cls", "Classification", "Predicted wrong class"),
-        ("Loc", "Localization", "Poor bounding box overlap"),
-        ("Both", "Cls + Loc", "Wrong class and poor overlap"),
-        ("Dupe", "Duplicate", "Redundant detection of same object"),
-        ("Bkg", "Background", "Detection on background region"),
-        ("Miss", "Missed", "Failed to detect a ground truth"),
-    ]
+    # Labels and tooltips for the shared taxonomy; the order comes from
+    # TIDE_ERROR_ORDER so the CLI, the bar chart, and this table agree.
+    descriptions = {
+        "Cls": ("Classification", "Predicted wrong class"),
+        "Loc": ("Localization", "Poor bounding box overlap"),
+        "Both": ("Cls + Loc", "Wrong class and poor overlap"),
+        "Dupe": ("Duplicate", "Redundant detection of same object"),
+        "Bkg": ("Background", "Detection on background region"),
+        "Miss": ("Missed", "Failed to detect a ground truth"),
+    }
 
-    max_val = max((delta_ap.get(k, 0.0) for k, _, _ in error_types), default=0.001) or 0.001
+    max_val = max((delta_ap.get(k, 0.0) for k in TIDE_ERROR_ORDER), default=0.001) or 0.001
 
     rows = []
-    for key, label, desc in error_types:
+    for key in TIDE_ERROR_ORDER:
+        label, desc = descriptions[key]
         val = delta_ap.get(key, 0.0)
         count = counts.get(key, 0)
         pct = (val / max_val * 100) if max_val > 0 else 0
@@ -441,11 +440,15 @@ def chart_calibration(coco_eval) -> str:
 # ── F1 Distribution ──────────────────────────────────────────────────
 
 
-def chart_f1_distribution(coco_eval, iou_thr=0.5) -> str:
-    """Histogram of per-image F1 scores, colored by error profile."""
+def chart_f1_distribution(diag_or_eval, iou_thr=0.5) -> str:
+    """Histogram of per-image F1 scores, colored by error profile.
+
+    Accepts the output of ``coco_eval.image_diagnostics()`` or a COCOeval to
+    call it on. ``iou_thr`` applies only in the latter case.
+    """
     import plotly.graph_objects as go
 
-    diag = coco_eval.image_diagnostics(iou_thr=iou_thr)
+    diag = diag_or_eval if isinstance(diag_or_eval, dict) else diag_or_eval.image_diagnostics(iou_thr=iou_thr)
     img_summary = diag.get("img_summary", {})
     if not img_summary:
         return "<p style='color: #9a918a; text-align: center; padding: 40px;'>No image diagnostics available.</p>"
@@ -495,9 +498,13 @@ def chart_f1_distribution(coco_eval, iou_thr=0.5) -> str:
 # ── Label Errors Table ───────────────────────────────────────────────
 
 
-def label_errors_table(coco_eval, iou_thr=0.5, top_n=20) -> list[dict]:
-    """Top suspected label errors for HTML table rendering."""
-    diag = coco_eval.image_diagnostics(iou_thr=iou_thr)
+def label_errors_table(diag_or_eval, iou_thr=0.5, top_n=20) -> list[dict]:
+    """Top suspected label errors for HTML table rendering.
+
+    Accepts the output of ``coco_eval.image_diagnostics()`` or a COCOeval to
+    call it on. ``iou_thr`` applies only in the latter case.
+    """
+    diag = diag_or_eval if isinstance(diag_or_eval, dict) else diag_or_eval.image_diagnostics(iou_thr=iou_thr)
     errors = diag.get("label_errors", [])
     return errors[:top_n]
 
@@ -505,28 +512,41 @@ def label_errors_table(coco_eval, iou_thr=0.5, top_n=20) -> list[dict]:
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 
-def build_dashboard(coco_eval, slices=None) -> dict:
-    """Compute all dashboard data at once. Returns dict for template rendering."""
-    # Grab contextual info for template card subtitles
+def build_dashboard(coco_eval, slices=None, diagnostics=None) -> dict:
+    """Compute all dashboard data at once. Returns dict for template rendering.
+
+    Every derived quantity is computed here once and handed to the renderers
+    that need it: TIDE feeds both its own card and the card subtitle, the
+    per-image diagnostics feed both the F1 histogram and the label-error table,
+    and `PlotData` feeds the provenance strip and the KPI tiles. Each of those
+    is a full walk over the evaluation, so letting the renderers fetch their own
+    ran them twice apiece.
+
+    *diagnostics* is an already-computed ``image_diagnostics(iou_thr=0.5)``
+    result — the browse server has one cached and passes it through.
+    """
     tide = coco_eval.tide_errors()
 
     # Read the comparability marker from Rust rather than inferring it from
     # iou_type or eval mode — parity is a property of the whole configuration.
-    # Default-deny: only the exact "parity_verified" marker clears the banner.
-    provenance = coco_eval.provenance()
+    # `PlotData` owns the default-deny predicate; don't re-spell it here.
+    data = PlotData.from_coco_eval(coco_eval)
+
+    if diagnostics is None:
+        diagnostics = coco_eval.image_diagnostics(iou_thr=0.5)
 
     result = {
-        "provenance": provenance,
-        "provenance_ok": provenance == "parity_verified",
-        "deviations": list(coco_eval.reference_deviations()),
-        "kpi": kpi_tiles(coco_eval),
+        "provenance": data.provenance,
+        "provenance_ok": data.is_benchmark_standard,
+        "deviations": data.deviations,
+        "kpi": kpi_tiles(data),
         "pr_curves_html": chart_pr_curves(coco_eval),
         "per_cat_ap_html": chart_per_category_ap(coco_eval),
         "confusion_html": chart_confusion_matrix(coco_eval),
-        "tide_html": chart_tide_errors(coco_eval),
+        "tide_html": chart_tide_errors(tide),
         "calibration_html": chart_calibration(coco_eval),
-        "f1_dist_html": chart_f1_distribution(coco_eval),
-        "label_errors": label_errors_table(coco_eval),
+        "f1_dist_html": chart_f1_distribution(diagnostics),
+        "label_errors": label_errors_table(diagnostics),
         "iou_type": coco_eval.params.iou_type,
         "num_categories": len(coco_eval.params.cat_ids),
         "num_images": len(coco_eval.params.img_ids),

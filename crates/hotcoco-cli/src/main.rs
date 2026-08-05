@@ -189,9 +189,7 @@ fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
     status("Evaluated", &format!("{}", args.iou_type), start.elapsed());
 
     let _ = writeln!(stderr());
-    for line in coco_eval.summarize_lines() {
-        println!("{}", line);
-    }
+    coco_eval.summarize();
 
     // Print machine-readable stats line for parity testing
     if let Some(stats) = coco_eval.stats() {

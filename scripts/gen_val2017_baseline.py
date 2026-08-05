@@ -22,17 +22,11 @@ import json
 import sys
 from pathlib import Path
 
-from helpers import DATA_DIR, suppress_stdout
+from helpers import VAL2017, suppress_output
 from pycocotools.coco import COCO as PyCOCO
 from pycocotools.cocoeval import COCOeval as PyCOCOeval
 
 OUT = Path(__file__).parent / "fixtures" / "val2017_expected.json"
-
-BENCHMARKS = [
-    ("bbox", "annotations/instances_val2017.json", "bbox_val2017_results.json", "bbox"),
-    ("segm", "annotations/instances_val2017.json", "segm_val2017_results.json", "segm"),
-    ("keypoints", "annotations/person_keypoints_val2017.json", "kpt_val2017_results.json", "keypoints"),
-]
 
 COMMENT = (
     "Expected COCO val2017 metrics, produced by PYCOCOTOOLS (not hotcoco) on the "
@@ -52,15 +46,15 @@ def main() -> int:
     }
 
     missing = []
-    for name, gt_rel, dt_rel, iou_type in BENCHMARKS:
-        gt, dt = DATA_DIR / gt_rel, DATA_DIR / dt_rel
+    for name, files in VAL2017.items():
+        gt, dt = files["gt"], files["dt"]
         if not gt.exists() or not dt.exists():
             missing.append(name)
             continue
-        with suppress_stdout():
+        with suppress_output(stderr=False):
             coco_gt = PyCOCO(str(gt))
             coco_dt = coco_gt.loadRes(str(dt))
-            ev = PyCOCOeval(coco_gt, coco_dt, iou_type)
+            ev = PyCOCOeval(coco_gt, coco_dt, name)
             ev.evaluate()
             ev.accumulate()
             ev.summarize()

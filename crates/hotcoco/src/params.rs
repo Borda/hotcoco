@@ -14,7 +14,14 @@ pub struct AreaRange {
 }
 
 /// The type of IoU (intersection over union) computation to use.
+///
+/// Serializes as the lowercase name — `"bbox"`, `"segm"`, `"keypoints"`, `"obb"`
+/// — the same spelling [`Display`](fmt::Display) and [`FromStr`] use. The derive
+/// defaulted to the variant name (`"Bbox"`), so a saved `results.json` could not
+/// be round-tripped through `FromStr` without a `.lower()` somewhere; the CLI,
+/// the Python bindings and the plotting layer each patched it separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum IouType {
     /// Bounding box IoU.
     Bbox,
@@ -187,18 +194,76 @@ impl Params {
         self.area_range_idx("all").unwrap_or(0)
     }
 
-    /// Index of the IoU threshold nearest `thr`, or `None` if none is within 1e-9.
+    /// The `[min, max]` bounds of the `"all"` area range.
     ///
-    /// The one owner of this lookup. It had three independent copies — calibration,
-    /// summarize, and a test — which is fine until they disagree, and they did:
-    /// two took the *first* threshold within tolerance and one took the *nearest*,
-    /// so a params list holding two thresholds that close would resolve
-    /// `iou_thr = 0.5` differently depending on which path asked.
+    /// The value-side twin of [`all_area_idx`](Self::all_area_idx), for the
+    /// consumers that compare against an [`EvalImg`](crate::EvalImg)'s stored
+    /// `area_rng` rather than indexing an axis. Every one of them spelled
+    /// `params.area_ranges[params.all_area_idx()].range` out by hand, which is two
+    /// lookups a reader has to check agree.
+    ///
+    /// Panics on empty `area_ranges`, exactly as the hand-written form did — an
+    /// evaluator with no area ranges has no cells to filter and every caller
+    /// indexes the axis anyway.
+    pub fn all_area_range(&self) -> [f64; 2] {
+        self.area_ranges[self.all_area_idx()].range
+    }
+
+    /// The per-image detection cap: the largest entry in `max_dets`, or 100 if empty.
+    ///
+    /// The one owner of this lookup. Five sites derived it independently — four
+    /// took `max_dets.last()` and one took the maximum, which agree on the sorted
+    /// default `[1, 10, 100]` and diverge on unsorted input. The divergence was
+    /// observable: `evaluate()` stamped every eval_img with `.last()` while
+    /// `image_diagnostics` filtered on the maximum, so `max_dets = [100, 10, 1]`
+    /// produced empty diagnostics. pycocotools sidesteps the question by sorting
+    /// `maxDets` inside `evaluate()`; hotcoco does not mutate caller params (the
+    /// accumulated M axis follows the caller's order), so the cap is the maximum
+    /// taken directly — the same value pycocotools ends up with.
+    pub fn max_det(&self) -> usize {
+        self.max_dets.iter().copied().max().unwrap_or(100)
+    }
+
+    /// Position of [`max_det`](Self::max_det)'s value in `max_dets` — the M-axis
+    /// slot every headline metric is read from.
+    ///
+    /// The index-side twin of `max_det()`, and it exists for the same reason:
+    /// three sites took `shape.m - 1` (the *last* slot) instead of the slot
+    /// holding the cap. Those agree on the sorted default `[1, 10, 100]` and
+    /// diverge on anything else — with `max_dets = [100, 10, 1]`, per-class AP,
+    /// the F-scores and `report()`'s PR curves were all read at `max_det = 1`
+    /// while the headline `AP` was read at 100, so a single `report()` disagreed
+    /// with itself (measured: per-class 0.63 against a headline 0.91).
+    ///
+    /// Falls back to `0` when the cap is not in the list, which only happens for
+    /// an empty `max_dets` — the same degenerate slot the callers' `unwrap_or(0)`
+    /// already produced.
+    pub fn max_det_idx(&self) -> usize {
+        let cap = self.max_det();
+        self.max_dets.iter().position(|&d| d == cap).unwrap_or(0)
+    }
+
+    /// Index of the IoU threshold *equal* to `thr` (within 1e-9), or `None`.
+    ///
+    /// The owner of the **exact-match** policy, paired with
+    /// [`nearest_iou_thr_idx`](Self::nearest_iou_thr_idx), which snaps
+    /// unconditionally. The two answer different questions and must not be
+    /// interchanged: a metric named `AP50` means the 0.50 slice or nothing —
+    /// reporting the 0.65 slice under that name because it happened to be
+    /// closest is a wrong number, not a fallback — while a caller passing an
+    /// analysis threshold ("classify at ~0.6") wants the nearest grid point it
+    /// actually has.
+    ///
+    /// Three copies of the exact form existed — calibration, summarize, and a
+    /// test — and they disagreed: two took the *first* threshold within tolerance
+    /// and one took the *nearest*, so a params list holding two thresholds that
+    /// close resolved `iou_thr = 0.5` differently depending on which path asked.
     ///
     /// The tolerance is not a fudge. `thr` is a caller-supplied `f64` compared
-    /// against a grid built by [`linspace`] to match `numpy.linspace` bit-for-bit,
+    /// against a grid built by `linspace` to match `numpy.linspace` bit-for-bit,
     /// so exact equality would reject values that are 0.5 in every sense a caller
-    /// means. Nearest-wins makes the answer single-valued regardless.
+    /// means. Nearest-wins among those within tolerance makes the answer
+    /// single-valued regardless.
     pub fn iou_thr_idx(&self, thr: f64) -> Option<usize> {
         self.iou_thrs
             .iter()
@@ -206,6 +271,26 @@ impl Params {
             .filter(|&(_, &t)| (t - thr).abs() < 1e-9)
             .min_by(|&(_, &a), &(_, &b)| (a - thr).abs().total_cmp(&(b - thr).abs()))
             .map(|(i, _)| i)
+    }
+
+    /// Index of the IoU threshold closest to `thr`, snapping unconditionally.
+    ///
+    /// The owner of the **snap-always** policy — the counterpart to
+    /// [`iou_thr_idx`](Self::iou_thr_idx)'s exact-within-1e-9 match. TIDE and
+    /// per-image diagnostics take an analysis threshold from the user and report
+    /// which grid point they landed on, so "nothing within tolerance" is not a
+    /// failure there; it is a snap. Both hand-rolled the scan, and one of them
+    /// tie-broke on `partial_cmp` while the other did not.
+    ///
+    /// Returns `0` for an empty threshold list, which is the same degenerate
+    /// answer both call sites already produced via `map_or(0, …)` — there is no
+    /// index to report and every consumer indexes with it.
+    pub fn nearest_iou_thr_idx(&self, thr: f64) -> usize {
+        self.iou_thrs
+            .iter()
+            .enumerate()
+            .min_by(|&(_, &a), &(_, &b)| (a - thr).abs().total_cmp(&(b - thr).abs()))
+            .map_or(0, |(i, _)| i)
     }
 
     /// Create default parameters for the given evaluation type.
@@ -432,6 +517,32 @@ mod tests {
         // numpy pins the endpoint rather than computing it; so must we.
         assert_eq!(iou[9], 0.95);
         assert_eq!(rec[100], 1.0);
+    }
+
+    /// `max_det_idx` must follow the *value*, not the position. The whole point
+    /// is that unsorted `max_dets` puts the cap somewhere other than last.
+    #[test]
+    fn max_det_idx_follows_the_cap_not_the_last_slot() {
+        let mut p = Params::new(IouType::Bbox);
+        assert_eq!(p.max_det(), 100);
+        assert_eq!(p.max_det_idx(), 2); // [1, 10, 100] — last slot, coincidentally
+
+        p.max_dets = vec![100, 10, 1];
+        assert_eq!(p.max_det(), 100);
+        assert_eq!(p.max_det_idx(), 0); // not `len - 1`
+
+        p.max_dets = vec![10, 300, 100];
+        assert_eq!(p.max_det_idx(), 1);
+
+        p.max_dets = vec![];
+        assert_eq!(p.max_det_idx(), 0);
+    }
+
+    #[test]
+    fn all_area_range_agrees_with_all_area_idx() {
+        let p = Params::new(IouType::Bbox);
+        assert_eq!(p.all_area_range(), p.area_ranges[p.all_area_idx()].range);
+        assert_eq!(p.all_area_range(), [0.0, 1e10]);
     }
 
     #[test]

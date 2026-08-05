@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .core import _mask_invalid_prec
+
 
 @dataclass
 class PlotData:
@@ -18,6 +20,7 @@ class PlotData:
     eval_mode: str  # "coco" | "lvis" | "openimages"
     iou_type: str  # "bbox" | "segm" | "keypoints"
     provenance: str  # "parity_verified" | "extension" — read from Rust, never re-derived
+    is_benchmark_standard: bool  # Rust's default-deny predicate, never re-derived here
     deviations: list[str]  # why, when provenance is not "parity_verified"
     iou_thresholds: list[float]  # T values — matches precision axis 0
     area_labels: list[str]  # ordered area range labels — matches precision axis 3
@@ -26,21 +29,14 @@ class PlotData:
     metrics: dict[str, float]
     per_class: dict[str, float] | None
     precision: np.ndarray  # shape (T, R, K, A, M)
-    recall_pts: np.ndarray  # linspace(0, 1, R)
+    recall_pts: np.ndarray  # params.rec_thrs — the evaluator's own grid, length R
     cat_ids: list[int]  # ordered — matches precision axis 2
     cat_names: dict[int, str]
-    metric_key_order: list[str]  # canonical display order from Rust
+    # The metric catalog from Rust, in canonical display order: one dict per
+    # metric with name/ap/iou_thr/area/max_det/freq_group. Every renderer reads
+    # a metric's axes from here rather than parsing them back out of its name.
+    metric_defs: list[dict]
     version: str
-
-    @property
-    def is_benchmark_standard(self) -> bool:
-        """Whether these numbers may be presented as leaderboard-comparable.
-
-        Default-deny: only the exact ``"parity_verified"`` marker qualifies, so a
-        provenance variant added later reads as *needs a caveat* until a renderer
-        is taught what it means.
-        """
-        return self.provenance == "parity_verified"
 
     # ------------------------------------------------------------------
     # Index helpers — used by plot functions to resolve axis positions
@@ -51,14 +47,40 @@ class PlotData:
         return self.area_labels.index(label) if label in self.area_labels else 0
 
     def max_det_idx(self, max_det: int | None) -> int:
-        """Return the max-det axis index, defaulting to the last entry."""
+        """Return the max-det axis index, defaulting to the per-image cap.
+
+        The default mirrors ``Params::max_det()`` in Rust — the *maximum* entry,
+        not the last one. The two agree on the sorted default ``[1, 10, 100]``
+        and diverge on unsorted params, where taking the last would plot the
+        AR1 slice under the AP label.
+        """
         if max_det is not None and max_det in self.max_dets:
             return self.max_dets.index(max_det)
-        return len(self.max_dets) - 1
+        return self.max_dets.index(max(self.max_dets))
 
     def nearest_iou_idx(self, target: float) -> int:
         """Return the IoU-threshold index closest to *target*."""
         return min(range(len(self.iou_thresholds)), key=lambda i: abs(self.iou_thresholds[i] - target))
+
+    # ------------------------------------------------------------------
+    # Aggregation
+    # ------------------------------------------------------------------
+
+    def mean_precision(self, t_idx: int, a_idx: int, m_idx: int) -> np.ndarray:
+        """Mean precision over categories for one (IoU, area, maxDets) slice.
+
+        Returns one value per recall threshold, length R. The ``-1`` sentinel
+        ("not computed for this configuration") is excluded from the mean rather
+        than averaged in as a low score, and a recall threshold no category
+        reached comes back as NaN.
+
+        The single owner of this reduction on the Python side: `report()`'s
+        ``curves`` is the same aggregate computed in Rust, so a chart that is
+        parameterized over area or maxDets calls this, and a chart that draws
+        the standard slice reads ``curves``. Anything spelling the nanmean
+        itself is a third answer to the same question.
+        """
+        return np.nanmean(_mask_invalid_prec(self.precision[t_idx, :, :, a_idx, m_idx]), axis=1)
 
     # ------------------------------------------------------------------
     # Factory
@@ -98,6 +120,16 @@ class PlotData:
         area_labels = list(coco_eval.params.area_rng_lbl)
         cat_ids = list(coco_eval.params.cat_ids)
 
+        # The recall axis is the evaluator's own grid, never a fresh linspace:
+        # `rec_thrs` is configurable, and fabricating 0..1 silently mislabels
+        # every x coordinate on a run that customised it.
+        recall_pts = np.asarray(coco_eval.params.rec_thrs, dtype=float)
+        if recall_pts.shape[0] != precision.shape[1]:
+            raise ValueError(
+                f"params.rec_thrs has {recall_pts.shape[0]} points but precision axis 1 has "
+                f"{precision.shape[1]} — accumulate() ran against a different recall grid."
+            )
+
         try:
             cats = coco_eval.coco_gt.load_cats(cat_ids)
             cat_names = {c["id"]: c["name"] for c in cats}
@@ -106,15 +138,13 @@ class PlotData:
 
         return cls(
             eval_mode=params_dict["eval_mode"],
-            # Lowercased at the boundary: `results()` reports the Rust enum's
-            # `Debug` spelling ("Bbox", "Keypoints") while `eval_mode` arrives
-            # lowercase, and `iou_type == "keypoints"` was silently never true.
-            iou_type=params_dict["iou_type"].lower(),
+            iou_type=params_dict["iou_type"],
             # Read from the results dict Rust already produced, not re-derived.
             # Provenance depends on the whole configuration, so `eval_mode ==
             # "coco"` says nothing about it — a bbox run with custom iou_thrs is
             # an extension too.
             provenance=r["provenance"],
+            is_benchmark_standard=coco_eval.is_benchmark_standard(),
             deviations=list(coco_eval.reference_deviations()),
             iou_thresholds=params_dict["iou_thresholds"],
             area_labels=area_labels,
@@ -123,9 +153,9 @@ class PlotData:
             metrics=r["metrics"],
             per_class=r.get("per_class"),
             precision=precision,
-            recall_pts=np.linspace(0.0, 1.0, precision.shape[1]),
+            recall_pts=recall_pts,
             cat_ids=cat_ids,
             cat_names=cat_names,
-            metric_key_order=coco_eval.metric_keys(),
+            metric_defs=list(coco_eval.metric_defs()),
             version=r["hotcoco_version"],
         )

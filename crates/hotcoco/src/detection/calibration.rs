@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Serialize;
 
 use super::COCOeval;
-use crate::metrics::calibration::{calibration_curve, calibration_error};
+use crate::metrics::calibration::{calibration_curve, calibration_error, scores_in_unit_interval};
 
 // Private for the same reason as `BootstrapCI` in `compare.rs`.
 use crate::metrics::calibration::CalibrationBin;
@@ -83,23 +83,17 @@ impl COCOeval {
             )
         })?;
 
-        // Use the "all" area range, matching standard COCO evaluation semantics.
-        // Fallback to first area range if "all" label is absent (consistent with tide.rs).
-        let target_area_rng = self.params.all_area_idx();
-        let target_area = self.params.area_ranges[target_area_rng].range;
-
         // Collect detections globally and per-category
         let mut all: ScoredOutcomes = (Vec::new(), Vec::new());
         let mut per_cat: HashMap<u64, ScoredOutcomes> = HashMap::new();
 
-        for eval_img in self.eval_imgs.iter().flatten() {
-            // Filter to "all" area range (evaluate() uses a single max_det for all entries)
-            if eval_img.area_rng != target_area {
-                continue;
-            }
-
-            let matched = &eval_img.dt_matched[t_idx];
-            let ignored = &eval_img.dt_ignore[t_idx];
+        // `default_cells` owns the (area = "all", default max_det) predicate that
+        // TIDE and per-image diagnostics also select on. This site used to test the
+        // area range only — inert, because `evaluate()` stamps one `max_det` on
+        // every cell, but inert by coincidence rather than by construction.
+        for eval_img in self.default_cells() {
+            let matched = eval_img.dt_matched.row(t_idx);
+            let ignored = eval_img.dt_ignore.row(t_idx);
             debug_assert_eq!(matched.len(), eval_img.dt_scores.len());
             debug_assert_eq!(ignored.len(), eval_img.dt_scores.len());
             let n = matched
@@ -124,31 +118,13 @@ impl COCOeval {
             }
         }
 
-        // Scores must be confidences in [0, 1]. `calibration_curve` buckets by
-        // `score * n_bins` and clamps the *index*, not the score — so a value
-        // outside the unit interval saturates into an end bin and carries its raw
-        // magnitude into that bin's mean, yielding an ECE above 1.0 with no other
-        // symptom. Detection scores arrive straight from user JSON, so a model
-        // exporting logits lands here; failing loudly beats a plausible-looking
-        // number nobody can interpret. Checking `all` covers the per-category
-        // vectors too, since every detection is pushed to both.
-        let out_of_range: Vec<f64> = all
-            .0
-            .iter()
-            .copied()
-            .filter(|s| !(0.0..=1.0).contains(s))
-            .collect();
-        if let Some(&bad) = out_of_range.first() {
-            let n_bad = out_of_range.len();
-            return Err(format!(
-                "calibration() requires detection scores in [0, 1], found {bad} \
-                 ({n_bad} of {} detections out of range). Raw logits or unnormalized \
-                 scores bucket into the end bins and produce a meaningless \
-                 calibration error — apply a sigmoid or softmax first.",
-                all.0.len()
-            )
-            .into());
-        }
+        // Scores must be confidences in [0, 1]. Detection scores arrive straight
+        // from user JSON, so a model exporting logits lands here; failing loudly
+        // beats a plausible-looking number nobody can interpret. Checking `all`
+        // covers the per-category vectors too, since every detection is pushed to
+        // both. The predicate itself belongs to `metrics::calibration` — it is a
+        // property of the functions being called, not of detection.
+        scores_in_unit_interval(&all.0).map_err(|e| format!("calibration(): {e}"))?;
 
         let bins = calibration_curve(&all.0, &all.1, n_bins);
         let (ece, mce) = calibration_error(&bins);

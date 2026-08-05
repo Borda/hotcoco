@@ -22,38 +22,19 @@ import json
 import sys
 from pathlib import Path
 
-from helpers import DATA_DIR, suppress_stdout
+from helpers import VAL2017, suppress_output
 from hotcoco import COCO, COCOeval
 from pycocotools.coco import COCO as PyCOCO
 from pycocotools.cocoeval import COCOeval as PyCOCOeval
 
-BENCHMARKS = [
-    {
-        "name": "bbox",
-        "gt": DATA_DIR / "annotations/instances_val2017.json",
-        "dt": DATA_DIR / "bbox_val2017_results.json",
-        "iou_type": "bbox",
-        "tol": 1e-12,
-    },
-    {
-        "name": "segm",
-        "gt": DATA_DIR / "annotations/instances_val2017.json",
-        "dt": DATA_DIR / "segm_val2017_results.json",
-        "iou_type": "segm",
-        "tol": 1e-12,
-    },
-    {
-        "name": "keypoints",
-        "gt": DATA_DIR / "annotations/person_keypoints_val2017.json",
-        "dt": DATA_DIR / "kpt_val2017_results.json",
-        "iou_type": "keypoints",
-        "tol": 1e-12,
-    },
-]
+# Files come from `helpers.VAL2017`; the tolerance is this script's own, and is
+# the same for every iou_type — see the module docstring for how it was sized.
+TOL = 1e-12
+TOL_LABEL = f"<= {TOL:.0e}"
 
 
 def run_pycocotools(gt_file, dt_file, iou_type):
-    with suppress_stdout():
+    with suppress_output(stderr=False):
         gt = PyCOCO(str(gt_file))
         dt = gt.loadRes(str(dt_file))
         ev = PyCOCOeval(gt, dt, iou_type)
@@ -64,7 +45,7 @@ def run_pycocotools(gt_file, dt_file, iou_type):
 
 
 def run_hotcoco(gt_file, dt_file, iou_type):
-    with suppress_stdout():
+    with suppress_output(stderr=False):
         gt = COCO(str(gt_file))
         dt = gt.load_res(str(dt_file))
         ev = COCOeval(gt, dt, iou_type)
@@ -82,57 +63,67 @@ def run_hotcoco(gt_file, dt_file, iou_type):
 # produced by pycocotools itself (see scripts/gen_val2017_baseline.py), so a
 # mismatch means the reference moved and someone has to decide whether that is
 # intended.
+# Loaded unconditionally, and a missing or unreadable file is fatal. It used to
+# default to `{}` and every per-type lookup was guarded by `is not None`, so
+# deleting the fixture — or renaming one key inside it — left the script printing
+# ALL METRICS PASS having checked nothing against the pin. A baseline that
+# disappears silently is worse than no baseline: it reports the check it isn't
+# running.
 BASELINE_PATH = Path(__file__).parent / "fixtures" / "val2017_expected.json"
-BASELINE = {}
-if BASELINE_PATH.exists():
-    with open(BASELINE_PATH) as _f:
-        BASELINE = json.load(_f)
+if not BASELINE_PATH.exists():
+    sys.exit(f"missing baseline {BASELINE_PATH} — regenerate with scripts/gen_val2017_baseline.py")
+try:
+    BASELINE = json.loads(BASELINE_PATH.read_text())
+    BASELINE_METRICS = BASELINE["metrics"]
+    BASELINE_REF = BASELINE["reference"]
+except (json.JSONDecodeError, KeyError) as exc:
+    sys.exit(f"unreadable baseline {BASELINE_PATH}: {exc} — regenerate with scripts/gen_val2017_baseline.py")
 
 all_pass = True
 
-for bench in BENCHMARKS:
-    tol = bench["tol"]
-    tol_label = f"<= {tol:.0e}" if tol > 0 else "exact"
+for iou_type, files in VAL2017.items():
     print(f"\n{'=' * 68}")
-    print(f"  {bench['name']}  ({tol_label})")
+    print(f"  {iou_type}  ({TOL_LABEL})")
     print(f"{'=' * 68}")
     print(f"  {'Metric':<8} {'pycocotools':>14} {'hotcoco':>14} {'diff':>12}  status")
     print(f"  {'-' * 58}")
 
-    py = run_pycocotools(bench["gt"], bench["dt"], bench["iou_type"])
-    rs, metric_names = run_hotcoco(bench["gt"], bench["dt"], bench["iou_type"])
+    py = run_pycocotools(files["gt"], files["dt"], iou_type)
+    rs, metric_names = run_hotcoco(files["gt"], files["dt"], iou_type)
 
     type_pass = True
     for i, name in enumerate(metric_names):
         diff = abs(py[i] - rs[i])
-        ok = diff <= tol
+        ok = diff <= TOL
         if not ok:
             type_pass = False
             all_pass = False
         status = "PASS" if ok else "FAIL"
         print(f"  {name:<8} {py[i]:>14.8f} {rs[i]:>14.8f} {diff:>12.2e}  {status}")
 
-    # Compare against the pinned reference values as well.
-    expected = BASELINE.get("metrics", {}).get(bench["name"])
-    if expected is not None:
-        if len(expected) != len(py):
-            print(f"\n  BASELINE: expected {len(expected)} metrics, reference produced {len(py)} — FAIL")
+    # Compare against the pinned reference values as well. An absent key is a
+    # failure, not a skip — the alternative is a green run over an empty check.
+    expected = BASELINE_METRICS.get(iou_type)
+    if expected is None:
+        print(f"\n  BASELINE: no pinned values for '{iou_type}' — nothing was checked against the pin. FAIL")
+        print("    Regenerate with scripts/gen_val2017_baseline.py.")
+        type_pass = False
+        all_pass = False
+    elif len(expected) != len(py):
+        print(f"\n  BASELINE: expected {len(expected)} metrics, reference produced {len(py)} — FAIL")
+        type_pass = False
+        all_pass = False
+    else:
+        drift = [(metric_names[i], expected[i], py[i]) for i in range(len(expected)) if abs(expected[i] - py[i]) > TOL]
+        if drift:
+            print(f"\n  BASELINE DRIFT — pinned values were produced by {BASELINE_REF}:")
+            for nm, want, got in drift:
+                print(f"    {nm:<8} pinned={want:.8f}  reference now={got:.8f}  diff={abs(want - got):.2e}")
+            print("    The reference implementation moved. Confirm intended, then regenerate.")
             type_pass = False
             all_pass = False
         else:
-            drift = [
-                (metric_names[i], expected[i], py[i]) for i in range(len(expected)) if abs(expected[i] - py[i]) > tol
-            ]
-            if drift:
-                ref = BASELINE.get("reference", {})
-                print(f"\n  BASELINE DRIFT — pinned values were produced by {ref}:")
-                for nm, want, got in drift:
-                    print(f"    {nm:<8} pinned={want:.8f}  reference now={got:.8f}  diff={abs(want - got):.2e}")
-                print("    The reference implementation moved. Confirm intended, then regenerate.")
-                type_pass = False
-                all_pass = False
-            else:
-                print(f"  {'(baseline)':<8} {len(expected)} pinned reference values match")
+            print(f"  {'(baseline)':<8} {len(expected)} pinned reference values match")
 
     result_label = "ALL PASS" if type_pass else "SOME METRICS FAILED"
     print(f"\n  {result_label}")

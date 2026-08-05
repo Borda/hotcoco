@@ -146,3 +146,19 @@ gen-fixtures: build
     uv run --with shapely python scripts/gen_obb_fixtures.py
     uv run --with scikit-learn --with netcal python scripts/gen_metrics_fixtures.py
     uv run python scripts/gen_val2017_baseline.py
+
+# Report what target/ is costing, broken down by profile
+disk:
+    @du -sh target 2>/dev/null || echo "target/ does not exist"
+    @du -sh target/* 2>/dev/null | sort -rh || true
+    @echo "stray .o files in debug/deps: $(find target/debug/deps -maxdepth 1 -name '*.o' 2>/dev/null | wc -l | tr -d ' ')"
+
+# Cargo has no eviction policy — stale artifacts are never removed, so a
+# long-lived working copy only grows. Safe to run anytime: it costs a rebuild
+# and nothing else. The compiled Python extension lives at
+# python/hotcoco/hotcoco.abi3.so, outside target/, so `import hotcoco` keeps
+# working across a clean.
+# Reclaim target/ (costs one rebuild, nothing else)
+clean:
+    cargo clean
+    @echo "target/ cleared. Next cargo/just command rebuilds."

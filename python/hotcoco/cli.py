@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json as json_mod
 import os
 import sys
@@ -52,6 +53,34 @@ def _table(columns, rows, footer=None):
         print("  " + "  ".join("─" * w for w in widths))
         for row in footer:
             print(fmt_row(row))
+
+
+def _fmt_metric(value, *, digits: int = 3) -> str:
+    """Format one metric cell.
+
+    ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a low
+    score — printing it as ``-1.000`` invites reading it as a number. Every table
+    that prints a metric goes through here so they render it the same way.
+    """
+    if value is None or value < 0:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def _print_findings(findings, *, tag: str, color, show_ids: bool = True, stream=None) -> None:
+    """Print healthcheck findings, one line each.
+
+    ``show_ids`` adds a follow-up line listing up to 10 affected IDs.
+    """
+    stream = stream if stream is not None else sys.stdout
+    for finding in findings:
+        badge = color(f"{tag:<5} [{finding['code']}]")
+        print(f"{badge} {finding['message']}", file=stream)
+        if show_ids and finding["affected_ids"]:
+            ids = finding["affected_ids"]
+            ids_str = ", ".join(str(i) for i in ids[:10])
+            suffix = f" ... ({len(ids)} total)" if len(ids) > 10 else ""
+            print(f"       IDs: {ids_str}{suffix}", file=stream)
 
 
 def cmd_stats(args):
@@ -101,45 +130,60 @@ def cmd_stats(args):
     print(f"  min={a['min']:.1f}   max={a['max']:.1f}   mean={a['mean']:.1f}   median={a['median']:.1f}")
 
 
-def _load_coco(path):
-    """Load a COCO annotation file, printing errors and exiting on failure."""
+def _maybe_spinner(message: str, quiet: bool):
+    """Spinner unless *quiet* — `--json` runs must not narrate to the terminal."""
+    return contextlib.nullcontext() if quiet else Spinner(message)
+
+
+def _load_coco(path, *, quiet: bool = False, reraise: bool = False):
+    """Load a COCO annotation file, printing errors and exiting on failure.
+
+    ``quiet`` drops the spinner and the status line. ``reraise`` propagates the
+    failure instead of exiting, so ``main()`` can render it as JSON.
+    """
     try:
         from hotcoco import COCO
     except ImportError:
+        if reraise:
+            raise
         error("hotcoco is not installed")
         sys.exit(1)
     try:
-        with Spinner(f"Loading {dim(os.path.basename(path))}..."), Timer() as t:
+        with _maybe_spinner(f"Loading {dim(os.path.basename(path))}...", quiet), Timer() as t:
             coco = COCO(path)
         n_imgs = len(coco.dataset.get("images", []))
         n_anns = len(coco.dataset.get("annotations", []))
-        status(
-            "Loaded", f"{dim(os.path.basename(path))} ({n_imgs:,} images, {n_anns:,} annotations)", elapsed=t.elapsed
-        )
+        if not quiet:
+            status(
+                "Loaded",
+                f"{dim(os.path.basename(path))} ({n_imgs:,} images, {n_anns:,} annotations)",
+                elapsed=t.elapsed,
+            )
         return coco
     except Exception as e:
+        if reraise:
+            raise
         error(f"loading {path}: {e}")
         sys.exit(1)
 
 
-def _load_res(coco, path):
-    """Load detection results, printing errors and exiting on failure."""
+def _load_res(coco, path, *, quiet: bool = False, reraise: bool = False):
+    """Load detection results, printing errors and exiting on failure.
+
+    ``quiet`` and ``reraise`` mean what they do in :func:`_load_coco`.
+    """
     try:
-        with Spinner(f"Loading {dim(os.path.basename(path))}..."), Timer() as t:
+        with _maybe_spinner(f"Loading {dim(os.path.basename(path))}...", quiet), Timer() as t:
             dt = coco.load_res(path)
         n_dets = len(dt.dataset.get("annotations", []))
-        status("Loaded", f"{dim(os.path.basename(path))} ({n_dets:,} detections)", elapsed=t.elapsed)
+        if not quiet:
+            status("Loaded", f"{dim(os.path.basename(path))} ({n_dets:,} detections)", elapsed=t.elapsed)
         return dt
     except Exception as e:
+        if reraise:
+            raise
         error(f"loading detections: {e}")
         sys.exit(1)
-
-
-def _summary(coco, label):
-    """Print a one-line image/annotation count summary."""
-    n_imgs = len(coco.dataset["images"])
-    n_anns = len(coco.dataset["annotations"])
-    print(f"  {label}: {n_imgs:,} images, {n_anns:,} annotations")
 
 
 def cmd_filter(args):
@@ -245,50 +289,20 @@ def cmd_split(args):
 
 def cmd_eval(args):
     try:
-        from hotcoco import COCO, COCOeval
+        from hotcoco import COCOeval
     except ImportError:
         error("hotcoco is not installed")
         sys.exit(1)
 
-    try:
-        with Spinner(f"Loading ground truth {dim(os.path.basename(args.gt))}..."), Timer() as t:
-            gt = COCO(args.gt)
-        n_imgs = len(gt.dataset.get("images", []))
-        n_anns = len(gt.dataset.get("annotations", []))
-        if not args.json:
-            status(
-                "Loaded",
-                f"ground truth {dim(os.path.basename(args.gt))} ({n_imgs:,} images, {n_anns:,} annotations)",
-                elapsed=t.elapsed,
-            )
-    except Exception as e:
-        if args.json:
-            raise
-        error(f"loading ground truth: {e}")
-        sys.exit(1)
-
-    try:
-        with Spinner(f"Loading detections {dim(os.path.basename(args.dt))}..."), Timer() as t:
-            dt = gt.load_res(args.dt)
-        n_dets = len(dt.dataset.get("annotations", []))
-        if not args.json:
-            status("Loaded", f"detections {dim(os.path.basename(args.dt))} ({n_dets:,} results)", elapsed=t.elapsed)
-    except Exception as e:
-        if args.json:
-            raise
-        error(f"loading detections: {e}")
-        sys.exit(1)
+    gt = _load_coco(args.gt, quiet=args.json, reraise=args.json)
+    dt = _load_res(gt, args.dt, quiet=args.json, reraise=args.json)
 
     hc_result = None
     if args.healthcheck:
         hc_result = gt.healthcheck(dt)
         if not args.json:
-            for f in hc_result["errors"]:
-                code = f["code"]
-                print(f" {red('ERROR [' + code + ']')} {f['message']}", file=sys.stderr)
-            for f in hc_result["warnings"]:
-                code = f["code"]
-                print(f" {yellow('WARN  [' + code + ']')} {f['message']}", file=sys.stderr)
+            _print_findings(hc_result["errors"], tag="ERROR", color=red, show_ids=False, stream=sys.stderr)
+            _print_findings(hc_result["warnings"], tag="WARN", color=yellow, show_ids=False, stream=sys.stderr)
             if hc_result["errors"] or hc_result["warnings"]:
                 print(file=sys.stderr)
 
@@ -301,7 +315,7 @@ def cmd_eval(args):
     if args.no_cats:
         ev.params.useCats = False
 
-    with Spinner(f"Evaluating {args.iou_type}..."), Timer() as t:
+    with _maybe_spinner(f"Evaluating {args.iou_type}...", args.json), Timer() as t:
         ev.evaluate()
         ev.accumulate()
     if not args.json:
@@ -333,19 +347,18 @@ def cmd_eval(args):
                 cells = [name, f"{sr['num_images']:,}"]
                 for km in key_metrics:
                     val = sr.get(km, -1.0)
-                    delta = sr.get("delta", {}).get(km, 0.0)
-                    if val < 0:
-                        cells.append("n/a")
-                    else:
+                    cell = _fmt_metric(val)
+                    if val >= 0:
+                        delta = sr.get("delta", {}).get(km, 0.0)
                         sign = "+" if delta >= 0 else ""
-                        cells.append(f"{val:.3f} ({sign}{delta:.3f})")
+                        cell = f"{cell} ({sign}{delta:.3f})"
+                    cells.append(cell)
                 rows.append(cells)
 
             ov = slices_result["_overall"]
             ov_cells = ["_overall", f"{ov['num_images']:,}"]
             for km in key_metrics:
-                val = ov.get(km, -1.0)
-                ov_cells.append("n/a" if val < 0 else f"{val:.3f}")
+                ov_cells.append(_fmt_metric(ov.get(km, -1.0)))
             rows.append(ov_cells)
 
             _table(cols, rows)
@@ -409,6 +422,10 @@ def cmd_eval(args):
 
 
 def _print_tide(te):
+    # Imported here rather than at module scope so the CLI does not pull the
+    # plot package (and numpy) on every invocation.
+    from hotcoco.plot.core import TIDE_ERROR_ORDER
+
     delta = te["delta_ap"]
     counts = te["counts"]
     section(
@@ -417,10 +434,7 @@ def _print_tide(te):
     )
     _table(
         [("Type", "<"), ("ΔAP", ">"), ("Count", ">")],
-        [
-            [et, f"{delta.get(et, 0.0):.4f}", f"{counts.get(et, 0):,}"]
-            for et in ("Loc", "Cls", "Both", "Dupe", "Bkg", "Miss")
-        ],
+        [[et, f"{delta.get(et, 0.0):.4f}", f"{counts.get(et, 0):,}"] for et in TIDE_ERROR_ORDER],
         footer=[["FP", f"{delta.get('FP', 0.0):.4f}", ""], ["FN", f"{delta.get('FN', 0.0):.4f}", ""]],
     )
 
@@ -485,39 +499,81 @@ def _print_diagnostics(diag):
     print(f"\n  {dim('Tip: use ev.image_diagnostics() or coco explore --dt for interactive analysis.')}")
 
 
+# Inbound conversions (X → COCO): display label and the loader to call. Every
+# one of these has the same body — load, save, count, report — so only the parts
+# that actually differ live here.
+_TO_COCO = {
+    "yolo": ("YOLO", lambda COCO, args: COCO.from_yolo(args.input, images_dir=args.images_dir)),
+    "voc": ("VOC", lambda COCO, args: COCO.from_voc(args.input)),
+    "cvat": ("CVAT", lambda COCO, args: COCO.from_cvat(args.input)),
+}
+
+# Outbound conversions (COCO → X): display label, the writer method, how to
+# summarize its stats, whether the input/output paths are echoed, and which
+# stat keys get a detail line when non-zero (prefixes carry their own padding).
+_FROM_COCO = {
+    "yolo": (
+        "YOLO",
+        "to_yolo",
+        lambda s: f"{s['annotations']:,} annotations",
+        True,
+        (("skipped (crowd):   ", "skipped_crowd"), ("skipped (no bbox): ", "missing_bbox")),
+    ),
+    "voc": (
+        "VOC",
+        "to_voc",
+        lambda s: f"{s['annotations']:,} annotations",
+        True,
+        (("crowd → difficult: ", "crowd_as_difficult"), ("skipped (no bbox): ", "missing_bbox")),
+    ),
+    "cvat": (
+        "CVAT",
+        "to_cvat",
+        lambda s: f"{s['boxes']:,} boxes, {s['polygons']:,} polygons",
+        False,
+        (("skipped (no geometry): ", "skipped_no_geometry"),),
+    ),
+}
+
+
 def cmd_convert(args):
     from_fmt = args.from_fmt
     to_fmt = args.to_fmt
 
-    if from_fmt == "coco" and to_fmt == "yolo":
-        coco = _load_coco(args.input)
+    if from_fmt == "coco" and to_fmt in _FROM_COCO:
+        label, method, summarize, show_paths, details = _FROM_COCO[to_fmt]
+
+        coco = _load_coco(args.input, quiet=args.json)
         try:
             with Timer() as t:
-                stats = coco.to_yolo(args.output)
+                stats = getattr(coco, method)(args.output)
         except Exception as e:
             error(str(e))
             sys.exit(1)
 
         if args.json:
-            return {"direction": "coco_to_yolo", "input": args.input, "output": args.output, **stats}
+            return {"direction": f"coco_to_{to_fmt}", "input": args.input, "output": args.output, **stats}
 
-        status("Converted", f"COCO → YOLO ({stats['annotations']:,} annotations)", elapsed=t.elapsed)
-        print(f"  input:       {os.path.basename(args.input)}")
-        print(f"  output dir:  {args.output}")
-        if stats["skipped_crowd"] > 0:
-            print(f"  skipped (crowd):   {stats['skipped_crowd']:,}")
-        if stats["missing_bbox"] > 0:
-            print(f"  skipped (no bbox): {stats['missing_bbox']:,}")
+        status("Converted", f"COCO → {label} ({summarize(stats)})", elapsed=t.elapsed)
+        if show_paths:
+            print(f"  input:       {os.path.basename(args.input)}")
+            print(f"  output dir:  {args.output}")
+        for prefix, key in details:
+            if stats[key] > 0:
+                print(f"  {prefix}{stats[key]:,}")
+        return None
 
-    elif from_fmt == "yolo" and to_fmt == "coco":
+    if to_fmt == "coco" and from_fmt in _TO_COCO:
+        label, load = _TO_COCO[from_fmt]
+
         try:
             from hotcoco import COCO
         except ImportError:
             error("hotcoco is not installed")
             sys.exit(1)
         try:
-            with Spinner("Converting YOLO → COCO..."), Timer() as t:
-                coco = COCO.from_yolo(args.input, images_dir=args.images_dir)
+            with _maybe_spinner(f"Converting {label} → COCO...", args.json), Timer() as t:
+                coco = load(COCO, args)
         except Exception as e:
             error(str(e))
             sys.exit(1)
@@ -526,123 +582,24 @@ def cmd_convert(args):
         except Exception as e:
             error(f"saving {args.output}: {e}")
             sys.exit(1)
+
         n_imgs = len(coco.dataset["images"])
         n_anns = len(coco.dataset["annotations"])
 
         if args.json:
             return {
-                "direction": "yolo_to_coco",
+                "direction": f"{from_fmt}_to_coco",
                 "input": args.input,
                 "output": args.output,
                 "images": n_imgs,
                 "annotations": n_anns,
             }
 
-        status("Converted", f"YOLO → COCO ({n_imgs:,} images, {n_anns:,} annotations)", elapsed=t.elapsed)
+        status("Converted", f"{label} → COCO ({n_imgs:,} images, {n_anns:,} annotations)", elapsed=t.elapsed)
+        return None
 
-    elif from_fmt == "coco" and to_fmt == "voc":
-        coco = _load_coco(args.input)
-        try:
-            with Timer() as t:
-                stats = coco.to_voc(args.output)
-        except Exception as e:
-            error(str(e))
-            sys.exit(1)
-
-        if args.json:
-            return {"direction": "coco_to_voc", "input": args.input, "output": args.output, **stats}
-
-        status("Converted", f"COCO → VOC ({stats['annotations']:,} annotations)", elapsed=t.elapsed)
-        print(f"  input:       {os.path.basename(args.input)}")
-        print(f"  output dir:  {args.output}")
-        if stats["crowd_as_difficult"] > 0:
-            print(f"  crowd → difficult: {stats['crowd_as_difficult']:,}")
-        if stats["missing_bbox"] > 0:
-            print(f"  skipped (no bbox): {stats['missing_bbox']:,}")
-
-    elif from_fmt == "voc" and to_fmt == "coco":
-        try:
-            from hotcoco import COCO
-        except ImportError:
-            error("hotcoco is not installed")
-            sys.exit(1)
-        try:
-            with Spinner("Converting VOC → COCO..."), Timer() as t:
-                coco = COCO.from_voc(args.input)
-        except Exception as e:
-            error(str(e))
-            sys.exit(1)
-        try:
-            coco.save(args.output)
-        except Exception as e:
-            error(f"saving {args.output}: {e}")
-            sys.exit(1)
-        n_imgs = len(coco.dataset["images"])
-        n_anns = len(coco.dataset["annotations"])
-
-        if args.json:
-            return {
-                "direction": "voc_to_coco",
-                "input": args.input,
-                "output": args.output,
-                "images": n_imgs,
-                "annotations": n_anns,
-            }
-
-        status("Converted", f"VOC → COCO ({n_imgs:,} images, {n_anns:,} annotations)", elapsed=t.elapsed)
-
-    elif from_fmt == "coco" and to_fmt == "cvat":
-        coco = _load_coco(args.input)
-        try:
-            with Timer() as t:
-                stats = coco.to_cvat(args.output)
-        except Exception as e:
-            error(str(e))
-            sys.exit(1)
-
-        if args.json:
-            return {"direction": "coco_to_cvat", "input": args.input, "output": args.output, **stats}
-
-        status(
-            "Converted", f"COCO → CVAT ({stats['boxes']:,} boxes, {stats['polygons']:,} polygons)", elapsed=t.elapsed
-        )
-        if stats["skipped_no_geometry"] > 0:
-            print(f"  skipped (no geometry): {stats['skipped_no_geometry']:,}")
-
-    elif from_fmt == "cvat" and to_fmt == "coco":
-        try:
-            from hotcoco import COCO
-        except ImportError:
-            error("hotcoco is not installed")
-            sys.exit(1)
-        try:
-            with Spinner("Converting CVAT → COCO..."), Timer() as t:
-                coco = COCO.from_cvat(args.input)
-        except Exception as e:
-            error(str(e))
-            sys.exit(1)
-        try:
-            coco.save(args.output)
-        except Exception as e:
-            error(f"saving {args.output}: {e}")
-            sys.exit(1)
-        n_imgs = len(coco.dataset["images"])
-        n_anns = len(coco.dataset["annotations"])
-
-        if args.json:
-            return {
-                "direction": "cvat_to_coco",
-                "input": args.input,
-                "output": args.output,
-                "images": n_imgs,
-                "annotations": n_anns,
-            }
-
-        status("Converted", f"CVAT → COCO ({n_imgs:,} images, {n_anns:,} annotations)", elapsed=t.elapsed)
-
-    else:
-        error(f"unsupported conversion: {from_fmt} → {to_fmt}")
-        sys.exit(1)
+    error(f"unsupported conversion: {from_fmt} → {to_fmt}")
+    sys.exit(1)
 
 
 def cmd_healthcheck(args):
@@ -655,21 +612,8 @@ def cmd_healthcheck(args):
     if args.json:
         return report
 
-    for finding in report["errors"]:
-        code = finding["code"]
-        print(f"{red('ERROR [' + code + ']')} {finding['message']}")
-        if finding["affected_ids"]:
-            ids_str = ", ".join(str(i) for i in finding["affected_ids"][:10])
-            suffix = f" ... ({len(finding['affected_ids'])} total)" if len(finding["affected_ids"]) > 10 else ""
-            print(f"       IDs: {ids_str}{suffix}")
-
-    for finding in report["warnings"]:
-        code = finding["code"]
-        print(f"{yellow('WARN  [' + code + ']')} {finding['message']}")
-        if finding["affected_ids"]:
-            ids_str = ", ".join(str(i) for i in finding["affected_ids"][:10])
-            suffix = f" ... ({len(finding['affected_ids'])} total)" if len(finding["affected_ids"]) > 10 else ""
-            print(f"       IDs: {ids_str}{suffix}")
+    _print_findings(report["errors"], tag="ERROR", color=red)
+    _print_findings(report["warnings"], tag="WARN", color=yellow)
 
     s = report["summary"]
     print()
@@ -790,14 +734,14 @@ def cmd_compare(args):
     dt_a = _load_res(gt, args.dt_a)
     dt_b = _load_res(gt, args.dt_b)
 
-    with Spinner(f"Evaluating {args.iou_type}..."), Timer() as t:
+    with _maybe_spinner(f"Evaluating {args.iou_type}...", args.json), Timer() as t:
         ev_a = COCOeval(gt, dt_a, args.iou_type, lvis_style=args.lvis)
         ev_a.evaluate()
         ev_b = COCOeval(gt, dt_b, args.iou_type, lvis_style=args.lvis)
         ev_b.evaluate()
     status("Evaluated", f"both models ({args.iou_type})", elapsed=t.elapsed)
 
-    with Spinner("Comparing models..."), Timer() as t:
+    with _maybe_spinner("Comparing models...", args.json), Timer() as t:
         result = compare(ev_a, ev_b, n_bootstrap=args.bootstrap, seed=args.seed, confidence=args.confidence)
     bootstrap_note = f", {args.bootstrap:,} bootstrap samples" if args.bootstrap else ""
     status("Compared", f"{args.name_a} vs {args.name_b}{bootstrap_note}", elapsed=t.elapsed)
@@ -827,7 +771,7 @@ def cmd_compare(args):
         val_b = result["metrics_b"].get(key, -1.0)
         delta = result["deltas"].get(key, 0.0)
         sign = "+" if delta >= 0 else ""
-        cells = [key, f"{val_a:.3f}", f"{val_b:.3f}", f"{sign}{delta:.3f}"]
+        cells = [key, _fmt_metric(val_a), _fmt_metric(val_b), f"{sign}{delta:.3f}"]
         if has_ci:
             ci = result["ci"].get(key)
             if ci:
@@ -855,16 +799,14 @@ def cmd_compare(args):
             cat_cols = [("Category", "<"), (name_a, ">"), (name_b, ">"), ("Delta", ">")]
             cat_rows = []
             for c in regressions:
-                ap_a = f"{c['ap_a']:.3f}" if c["ap_a"] >= 0 else "n/a"
-                ap_b = f"{c['ap_b']:.3f}" if c["ap_b"] >= 0 else "n/a"
+                ap_a, ap_b = _fmt_metric(c["ap_a"]), _fmt_metric(c["ap_b"])
                 cat_rows.append([c["cat_name"], ap_a, ap_b, f"{c['delta']:+.3f}  {red('↓')}"])
 
             if regressions and improvements:
                 cat_rows.append(["···", "", "", ""])
 
             for c in reversed(improvements):
-                ap_a = f"{c['ap_a']:.3f}" if c["ap_a"] >= 0 else "n/a"
-                ap_b = f"{c['ap_b']:.3f}" if c["ap_b"] >= 0 else "n/a"
+                ap_a, ap_b = _fmt_metric(c["ap_a"]), _fmt_metric(c["ap_b"])
                 cat_rows.append([c["cat_name"], ap_a, ap_b, f"{c['delta']:+.3f}  {green('↑')}"])
 
             _table(cat_cols, cat_rows)
@@ -998,7 +940,12 @@ def main():
         help="save a PDF evaluation report to this path (requires hotcoco[plot])",
     )
     eval_parser.add_argument(
-        "--title", default="COCO Evaluation Report", help="report title (default: 'COCO Evaluation Report')"
+        # None, not a literal: report() derives the title from the eval mode, so
+        # a default here made every LVIS, keypoints, and Open Images PDF claim to
+        # be a "COCO Evaluation Report".
+        "--title",
+        default=None,
+        help="report title (default: derived from eval mode)",
     )
     eval_parser.add_argument(
         "--slices",

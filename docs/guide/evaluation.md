@@ -576,7 +576,7 @@ Every unmatched (non-ignored) ground-truth annotation that has no correctable FP
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `"delta_ap"` | `dict[str, float]` | ΔAP for each error type. Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`, `"FP"` (all FP types combined), `"FN"` (same as `"Miss"`). |
+| `"delta_ap"` | `dict[str, float]` | ΔAP for each error type. Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`, plus tidecv's two special oracles: `"FP"` (suppress every false positive — perfect precision, recall untouched) and `"FN"` (drop every missed ground truth from the denominator — perfect recall, precision untouched; a superset of `"Miss"`). |
 | `"counts"` | `dict[str, int]` | Count of each error type. Keys: `"Cls"`, `"Loc"`, `"Both"`, `"Dupe"`, `"Bkg"`, `"Miss"`. |
 | `"ap_base"` | `float` | Baseline mean AP at `pos_thr`. |
 | `"pos_thr"` | `float` | IoU threshold for TP/FP classification (default `0.5`). |
@@ -732,14 +732,14 @@ ev = COCOeval(coco_gt, coco_dt, "bbox")
 ev.run()
 
 scores = ev.f_scores()
-# {"F1": 0.523, "F150": 0.712, "F175": 0.581}
+# {"F1": 0.523, "F1_50": 0.712, "F1_75": 0.581}
 ```
 
 Use `beta` to shift the precision/recall trade-off:
 
 ```python
-ev.f_scores(beta=0.5)  # precision-weighted  → {"F0.5": ..., "F0.550": ..., "F0.575": ...}
-ev.f_scores(beta=2.0)  # recall-weighted     → {"F2.0": ..., "F2.050": ..., "F2.075": ...}
+ev.f_scores(beta=0.5)  # precision-weighted  → {"F0.5": ..., "F0.5_50": ..., "F0.5_75": ...}
+ev.f_scores(beta=2.0)  # recall-weighted     → {"F2.0": ..., "F2.0_50": ..., "F2.0_75": ...}
 ```
 
 F-scores complement `get_results()` when you care about a specific operating point rather than area-under-curve. A high AP with a low F1 often signals that performance is concentrated at high recall or high precision, not both simultaneously.

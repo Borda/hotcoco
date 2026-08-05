@@ -10,80 +10,45 @@ Usage:
     uv run pytest scripts/fuzz_obb_parity.py -v -x --tb=short
 """
 
-import json
 import math
-import tempfile
-from pathlib import Path
 
 import hypothesis.strategies as st
 import pytest
+from gen_obb_fixtures import shapely_iou as shapely_obb_iou
+from helpers import written_json
 from hypothesis import HealthCheck, given, settings
-from shapely.geometry import Polygon
 
-# ---------------------------------------------------------------------------
-# OBB geometry helpers (pure Python, matching hotcoco::geometry)
-# ---------------------------------------------------------------------------
+# The Shapely oracle — corner math and IoU — is owned by `gen_obb_fixtures.py`,
+# which freezes its values into the Rust test fixture. This file had a second
+# copy of both functions. Two oracles cannot disagree usefully: whichever one
+# drifts, the Rust fixture and this fuzzer would then be checking hotcoco against
+# different definitions of the same number.
+#
+# `shapely_iou` returns None for a degenerate polygon Shapely calls invalid;
+# `obb_strategy` cannot generate one (MIN_SIZE below), but callers below skip on
+# None rather than coercing it to 0.0 and asserting on a fabricated value.
 
-
-def obb_to_corners(cx, cy, w, h, angle):
-    """Convert (cx, cy, w, h, angle) to 4 corner points."""
-    cos_a = math.cos(angle)
-    sin_a = math.sin(angle)
-    hw, hh = w / 2, h / 2
-
-    dx_w = hw * cos_a
-    dy_w = hw * sin_a
-    dx_h = hh * sin_a
-    dy_h = hh * cos_a
-
-    return [
-        (cx - dx_w + dx_h, cy - dy_w - dy_h),
-        (cx + dx_w + dx_h, cy + dy_w - dy_h),
-        (cx + dx_w - dx_h, cy + dy_w + dy_h),
-        (cx - dx_w - dx_h, cy - dy_w + dy_h),
-    ]
-
-
-def shapely_obb_iou(obb_a, obb_b):
-    """Compute IoU between two OBBs using Shapely as reference."""
-    corners_a = obb_to_corners(*obb_a)
-    corners_b = obb_to_corners(*obb_b)
-
-    poly_a = Polygon(corners_a)
-    poly_b = Polygon(corners_b)
-
-    if not poly_a.is_valid or not poly_b.is_valid:
-        return 0.0
-
-    area_a = poly_a.area
-    area_b = poly_b.area
-
-    if area_a <= 0 or area_b <= 0:
-        return 0.0
-
-    intersection = poly_a.intersection(poly_b).area
-    union = area_a + area_b - intersection
-
-    if union <= 0:
-        return 0.0
-
-    return intersection / union
-
+# Side-length bounds for every generated box. Module constants because the
+# docstring quotes them and the module comment above reasons about them — as
+# strategy defaults, nothing kept the three in step, and no caller ever
+# overrode them.
+MIN_SIZE = 10.0
+MAX_SIZE = 500.0
 
 # ---------------------------------------------------------------------------
 # hotcoco evaluation helper
 # ---------------------------------------------------------------------------
 
 
-def hotcoco_eval_obb(obb_gt, obb_dt, score=1.0):
+def hotcoco_eval_obb(obb_gt, obb_dt):
     """Run hotcoco OBB evaluation and return the 12-metric stats vector.
 
-    Creates a minimal dataset with one GT and one DT, both in the "large"
-    area range to avoid area filtering complications.
+    A minimal dataset: one GT and one DT on a 4096x4096 image. The detection
+    scores 1.0 — the only score a single-detection case can meaningfully carry,
+    and no caller ever passed another.
     """
     from hotcoco import COCO, COCOeval
 
-    # Use large OBBs to ensure they're in the "large" area range (>9216 px²)
     gt_area = obb_gt[2] * obb_gt[3]
 
     gt_data = {
@@ -102,17 +67,9 @@ def hotcoco_eval_obb(obb_gt, obb_dt, score=1.0):
         "categories": [{"id": 1, "name": "obj"}],
     }
 
-    dt_data = [{"image_id": 1, "category_id": 1, "obb": list(obb_dt), "score": score}]
+    dt_data = [{"image_id": 1, "category_id": 1, "obb": list(obb_dt), "score": 1.0}]
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(gt_data, f)
-        gt_path = f.name
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(dt_data, f)
-        dt_path = f.name
-
-    try:
+    with written_json(gt_data, dt_data, quiet=True) as (gt_path, dt_path):
         coco_gt = COCO(gt_path)
         coco_dt = coco_gt.load_res(dt_path)
         ev = COCOeval(coco_gt, coco_dt, "obb")
@@ -120,9 +77,6 @@ def hotcoco_eval_obb(obb_gt, obb_dt, score=1.0):
         ev.accumulate()
         ev.summarize()
         return ev.stats
-    finally:
-        Path(gt_path).unlink(missing_ok=True)
-        Path(dt_path).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +85,17 @@ def hotcoco_eval_obb(obb_gt, obb_dt, score=1.0):
 
 
 @st.composite
-def obb_strategy(draw, min_size=10.0, max_size=500.0):
-    """Generate a random OBB as (cx, cy, w, h, angle) with guaranteed large area."""
+def obb_strategy(draw):
+    """Generate a random OBB as (cx, cy, w, h, angle).
+
+    Centres land within +/-500 of the origin and both side lengths in
+    [MIN_SIZE, MAX_SIZE], so the two boxes overlap often enough for the 0.5
+    threshold to be the interesting question.
+    """
     cx = draw(st.floats(min_value=-500, max_value=500, allow_nan=False, allow_infinity=False))
     cy = draw(st.floats(min_value=-500, max_value=500, allow_nan=False, allow_infinity=False))
-    w = draw(st.floats(min_value=min_size, max_value=max_size, allow_nan=False, allow_infinity=False))
-    h = draw(st.floats(min_value=min_size, max_value=max_size, allow_nan=False, allow_infinity=False))
+    w = draw(st.floats(min_value=MIN_SIZE, max_value=MAX_SIZE, allow_nan=False, allow_infinity=False))
+    h = draw(st.floats(min_value=MIN_SIZE, max_value=MAX_SIZE, allow_nan=False, allow_infinity=False))
     angle = draw(st.floats(min_value=-math.pi, max_value=math.pi, allow_nan=False, allow_infinity=False))
     return (cx, cy, w, h, angle)
 
@@ -163,8 +122,9 @@ def test_obb_eval_consistency_with_shapely(obb_a, obb_b):
     """
     iou = shapely_obb_iou(obb_a, obb_b)
 
-    # Only genuinely-on-the-boundary cases are ambiguous now.
-    if abs(iou - 0.5) < 1e-6:
+    # Only genuinely-on-the-boundary cases are ambiguous now. `None` means
+    # Shapely refused the polygon, so there is no reference value to assert on.
+    if iou is None or abs(iou - 0.5) < 1e-6:
         return
 
     stats = hotcoco_eval_obb(obb_a, obb_b)
@@ -204,13 +164,14 @@ def test_obb_eval_consistency_with_shapely(obb_a, obb_b):
 )
 def test_obb_eval_matches_shapely(obb_a, obb_b, should_match_at_50):
     """hotcoco eval results must be consistent with Shapely IoU at the 0.50 threshold."""
-    shapely_iou = shapely_obb_iou(obb_a, obb_b)
+    ref_iou = shapely_obb_iou(obb_a, obb_b)
+    assert ref_iou is not None, f"Test setup error: Shapely rejected {obb_a} / {obb_b}"
     stats = hotcoco_eval_obb(obb_a, obb_b)
     ap50 = stats[1]
 
     if should_match_at_50:
-        assert shapely_iou >= 0.5, f"Test setup error: Shapely IoU = {shapely_iou}"
-        assert ap50 == 1.0, f"Expected AP@50=1.0, got {ap50} (Shapely IoU={shapely_iou})"
+        assert ref_iou >= 0.5, f"Test setup error: Shapely IoU = {ref_iou}"
+        assert ap50 == 1.0, f"Expected AP@50=1.0, got {ap50} (Shapely IoU={ref_iou})"
     else:
-        assert shapely_iou < 0.5, f"Test setup error: Shapely IoU = {shapely_iou}"
-        assert ap50 <= 0.0, f"Expected AP@50=0, got {ap50} (Shapely IoU={shapely_iou})"
+        assert ref_iou < 0.5, f"Test setup error: Shapely IoU = {ref_iou}"
+        assert ap50 <= 0.0, f"Expected AP@50=0, got {ap50} (Shapely IoU={ref_iou})"

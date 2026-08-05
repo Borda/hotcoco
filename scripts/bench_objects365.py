@@ -22,20 +22,20 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
 
 import psutil
+from helpers import DATA_DIR, WORKSPACE
 
-_WORKSPACE = Path(__file__).resolve().parents[1]
-_DATA = _WORKSPACE / "data"
 _BIN_NAME = "coco-eval.exe" if sys.platform == "win32" else "coco-eval"
-RUST_BIN = str(_WORKSPACE / "target/release" / _BIN_NAME)
+RUST_BIN = str(WORKSPACE / "target/release" / _BIN_NAME)
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--gt", default=str(_DATA / "annotations/zhiyuan_objv2_val.json"), help="Path to Objects365 val annotation JSON"
+        "--gt",
+        default=str(DATA_DIR / "annotations/zhiyuan_objv2_val.json"),
+        help="Path to Objects365 val annotation JSON",
     )
     p.add_argument("--max-det", type=int, default=100, help="Max synthesized detections per image (default: 100)")
     p.add_argument("--dt", default=None, help="Pre-generated detections JSON (skip generation if provided)")
@@ -249,7 +249,7 @@ def main():
         dt_file = args.dt
         print(f"Using pre-generated detections: {dt_file}")
     else:
-        dt_path = str(_DATA / f"objects365_val_synth_det_{args.max_det}per.json")
+        dt_path = str(DATA_DIR / f"objects365_val_synth_det_{args.max_det}per.json")
         if os.path.exists(dt_path):
             print(f"Using cached detections: {dt_path}")
             dt_file = dt_path

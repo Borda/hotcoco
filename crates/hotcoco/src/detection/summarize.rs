@@ -4,10 +4,12 @@
 //! is [`super::metrics`]; turning the resulting numbers into printed lines,
 //! result maps, or DTOs is [`super::report`].
 
+use std::collections::{BTreeMap, HashSet};
+
 use crate::params::Params;
 
 use super::EvalMode;
-use super::accumulate::AccumulatedEval;
+use super::accumulate::{AccumulatedEval, EvalGrouping, accumulate_impl};
 use super::catalog::MetricDef;
 use super::mode::FreqGroups;
 
@@ -23,6 +25,79 @@ use super::mode::FreqGroups;
 /// four of them and a category silently reports `-1.0` as a real score.
 pub(super) fn mean_or_missing(sum: f64, count: usize) -> f64 {
     if count == 0 { -1.0 } else { sum / count as f64 }
+}
+
+/// Mean of the values that were actually computed, or the `-1.0` sentinel.
+///
+/// [`mean_or_missing`]'s companion, and the other half of the same convention:
+/// that function owns what an empty mean *is*, this one owns **which values are
+/// allowed into it**. Five sites spelled the pair out by hand — per-category AP,
+/// both branches of `summarize_stat`, the LVIS frequency buckets, and
+/// `report()`'s PR curves — and each was one edit away from averaging a `-1.0`
+/// in as if it were a real score of minus one.
+///
+/// Takes an iterator and folds `(sum, count)` in visit order rather than
+/// collecting: the caller's iteration order *is* the summation order, so the last
+/// bit of every AP is whatever the hand-written loop produced. The filter is
+/// [`metrics::is_computed`](crate::metrics), the crate's one sentinel predicate.
+pub(super) fn mean_of_valid(values: impl Iterator<Item = f64>) -> f64 {
+    let (sum, count) = values
+        .filter(|&v| crate::metrics::is_computed(v))
+        .fold((0.0f64, 0usize), |(s, c), v| (s + v, c + 1));
+    mean_or_missing(sum, count)
+}
+
+/// B minus A, treating a metric missing from either side as no evidence.
+///
+/// The subtraction counterpart of [`mean_or_missing`], and it lives beside it for
+/// the same reason: `-1.0` is "not computed for this configuration", so
+/// subtracting it manufactures a swing of up to 1.0 out of missing data. The
+/// comparison point estimate, its bootstrap CIs, and the per-slice deltas must all
+/// agree on that, which is why it is one function — the slice path had its own
+/// inlined copy, free to drift from the one `compare()` uses.
+#[inline]
+pub(super) fn metric_delta(a: f64, b: f64) -> f64 {
+    if a >= 0.0 && b >= 0.0 { b - a } else { 0.0 }
+}
+
+/// Metric names paired with their values, in catalog order.
+///
+/// `BTreeMap` rather than `HashMap`: these maps are serialized and iterated by
+/// callers, and key order is part of what makes a saved comparison or slice
+/// diffable.
+pub(super) fn stats_to_map(metric_keys: &[&str], stats: &[f64]) -> BTreeMap<String, f64> {
+    metric_keys
+        .iter()
+        .zip(stats.iter())
+        .map(|(&k, &v)| (k.to_string(), v))
+        .collect()
+}
+
+/// Re-accumulate an evaluated `COCOeval` over an image subset and summarize it.
+///
+/// The `accumulate_impl` → `summarize_impl` pair takes six arguments across the
+/// two calls, five of which are fields of the same evaluator; it was spelled out
+/// at every re-summarization site (`compare`, its bootstrap statistic, and both
+/// halves of `slice_by`). One of those forgetting `freq_groups` or passing the
+/// *other* evaluator's params is a wrong number with nothing to catch it.
+///
+/// `img_filter` of `None` means the full dataset. Both halves of the result are
+/// returned because callers need different parts: comparison reads the
+/// accumulated eval for per-category AP, slicing and bootstrapping only the stats.
+///
+/// The evaluator arrives inside the [`EvalGrouping`] rather than beside it: every
+/// caller here re-summarizes the *same* evaluator many times over different image
+/// subsets, the grouping is invariant across those, and pairing it with a
+/// different evaluator's params would be a wrong number with nothing to catch it.
+pub(super) fn accumulate_and_summarize(
+    grouping: &EvalGrouping<'_>,
+    img_filter: Option<&HashSet<u64>>,
+    metrics: &[MetricDef],
+) -> (AccumulatedEval, Vec<f64>) {
+    let ev = grouping.eval();
+    let acc = accumulate_impl(grouping, img_filter);
+    let stats = summarize_impl(&acc, &ev.params, ev.eval_mode, ev.freq_groups(), metrics);
+    (acc, stats)
 }
 
 /// The AP samples for one `(t, k, a, m)` cell, `-1.0` sentinels already dropped.
@@ -55,7 +130,7 @@ fn ap_samples(
                 eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
             }
         })
-        .filter(|&v| v >= 0.0)
+        .filter(|&v| crate::metrics::is_computed(v))
 }
 
 pub(super) fn per_cat_ap_static(
@@ -64,13 +139,18 @@ pub(super) fn per_cat_ap_static(
     eval_mode: EvalMode,
 ) -> Vec<f64> {
     let a_idx = params.all_area_idx();
-    let m_idx = eval.shape.m - 1;
+    // `max_det_idx`, not `shape.m - 1`. The two agree on the sorted default
+    // `[1, 10, 100]` and diverge on anything else, and this vector feeds
+    // per-class AP in `report()`, `get_results(per_class = true)` and
+    // `compare()` — so `max_dets = [100, 10, 1]` reported every class at
+    // `max_det = 1` beside a headline `AP` computed at 100.
+    let m_idx = params.max_det_idx();
     (0..eval.shape.k)
         .map(|k_idx| {
-            let (sum, count) = (0..eval.shape.t)
-                .flat_map(|t_idx| ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx))
-                .fold((0.0, 0usize), |(s, c), v| (s + v, c + 1));
-            mean_or_missing(sum, count)
+            mean_of_valid(
+                (0..eval.shape.t)
+                    .flat_map(|t_idx| ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx)),
+            )
         })
         .collect()
 }
@@ -103,50 +183,50 @@ pub(super) fn summarize_impl(
             (0..eval.shape.t).collect()
         };
 
-        let mut vals = Vec::with_capacity(t_indices.len() * eval.shape.k * eval.shape.r);
-        for &t_idx in &t_indices {
-            for k_idx in 0..eval.shape.k {
-                if ap {
-                    vals.extend(ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx));
-                } else {
-                    let idx = eval.recall_idx(t_idx, k_idx, a_idx, m_idx);
-                    let v = eval.recall[idx];
-                    if v >= 0.0 {
-                        vals.push(v);
-                    }
-                }
-            }
+        // Folded rather than collected, in the same (t, k, r) visit order the Vec
+        // was filled and summed in — so the addition sequence, and therefore the
+        // last bit of every AP, is unchanged. The Vec held up to T×K×R f64
+        // (~646 KB on COCO) purely to take its mean, twice per bootstrap resample.
+        //
+        // The two branches are separate iterators rather than one loop with an
+        // `if` inside, because the AP branch yields R samples per (t, k) cell and
+        // the AR branch yields one. Both visit (t, k) in the same order the loop
+        // did.
+        if ap {
+            mean_of_valid(t_indices.iter().flat_map(|&t_idx| {
+                (0..eval.shape.k)
+                    .flat_map(move |k_idx| ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx))
+            }))
+        } else {
+            mean_of_valid(t_indices.iter().flat_map(|&t_idx| {
+                (0..eval.shape.k)
+                    .map(move |k_idx| eval.recall[eval.recall_idx(t_idx, k_idx, a_idx, m_idx)])
+            }))
         }
-
-        mean_or_missing(vals.iter().sum(), vals.len())
     };
 
-    let per_cat_ap = if eval_mode == EvalMode::Lvis || eval_mode == EvalMode::OpenImages {
-        Some(per_cat_ap_static(eval, params, eval_mode))
+    // LVIS only. Open Images computed this vector and threw it away — its single
+    // metric has no frequency group — and the `unwrap_or(&[])` fallback below
+    // then indexed an empty slice, so any future mode with a frequency metric and
+    // no per-category AP would have panicked rather than degraded.
+    let per_cat_ap: Vec<f64> = if eval_mode == EvalMode::Lvis {
+        per_cat_ap_static(eval, params, eval_mode)
     } else {
-        None
-    };
-
-    let freq_group_ap = |indices: &[usize]| -> f64 {
-        let per_cat = per_cat_ap.as_deref().unwrap_or(&[]);
-        let valid: Vec<f64> = indices
-            .iter()
-            .filter_map(|&k| {
-                let v = per_cat[k];
-                if v >= 0.0 { Some(v) } else { None }
-            })
-            .collect();
-        mean_or_missing(valid.iter().sum(), valid.len())
+        Vec::new()
     };
 
     metrics
         .iter()
-        .map(|m| {
-            if let Some(fg) = m.freq_group {
-                freq_group_ap(freq_groups.get(fg))
-            } else {
-                summarize_stat(m.ap, m.iou_thr, m.area_lbl, m.max_det)
-            }
+        .map(|m| match m.freq_group {
+            // Same `(sum, count)` fold as `summarize_stat`, over the categories
+            // in this frequency bucket.
+            Some(fg) => mean_of_valid(
+                freq_groups
+                    .get(fg)
+                    .iter()
+                    .filter_map(|&k| per_cat_ap.get(k).copied()),
+            ),
+            None => summarize_stat(m.ap, m.iou_thr, m.area_lbl, m.max_det),
         })
         .collect()
 }

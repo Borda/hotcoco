@@ -1,4 +1,5 @@
 use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Image, Rle, Segmentation};
+use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
@@ -400,6 +401,108 @@ pub fn calibration_bin_to_py<'py>(
     d.set_item("avg_accuracy", bin.avg_accuracy)?;
     d.set_item("count", bin.count)?;
     Ok(d)
+}
+
+/// A flat `(side, side)` block of confusion counts as a numpy `uint64` array.
+///
+/// Shared by `COCOeval.confusion_matrix()` and `metrics.confusion_matrix()`.
+/// Both marshal the same `(K+1)²` flat `Vec<u64>` from
+/// `metrics::confusion`, and each reshaped it its own way: the `metrics`
+/// function used a typed `reshape`, while the `COCOeval` method first cast
+/// every count to `i64` and reshaped through `call_method1("reshape", ...)`.
+/// So the same counts reached Python as `int64` from one entry point and
+/// `uint64` from the other — a difference a caller hits when concatenating
+/// the two, or comparing dtypes. `uint64` is the counts' natural type and now
+/// the only one; **the `COCOeval.confusion_matrix()` site previously emitted
+/// `int64`**.
+pub fn confusion_counts_to_py(
+    py: Python<'_>,
+    counts: Vec<u64>,
+    side: usize,
+) -> PyResult<Py<PyAny>> {
+    let arr = PyArray1::from_vec(py, counts);
+    Ok(arr.reshape([side, side])?.into_any().unbind())
+}
+
+/// A flat `Vec<f64>` as a numpy `float64` array of the given shape.
+///
+/// The typed counterpart to [`confusion_counts_to_py`], for the sites that
+/// reshape a flat float buffer. Those went through
+/// `call_method1("reshape", ((a, b),))`, which builds a tuple, looks the method
+/// up by name, and returns an untyped `PyAny` — so a dimension mismatch
+/// surfaced as a Python `ValueError` from numpy rather than a typed error, and
+/// nothing in the signature said the result was an array at all.
+/// `PyArray1::reshape` takes the dims as a Rust array and keeps the numpy type
+/// through the call. Generic over the shape rather than the rank, so `[k, k]`,
+/// `[t, k, a, m]` and `[t, r, k, a, m]` all use the same helper.
+pub fn f64_array<D: numpy::ndarray::IntoDimension>(
+    py: Python<'_>,
+    values: Vec<f64>,
+    dims: D,
+) -> PyResult<Py<PyAny>> {
+    let arr = PyArray1::from_vec(py, values);
+    Ok(arr.reshape(dims)?.into_any().unbind())
+}
+
+/// A key-value map as a Python dict.
+///
+/// Eight sites hand-rolled the same three lines — `PyDict::new`, a `for` over a
+/// `BTreeMap`, `set_item` — across `get_results`, `f_scores`, `tide_errors`
+/// (twice), `calibration`, `slice_by` (twice) and `compare` (which had grown a
+/// local closure for its own three uses). Generic over key and value so the
+/// `f64` maps and the `u64` count maps share one implementation.
+///
+/// Iteration order is the caller's: every current caller passes a `BTreeMap`,
+/// so the dict comes out key-ordered and byte-stable without sorting here.
+pub fn map_to_dict<'py, K, V>(
+    py: Python<'py>,
+    entries: impl IntoIterator<Item = (K, V)>,
+) -> PyResult<Bound<'py, PyDict>>
+where
+    K: IntoPyObject<'py>,
+    V: IntoPyObject<'py>,
+{
+    let d = PyDict::new(py);
+    for (k, v) in entries {
+        d.set_item(k, v)?;
+    }
+    Ok(d)
+}
+
+/// A 1-D float argument: numpy `float64` in one copy, anything else via the
+/// list path.
+///
+/// The metrics docstrings advertise "lists or numpy arrays", but PyO3's
+/// `Vec<f64>` fast path fires only for list/tuple — a numpy array fell through
+/// to per-element iteration, one boxed `extract` per element (~500K calls per
+/// argument on a full val2017 run). `PyReadonlyArray1` is a dtype check plus a
+/// memcpy; `to_vec` goes through ndarray, so strided views (`scores[::2]`)
+/// copy correctly instead of being rejected. Other dtypes (`float32`, object
+/// arrays) still work through the fallback at the old per-element cost.
+pub fn f64_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<f64>> {
+    if let Ok(arr) = obj.extract::<numpy::PyReadonlyArray1<f64>>() {
+        return Ok(arr.as_array().to_vec());
+    }
+    obj.extract::<Vec<f64>>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "{name} must be a sequence of floats or a 1-D numpy array"
+        ))
+    })
+}
+
+/// A 1-D bool argument — see [`f64_vec`]. The fast path matters even more
+/// here: under abi3, extracting one `numpy.bool_` costs a Python-level
+/// `__bool__` call, so a `matched` array was the most expensive argument a
+/// caller could pass.
+pub fn bool_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<bool>> {
+    if let Ok(arr) = obj.extract::<numpy::PyReadonlyArray1<bool>>() {
+        return Ok(arr.as_array().to_vec());
+    }
+    obj.extract::<Vec<bool>>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "{name} must be a sequence of bools or a 1-D numpy bool array"
+        ))
+    })
 }
 
 /// Reject parallel arrays of differing length.
