@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.0.0] - 2026-08-06
+
+### Added
+
 - **`hotcoco.metrics` now reads numpy arrays natively.** The module docstring
   always said "lists or numpy arrays", but the bindings put numpy on the slow
   path: PyO3's list fast path doesn't fire for ndarrays, so every element of a
