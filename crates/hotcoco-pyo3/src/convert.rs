@@ -296,8 +296,13 @@ pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
 pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
     let id: u64 = req!(dict, "id");
     let file_name: String = opt!(dict, "file_name").unwrap_or_default();
-    let height: u32 = req!(dict, "height");
-    let width: u32 = req!(dict, "width");
+    // Default rather than require: pycocotools' assignment flow (`coco.dataset
+    // = d; coco.createIndex()`) builds images as bare `{"id": …}` — that is
+    // what torchmetrics' pycocotools backend passes. Dimensions are only
+    // consumed by mask operations, which pycocotools equally cannot perform
+    // without them.
+    let height: u32 = opt!(dict, "height").unwrap_or_default();
+    let width: u32 = opt!(dict, "width").unwrap_or_default();
     let license: Option<u64> = opt!(dict, "license");
     let coco_url: Option<String> = opt!(dict, "coco_url");
     let flickr_url: Option<String> = opt!(dict, "flickr_url");
@@ -503,6 +508,44 @@ pub fn bool_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<bool>> {
             "{name} must be a sequence of bools or a 1-D numpy bool array"
         ))
     })
+}
+
+/// An id-list argument read the way pycocotools' `_isArrayLike` reads it: a
+/// bare int or any sequence of ints. torchvision's `CocoDetection` calls
+/// `coco.getAnnIds(img_id)` with a scalar — found by the 1.0
+/// third-party-consumer smoke test. One extractor shared by every query/load
+/// method and its camelCase twin, so the two surfaces cannot disagree.
+#[derive(Default)]
+pub struct IdList(pub Vec<u64>);
+
+impl FromPyObject<'_, '_> for IdList {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        if let Ok(one) = obj.extract::<u64>() {
+            return Ok(IdList(vec![one]));
+        }
+        Ok(IdList(obj.extract()?))
+    }
+}
+
+/// A name-list argument — see [`IdList`]. The scalar check must come first:
+/// a bare `str` is iterable, so the sequence path would split `"person"`
+/// into characters. (pycocotools itself has that trap — `_isArrayLike`
+/// accepts strings — so accepting the scalar here is strictly kinder than
+/// the original.)
+#[derive(Default)]
+pub struct NameList(pub Vec<String>);
+
+impl FromPyObject<'_, '_> for NameList {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        if let Ok(one) = obj.extract::<String>() {
+            return Ok(NameList(vec![one]));
+        }
+        Ok(NameList(obj.extract()?))
+    }
 }
 
 /// Reject parallel arrays of differing length.

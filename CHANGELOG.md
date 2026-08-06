@@ -687,6 +687,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was missing or a key renamed, printing "ALL METRICS PASS" having checked nothing;
   the baseline is now mandatory and a missing per-type key is a scored failure.
 
+- **Five drop-in gaps found by the 1.0 third-party-consumer smoke test** —
+  running torchvision's `CocoDetection` and torchmetrics'
+  `MeanAveragePrecision(backend="pycocotools")` through `init_as_pycocotools()`:
+
+  - The `import pycocotools.coco as pc` binding form failed — it binds via
+    `getattr` on the parent, not `sys.modules`, so the module patch alone only
+    covered `from pycocotools.coco import COCO`. The patch functions now also
+    set the submodule names as attributes.
+  - Scalar ids were rejected: `coco.getAnnIds(img_id)` with a bare int is how
+    torchvision calls it. Every query/load method (and its camelCase twin) now
+    accepts a scalar or a sequence, matching pycocotools' `_isArrayLike` —
+    including `get_cat_ids("person")`, which pycocotools itself gets wrong by
+    iterating the string.
+  - `coco.dataset` was read-only, breaking pycocotools' in-memory construction
+    flow `COCO(); coco.dataset = d; coco.createIndex()` — torchmetrics uses it
+    verbatim, with image entries carrying only an `id`. The property is now
+    writable (indexing eagerly on assignment), `createIndex()` exists as a
+    re-index, and images without `width`/`height` are accepted at this boundary.
+  - `COCOeval(cocoGt=…, cocoDt=…, iouType=…)` — pycocotools' constructor
+    keyword spellings, which torchmetrics passes — were rejected. Both
+    spellings are now accepted; mixing the two spellings of one argument is an
+    error.
+  - The camelCase aliases exposed snake_case *keyword* names, so Detectron2's
+    canonical `getAnnIds(imgIds=…)` failed — while the type stubs had always
+    advertised the camel spellings. The aliases now carry pycocotools'
+    parameter names (`imgIds`, `catIds`, `areaRng`, `catNms`, `supNms`).
+
+  With all five fixed, torchmetrics computes bit-identical mAP through real
+  pycocotools and through hotcoco (worst metric diff 0.0), and torchvision
+  loads val2017 through the patched `COCO` unchanged. Regression tests cover
+  each gap without the torch dependency.
+
 ### Removed
 
 - **Five pre-1.0 Rust *module* paths, with no compatibility aliases.** `cargo-semver-checks`

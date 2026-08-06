@@ -69,7 +69,12 @@ print(coco.image_dir)  # "/data/coco/images"
 
 ### `dataset`
 
-The full dataset with `images`, `annotations`, and `categories`.
+The full dataset with `images`, `annotations`, and `categories`. Writable in
+Python: assigning a dataset dict replaces the contents and rebuilds the index,
+which is how pycocotools consumers construct in-memory datasets
+(`coco = COCO(); coco.dataset = d; coco.createIndex()` — `createIndex()`
+re-indexes, and is a formality after assignment since the setter already
+indexed).
 
 === "Python"
 
@@ -99,8 +104,8 @@ Get annotation IDs matching the given filters. All filters are ANDed together.
 
     ```python
     get_ann_ids(
-        img_ids: list[int] = [],
-        cat_ids: list[int] = [],
+        img_ids: int | list[int] = [],
+        cat_ids: int | list[int] = [],
         area_rng: list[float] | None = None,
         iscrowd: bool | None = None,
     ) -> list[int]
@@ -108,17 +113,22 @@ Get annotation IDs matching the given filters. All filters are ANDed together.
 
     | Parameter | Type | Default | Description |
     |-----------|------|---------|-------------|
-    | `img_ids` | `list[int]` | `[]` | Filter by image IDs (empty = all) |
-    | `cat_ids` | `list[int]` | `[]` | Filter by category IDs (empty = all) |
+    | `img_ids` | <code>int &#124; list[int]</code> | `[]` | Filter by image IDs (empty = all) |
+    | `cat_ids` | <code>int &#124; list[int]</code> | `[]` | Filter by category IDs (empty = all) |
     | `area_rng` | <code>list[float] &#124; None</code> | `None` | Filter by area range `[min, max]` |
     | `iscrowd` | <code>bool &#124; None</code> | `None` | Filter by crowd flag |
 
     ```python
     ann_ids = coco.get_ann_ids(img_ids=[42], cat_ids=[1])
+    ann_ids = coco.get_ann_ids(42)   # a bare id works, as in pycocotools
     ```
 
     !!! note "camelCase alias"
-        Also available as `getAnnIds()`.
+        Also available as `getAnnIds()`, with pycocotools' keyword spellings —
+        `getAnnIds(imgIds=…, catIds=…, areaRng=…)`. The other query and load
+        methods (`get_img_ids`, `get_cat_ids`, `load_anns`, `load_imgs`,
+        `load_cats`) accept bare scalars and the camelCase keyword forms the
+        same way.
 
 === "Rust"
 

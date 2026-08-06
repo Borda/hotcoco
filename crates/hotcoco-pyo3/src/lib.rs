@@ -56,8 +56,9 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 }
 
 use convert::{
-    annotation_to_py, category_to_py, confusion_counts_to_py, dataset_stats_to_py, f64_array,
-    image_to_py, map_to_dict, py_to_annotation, py_to_dataset, rle_to_py,
+    IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
+    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_dataset,
+    rle_to_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -120,37 +121,33 @@ impl PyCOCO {
         Ok(PyCOCO { inner, image_dir })
     }
 
-    #[pyo3(signature = (img_ids=vec![], cat_ids=vec![], area_rng=None, iscrowd=None))]
+    #[pyo3(signature = (img_ids=IdList::default(), cat_ids=IdList::default(), area_rng=None, iscrowd=None))]
     fn get_ann_ids(
         &self,
-        img_ids: Vec<u64>,
-        cat_ids: Vec<u64>,
+        img_ids: IdList,
+        cat_ids: IdList,
         area_rng: Option<[f64; 2]>,
         iscrowd: Option<bool>,
     ) -> Vec<u64> {
         self.inner
-            .get_ann_ids(&img_ids, &cat_ids, area_rng, iscrowd)
+            .get_ann_ids(&img_ids.0, &cat_ids.0, area_rng, iscrowd)
     }
 
-    #[pyo3(signature = (cat_nms=vec![], sup_nms=vec![], cat_ids=vec![]))]
-    fn get_cat_ids(
-        &self,
-        cat_nms: Vec<String>,
-        sup_nms: Vec<String>,
-        cat_ids: Vec<u64>,
-    ) -> Vec<u64> {
-        let cat_nms_ref: Vec<&str> = cat_nms.iter().map(String::as_str).collect();
-        let sup_nms_ref: Vec<&str> = sup_nms.iter().map(String::as_str).collect();
-        self.inner.get_cat_ids(&cat_nms_ref, &sup_nms_ref, &cat_ids)
+    #[pyo3(signature = (cat_nms=NameList::default(), sup_nms=NameList::default(), cat_ids=IdList::default()))]
+    fn get_cat_ids(&self, cat_nms: NameList, sup_nms: NameList, cat_ids: IdList) -> Vec<u64> {
+        let cat_nms_ref: Vec<&str> = cat_nms.0.iter().map(String::as_str).collect();
+        let sup_nms_ref: Vec<&str> = sup_nms.0.iter().map(String::as_str).collect();
+        self.inner
+            .get_cat_ids(&cat_nms_ref, &sup_nms_ref, &cat_ids.0)
     }
 
-    #[pyo3(signature = (img_ids=vec![], cat_ids=vec![]))]
-    fn get_img_ids(&self, img_ids: Vec<u64>, cat_ids: Vec<u64>) -> Vec<u64> {
-        self.inner.get_img_ids(&img_ids, &cat_ids)
+    #[pyo3(signature = (img_ids=IdList::default(), cat_ids=IdList::default()))]
+    fn get_img_ids(&self, img_ids: IdList, cat_ids: IdList) -> Vec<u64> {
+        self.inner.get_img_ids(&img_ids.0, &cat_ids.0)
     }
 
-    fn load_anns(&self, py: Python<'_>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
-        let anns = self.inner.load_anns(&ids);
+    fn load_anns(&self, py: Python<'_>, ids: IdList) -> PyResult<Py<PyAny>> {
+        let anns = self.inner.load_anns(&ids.0);
         let list = PyList::new(
             py,
             anns.iter()
@@ -160,8 +157,8 @@ impl PyCOCO {
         Ok(list.into_any().unbind())
     }
 
-    fn load_cats(&self, py: Python<'_>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
-        let cats = self.inner.load_cats(&ids);
+    fn load_cats(&self, py: Python<'_>, ids: IdList) -> PyResult<Py<PyAny>> {
+        let cats = self.inner.load_cats(&ids.0);
         let list = PyList::new(
             py,
             cats.iter()
@@ -171,8 +168,8 @@ impl PyCOCO {
         Ok(list.into_any().unbind())
     }
 
-    fn load_imgs(&self, py: Python<'_>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
-        let imgs = self.inner.load_imgs(&ids);
+    fn load_imgs(&self, py: Python<'_>, ids: IdList) -> PyResult<Py<PyAny>> {
+        let imgs = self.inner.load_imgs(&ids.0);
         let list = PyList::new(
             py,
             imgs.iter()
@@ -437,48 +434,51 @@ impl PyCOCO {
         Ok(())
     }
 
-    // camelCase aliases for pycocotools compatibility
+    // camelCase aliases for pycocotools compatibility. The *parameter* names
+    // are camelCase too — `getAnnIds(imgIds=…)` is pycocotools' canonical
+    // keyword form (Detectron2 spells it that way), and PyO3 exposes Rust
+    // parameter names as Python keywords, so these aliases must spell them
+    // the way pycocotools does. non_snake_case is a rustc style lint, not a
+    // clippy correctness one; the allow is scoped to exactly these aliases.
+    #[allow(non_snake_case)]
     #[pyo3(name = "getAnnIds")]
-    #[pyo3(signature = (img_ids=vec![], cat_ids=vec![], area_rng=None, iscrowd=None))]
+    #[pyo3(signature = (imgIds=IdList::default(), catIds=IdList::default(), areaRng=None, iscrowd=None))]
     fn get_ann_ids_camel(
         &self,
-        img_ids: Vec<u64>,
-        cat_ids: Vec<u64>,
-        area_rng: Option<[f64; 2]>,
+        imgIds: IdList,
+        catIds: IdList,
+        areaRng: Option<[f64; 2]>,
         iscrowd: Option<bool>,
     ) -> Vec<u64> {
-        self.get_ann_ids(img_ids, cat_ids, area_rng, iscrowd)
+        self.get_ann_ids(imgIds, catIds, areaRng, iscrowd)
     }
 
+    #[allow(non_snake_case)]
     #[pyo3(name = "getCatIds")]
-    #[pyo3(signature = (cat_nms=vec![], sup_nms=vec![], cat_ids=vec![]))]
-    fn get_cat_ids_camel(
-        &self,
-        cat_nms: Vec<String>,
-        sup_nms: Vec<String>,
-        cat_ids: Vec<u64>,
-    ) -> Vec<u64> {
-        self.get_cat_ids(cat_nms, sup_nms, cat_ids)
+    #[pyo3(signature = (catNms=NameList::default(), supNms=NameList::default(), catIds=IdList::default()))]
+    fn get_cat_ids_camel(&self, catNms: NameList, supNms: NameList, catIds: IdList) -> Vec<u64> {
+        self.get_cat_ids(catNms, supNms, catIds)
     }
 
+    #[allow(non_snake_case)]
     #[pyo3(name = "getImgIds")]
-    #[pyo3(signature = (img_ids=vec![], cat_ids=vec![]))]
-    fn get_img_ids_camel(&self, img_ids: Vec<u64>, cat_ids: Vec<u64>) -> Vec<u64> {
-        self.get_img_ids(img_ids, cat_ids)
+    #[pyo3(signature = (imgIds=IdList::default(), catIds=IdList::default()))]
+    fn get_img_ids_camel(&self, imgIds: IdList, catIds: IdList) -> Vec<u64> {
+        self.get_img_ids(imgIds, catIds)
     }
 
     #[pyo3(name = "loadAnns")]
-    fn load_anns_camel(&self, py: Python<'_>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
+    fn load_anns_camel(&self, py: Python<'_>, ids: IdList) -> PyResult<Py<PyAny>> {
         self.load_anns(py, ids)
     }
 
     #[pyo3(name = "loadCats")]
-    fn load_cats_camel(&self, py: Python<'_>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
+    fn load_cats_camel(&self, py: Python<'_>, ids: IdList) -> PyResult<Py<PyAny>> {
         self.load_cats(py, ids)
     }
 
     #[pyo3(name = "loadImgs")]
-    fn load_imgs_camel(&self, py: Python<'_>, ids: Vec<u64>) -> PyResult<Py<PyAny>> {
+    fn load_imgs_camel(&self, py: Python<'_>, ids: IdList) -> PyResult<Py<PyAny>> {
         self.load_imgs(py, ids)
     }
 
@@ -809,6 +809,30 @@ impl PyCOCO {
     #[pyo3(name = "fromCvat")]
     fn from_cvat_camel(cls: &Bound<'_, PyType>, cvat_path: &str) -> PyResult<PyCOCO> {
         Self::from_cvat(cls, cvat_path)
+    }
+
+    /// pycocotools builds COCO objects by assignment — `coco = COCO();
+    /// coco.dataset = d; coco.createIndex()` — and torchmetrics' pycocotools
+    /// backend uses exactly that flow, so `dataset` must be writable for the
+    /// drop-in claim to hold. hotcoco indexes eagerly on assignment, which
+    /// makes the follow-up `createIndex()` a no-op.
+    #[setter]
+    fn set_dataset(&mut self, dataset: &Bound<'_, PyDict>) -> PyResult<()> {
+        self.inner = hotcoco_core::COCO::from_dataset(py_to_dataset(dataset)?);
+        Ok(())
+    }
+
+    /// Re-index the current dataset — pycocotools semantics. Under the
+    /// assignment flow the `dataset` setter has already indexed, so this is
+    /// a formality kept for the canonical `coco.dataset = d;
+    /// coco.createIndex()` sequence.
+    fn create_index(&mut self) {
+        self.inner = hotcoco_core::COCO::from_dataset(self.inner.dataset.clone());
+    }
+
+    #[pyo3(name = "createIndex")]
+    fn create_index_camel(&mut self) {
+        self.create_index();
     }
 
     #[getter]
@@ -1291,22 +1315,65 @@ impl PyCOCOeval {
 #[pymethods]
 impl PyCOCOeval {
     #[new]
-    #[pyo3(signature = (coco_gt, coco_dt, iou_type, lvis_style=false, oid_style=false, hierarchy=None))]
+    #[pyo3(signature = (coco_gt=None, coco_dt=None, iou_type=None, lvis_style=false, oid_style=false, hierarchy=None, **kwargs))]
     fn new(
-        coco_gt: &PyCOCO,
-        coco_dt: &PyCOCO,
-        iou_type: &str,
+        coco_gt: Option<PyRef<'_, PyCOCO>>,
+        coco_dt: Option<PyRef<'_, PyCOCO>>,
+        iou_type: Option<String>,
         lvis_style: bool,
         oid_style: bool,
         hierarchy: Option<&PyHierarchy>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        // pycocotools spells the constructor keywords `cocoGt` / `cocoDt` /
+        // `iouType`, and consumers pass them that way — torchmetrics' backend
+        // calls `COCOeval(gt, dt, iouType=...)`; found by the 1.0
+        // third-party-consumer smoke test. Accept either spelling, reject
+        // anything else.
+        let mut coco_gt = coco_gt;
+        let mut coco_dt = coco_dt;
+        let mut iou_type = iou_type;
+        if let Some(kw) = kwargs {
+            for (key, value) in kw.iter() {
+                let key: String = key.extract()?;
+                match key.as_str() {
+                    "cocoGt" if coco_gt.is_none() => coco_gt = Some(value.extract()?),
+                    "cocoDt" if coco_dt.is_none() => coco_dt = Some(value.extract()?),
+                    "iouType" if iou_type.is_none() => iou_type = Some(value.extract()?),
+                    "cocoGt" | "cocoDt" | "iouType" => {
+                        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                            "COCOeval() got '{key}' and its snake_case form — pass one"
+                        )));
+                    }
+                    _ => {
+                        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                            "COCOeval() got an unexpected keyword argument '{key}'"
+                        )));
+                    }
+                }
+            }
+        }
+        let (coco_gt, coco_dt) = match (coco_gt, coco_dt) {
+            (Some(gt), Some(dt)) => (gt, dt),
+            _ => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "COCOeval() requires ground truth and detections (coco_gt/cocoGt, coco_dt/cocoDt)",
+                ));
+            }
+        };
+        let iou_type = iou_type.ok_or_else(|| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "COCOeval() requires iou_type (or pycocotools' iouType)",
+            )
+        })?;
+
         if oid_style && lvis_style {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "Cannot use both oid_style and lvis_style",
             ));
         }
 
-        let iou = parse_iou_type(iou_type)?;
+        let iou = parse_iou_type(&iou_type)?;
         let gt = hotcoco_core::COCO::from_dataset(coco_gt.inner.dataset.clone());
         let dt = hotcoco_core::COCO::from_dataset(coco_dt.inner.dataset.clone());
 
@@ -2299,6 +2366,12 @@ fn accumulated_eval_to_py(
 
 /// Patch `sys.modules` so that `from pycocotools.coco import COCO` etc.
 /// transparently use hotcoco.
+///
+/// The submodule names are also set as *attributes* on the hotcoco module:
+/// `import pycocotools.coco as pc` binds via `getattr(pycocotools, "coco")`,
+/// not `sys.modules["pycocotools.coco"]`, so the sys.modules entries alone
+/// cover the `from pycocotools.coco import COCO` form but not the `import
+/// … as` form. (`mask` is already a real attribute.)
 #[pyfunction]
 fn init_as_pycocotools(py: Python<'_>) -> PyResult<()> {
     let sys = py.import("sys")?;
@@ -2309,6 +2382,8 @@ fn init_as_pycocotools(py: Python<'_>) -> PyResult<()> {
     modules.set_item("pycocotools.coco", &hotcoco)?;
     modules.set_item("pycocotools.cocoeval", &hotcoco)?;
     modules.set_item("pycocotools.mask", &mask_mod)?;
+    hotcoco.setattr("coco", &hotcoco)?;
+    hotcoco.setattr("cocoeval", &hotcoco)?;
     Ok(())
 }
 
@@ -2336,6 +2411,11 @@ fn init_as_lvis(py: Python<'_>) -> PyResult<()> {
     modules.set_item("lvis.eval", &hotcoco)?;
     modules.set_item("lvis.coco", &hotcoco)?;
     modules.set_item("lvis.results", &hotcoco)?;
+    // Attribute aliases for the `import lvis.eval as …` binding form — see
+    // init_as_pycocotools.
+    hotcoco.setattr("coco", &hotcoco)?;
+    hotcoco.setattr("eval", &hotcoco)?;
+    hotcoco.setattr("results", &hotcoco)?;
     Ok(())
 }
 

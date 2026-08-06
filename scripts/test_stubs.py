@@ -326,3 +326,121 @@ def test_lvis_dropin_matches_lvis_api_spelling():
     assert LVISEval is hotcoco.LVISeval
     assert LVIS is hotcoco.COCO
     assert LVISResults is hotcoco.LVISResults
+
+
+def test_dropin_supports_the_import_as_binding_form():
+    """`import pycocotools.coco as pc` must work, not only `from … import`.
+
+    The `import a.b as x` form binds via `getattr(a, "b")`, not
+    `sys.modules["a.b"]`, so the sys.modules patch alone leaves it broken —
+    found by the 1.0 third-party-consumer smoke test. The patch functions now
+    also set the submodule names as attributes on the hotcoco module.
+
+    The patch is undone on exit: unlike `lvis`, `pycocotools` is really
+    installed in this venv, and the differential-parity tests in this same
+    pytest process must keep importing the real one.
+    """
+    import sys
+
+    import hotcoco
+
+    saved = {name: sys.modules.get(name) for name in list(sys.modules) if name.split(".")[0] in ("pycocotools", "lvis")}
+    try:
+        hotcoco.init_as_pycocotools()
+        import pycocotools.coco as pc
+        import pycocotools.cocoeval as pce
+        import pycocotools.mask as pm
+
+        assert pc.COCO is hotcoco.COCO
+        assert pce.COCOeval is hotcoco.COCOeval
+        assert pm.encode is hotcoco.mask.encode
+
+        hotcoco.init_as_lvis()
+        import lvis.eval as le
+
+        assert le.LVISEval is hotcoco.LVISeval
+    finally:
+        for name in list(sys.modules):
+            if name.split(".")[0] in ("pycocotools", "lvis"):
+                del sys.modules[name]
+        for name, mod in saved.items():
+            if mod is not None:
+                sys.modules[name] = mod
+
+
+def _tiny_dataset():
+    return {
+        "images": [{"id": 1, "width": 100, "height": 100, "file_name": "a.jpg"}],
+        "annotations": [
+            {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 30, 30], "area": 900, "iscrowd": 0},
+            {"id": 2, "image_id": 1, "category_id": 2, "bbox": [50, 50, 20, 20], "area": 400, "iscrowd": 0},
+        ],
+        "categories": [{"id": 1, "name": "person"}, {"id": 2, "name": "dog"}],
+    }
+
+
+def test_query_methods_accept_scalar_ids_like_pycocotools():
+    """`coco.getAnnIds(img_id)` with a bare int must work — `_isArrayLike` parity.
+
+    torchvision's ``CocoDetection`` calls exactly that; found by the 1.0
+    third-party-consumer smoke test.
+    """
+    import hotcoco
+
+    coco = hotcoco.COCO(_tiny_dataset())
+    assert coco.get_ann_ids(1) == coco.get_ann_ids([1]) == [1, 2]
+    assert coco.getAnnIds(1) == [1, 2]
+    assert coco.get_img_ids(1, 1) == [1]
+    assert coco.load_anns(1)[0]["id"] == 1
+    assert coco.loadImgs(1)[0]["id"] == 1
+    # A bare string must not be split into characters.
+    assert coco.get_cat_ids("person") == [1]
+    assert coco.getCatIds(catNms="dog") == [2]
+    # The camelCase aliases must accept pycocotools' *keyword* spellings —
+    # Detectron2 calls `getAnnIds(imgIds=…)`.
+    assert coco.getAnnIds(imgIds=1) == [1, 2]
+    assert coco.getAnnIds(imgIds=[1], catIds=[2]) == [2]
+    assert coco.getImgIds(catIds=1) == [1]
+
+
+def test_dataset_assignment_construction_flow():
+    """`coco = COCO(); coco.dataset = d; coco.createIndex()` must work.
+
+    That is how pycocotools consumers construct in-memory datasets —
+    torchmetrics' pycocotools backend uses it verbatim, with image entries
+    that carry only an ``id``. Found by the 1.0 smoke test.
+    """
+    import hotcoco
+
+    coco = hotcoco.COCO()
+    ds = _tiny_dataset()
+    ds["images"] = [{"id": 1}]  # torchmetrics builds images as bare ids
+    coco.dataset = ds
+    coco.createIndex()
+    assert coco.get_img_ids() == [1]
+    assert coco.get_ann_ids(1) == [1, 2]
+
+
+def test_cocoeval_accepts_pycocotools_constructor_keywords():
+    """`COCOeval(cocoGt=gt, cocoDt=dt, iouType="bbox")` must work.
+
+    pycocotools spells the keywords camelCase and torchmetrics passes
+    ``iouType=``; found by the 1.0 smoke test. Mixing both spellings of one
+    argument is an error, as is an unknown keyword.
+    """
+    import hotcoco
+    import pytest
+
+    gt = hotcoco.COCO(_tiny_dataset())
+    dt = gt.load_res([{"image_id": 1, "category_id": 1, "bbox": [10, 10, 30, 30], "score": 0.9}])
+
+    ev = hotcoco.COCOeval(cocoGt=gt, cocoDt=dt, iouType="bbox")
+    ev.run()
+    assert ev.stats[0] >= 0.0
+
+    with pytest.raises(TypeError):
+        hotcoco.COCOeval(gt, dt, iou_type="bbox", iouType="bbox")
+    with pytest.raises(TypeError):
+        hotcoco.COCOeval(cocoGt=gt, cocoDt=dt, iouType="bbox", bogus=1)
+    with pytest.raises(TypeError):
+        hotcoco.COCOeval(cocoGt=gt, cocoDt=dt)

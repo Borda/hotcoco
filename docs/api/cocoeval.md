@@ -59,6 +59,12 @@ Run COCO evaluation to compute AP/AR metrics.
     | `oid_style` | `bool` | `False` | Enable Open Images evaluation mode (IoU=0.5, group-of matching) |
     | `hierarchy` | <code>Hierarchy &#124; None</code> | `None` | Category hierarchy for GT expansion in OID mode |
 
+    !!! note "pycocotools keyword spellings"
+        pycocotools spells the constructor keywords `cocoGt`, `cocoDt`, and
+        `iouType`, and consumers pass them that way (torchmetrics' pycocotools
+        backend calls `COCOeval(gt, dt, iouType=...)`). Both spellings are
+        accepted; mixing the two spellings of one argument is an error.
+
 === "Rust"
 
     ```rust

@@ -152,6 +152,18 @@ All implemented in Rust core, exposed via Python CLI and Python API.
 
 ---
 
+## Tier 1 — Near Term
+
+### HTML Evaluation Report
+
+One self-contained HTML file per eval run — the first viewport is a glanceable one-pager (headline metrics, provenance, PR curves, error impact), with interactive depth below the fold (sortable per-category table, hover detail). `ev.report().to_html(path)` plus a CLI flag, and print CSS covers casual PDF needs.
+
+- Rendering contract first: surfaces render `EvalReport`, they never compute — the viz twin of "metric math lives in `metrics`", enforced the same way
+- HTML charts move from Plotly to Observable Plot: SVG-in-DOM inherits page CSS, so the Cold Brew theme applies as stylesheet tokens instead of transcribed hex constants; vendored offline, which also removes browse's only CDN dependency
+- Browse's dashboard tab migrates to the same templates and specs
+- Composable matplotlib figures (`plot/plots.py`) stay — `ax=` composition for notebooks and papers
+- The matplotlib PDF report freezes at 1.0 and retires once the HTML report ships
+
 ## Tier 2 — Medium Term
 
 ### Format Conversion
