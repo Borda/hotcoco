@@ -119,10 +119,10 @@ fn print_completions(shell: Shell) {
     );
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Some(Command::Completions { shell }) => {
             print_completions(shell);
             Ok(())
@@ -130,6 +130,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Eval(args)) => run_eval(args),
         // No subcommand: the historic bare form.
         None => run_eval(cli.eval),
+    };
+
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        // Report through Display, not the default Debug formatting a
+        // `-> Result` main would print — a mistyped path should read
+        // "failed to load ...: No such file or directory", not
+        // `Os { code: 2, kind: NotFound, ... }`.
+        Err(e) => {
+            let _ = writeln!(stderr(), "error: {e}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
@@ -151,7 +163,10 @@ fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let pb = spinner(&format!("Loading ground truth {gt_name}..."));
     let start = Instant::now();
-    let coco_gt = COCO::new(gt_path)?;
+    let coco_gt = COCO::new(gt_path).map_err(|e| {
+        pb.finish_and_clear();
+        format!("failed to load ground truth {}: {e}", gt_path.display())
+    })?;
     pb.finish_and_clear();
     status(
         "Loaded",
@@ -161,7 +176,10 @@ fn run_eval(args: EvalArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let pb = spinner(&format!("Loading detections {dt_name}..."));
     let start = Instant::now();
-    let coco_dt = coco_gt.load_res(dt_path)?;
+    let coco_dt = coco_gt.load_res(dt_path).map_err(|e| {
+        pb.finish_and_clear();
+        format!("failed to load detections {}: {e}", dt_path.display())
+    })?;
     pb.finish_and_clear();
     status(
         "Loaded",

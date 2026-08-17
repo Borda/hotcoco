@@ -255,13 +255,16 @@ impl COCOeval {
         }
     }
 
-    /// Format a metric value: -1.0 sentinel stays as "-1.000", positive values use 3 decimal places.
+    /// Format a metric value with three decimal places.
+    ///
+    /// The `-1.0` "not computed" sentinel naturally prints as `-1.000`, the
+    /// same string pycocotools prints. No other value is coerced: the previous
+    /// form collapsed *every* negative value to `-1.000`, so an out-of-range
+    /// negative — which would be a defect, since no metric here can be
+    /// negative — masqueraded as the sentinel on every printed surface. A
+    /// defect must print as itself to stay visible.
     pub(super) fn format_metric(val: f64) -> String {
-        if val < 0.0 {
-            format!("{:0.3}", -1.0f64)
-        } else {
-            format!("{:0.3}", val)
-        }
+        format!("{:0.3}", val)
     }
 
     /// The summary-metric catalog for the current evaluation mode.
@@ -291,8 +294,9 @@ impl COCOeval {
     }
 
     /// Per-category mean AP (averaged over all IoU thresholds and recall thresholds,
-    /// at area="all" and the last max_dets setting). Returns one value per `params.cat_ids`
-    /// entry; -1.0 for categories with no valid precision data.
+    /// at area="all" and the M slot holding the detection cap —
+    /// [`Params::max_det_idx`], not the last slot). Returns one value per
+    /// `params.cat_ids` entry; -1.0 for categories with no valid precision data.
     pub(super) fn per_cat_ap(&self, eval: &AccumulatedEval) -> Vec<f64> {
         per_cat_ap_static(eval, &self.params, self.eval_mode)
     }
@@ -383,9 +387,10 @@ impl COCOeval {
     ///
     /// Returns an empty map if `accumulate()` has not been run.
     ///
-    /// Keys are `F1`, `F1_50`, `F1_75` (or `F0.5`, `F0.5_50`, … for other betas).
-    /// The separator is not decorative: `F1` + `50` reads as an unrelated metric
-    /// named `F150`, which is what these keys used to be.
+    /// Keys are `F1`, `F1_50`, `F1_75` (or `F2`, `F0.5`, `F0.5_50`, … for other
+    /// betas — integer betas print undecorated, fractional ones with minimal
+    /// digits). The separator is not decorative: `F1` + `50` reads as an
+    /// unrelated metric named `F150`.
     pub fn f_scores(&self, beta: f64) -> BTreeMap<String, f64> {
         let eval = match &self.eval {
             Some(e) => e,
@@ -428,11 +433,11 @@ impl COCOeval {
             }
         }
 
-        let prefix = if (beta - 1.0).abs() < 1e-9 {
-            "F1".to_string()
-        } else {
-            format!("F{:.1}", beta)
-        };
+        // `f64`'s `Display` prints the minimal digits: `1.0` → "F1", `2.0` →
+        // "F2", `0.5` → "F0.5". One rule for every beta — the previous `{:.1}`
+        // decorated integer betas ("F2.0") while the beta-1 special case did
+        // not, so the key spelling depended on which branch you hit.
+        let prefix = format!("F{}", beta);
 
         let names = [
             prefix.clone(),
@@ -484,9 +489,9 @@ impl COCOeval {
         // of `EvalResults` byte-stable for anyone parsing saved result files.
         let report = self.report()?;
 
-        // `None` (not an empty map) when `accumulate()` has not run, matching the
-        // pre-1.0 behavior — an empty map would claim "no classes scored" where
-        // the truth is "per-class data was never computed".
+        // `None` (not an empty map) when `accumulate()` has not run — an empty
+        // map would claim "no classes scored" where the truth is "per-class data
+        // was never computed".
         let per_class_map = if per_class {
             self.eval.as_ref().map(|_| {
                 report
@@ -502,7 +507,7 @@ impl COCOeval {
         Ok(EvalResults {
             hotcoco_version: env!("CARGO_PKG_VERSION").to_string(),
             provenance: report.provenance,
-            params: EvalParams::from_params(&self.params, self.eval_mode),
+            params: EvalParams::from_eval(self),
             metrics: report.metrics.into_iter().collect(),
             per_class: per_class_map,
         })
@@ -524,12 +529,8 @@ impl COCOeval {
     /// - oriented boxes, which are a real metric with no reference to be standard against
     /// - Open Images, whose protocol hotcoco implements but has no checked reference for
     /// - any run with custom `iou_thrs`, `rec_thrs`, `max_dets`, area-range labels or
-    ///   bounds, `use_cats = false`, or `kpt_oks_sigmas`
-    ///
-    /// That last case is the one worth stating plainly: parity is a property of a
-    /// *configuration*, not of an `iou_type`. Deriving it from the type alone
-    /// would stamp `parity_verified` on numbers pycocotools was never run against,
-    /// which is exactly what [`Provenance`] exists to prevent.
+    ///   bounds, `use_cats = false`, or `kpt_oks_sigmas` — parity is a property
+    ///   of the *configuration*, not of the `iou_type`
     ///
     /// # Curves
     ///
@@ -551,10 +552,7 @@ impl COCOeval {
         let keys = self.metric_keys();
         let mut report = EvalReport::new("detection", provenance)
             .with_metrics(keys.iter().copied().zip(stats.iter().copied()))
-            .with_params(serde_json::to_value(EvalParams::from_params(
-                &self.params,
-                self.eval_mode,
-            ))?);
+            .with_params(serde_json::to_value(EvalParams::from_eval(self))?);
 
         let Some(eval) = &self.eval else {
             return Ok(report);
@@ -600,5 +598,22 @@ impl COCOeval {
         report = report.with_curve("rec_thrs", self.params.rec_thrs.clone());
 
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::COCOeval;
+
+    /// Only the `-1.0` sentinel may render as `-1.000`. The previous
+    /// implementation collapsed *every* negative value to `-1.000`, so a
+    /// defect score masqueraded as "not computed" on every printed surface.
+    #[test]
+    fn format_metric_does_not_mask_negative_defects() {
+        assert_eq!(COCOeval::format_metric(-1.0), "-1.000");
+        assert_eq!(COCOeval::format_metric(-0.5), "-0.500");
+        assert_eq!(COCOeval::format_metric(0.0), "0.000");
+        assert_eq!(COCOeval::format_metric(0.12345), "0.123");
+        assert_eq!(COCOeval::format_metric(1.0), "1.000");
     }
 }

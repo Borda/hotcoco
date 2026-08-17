@@ -153,7 +153,7 @@ pub fn default_rec_thrs() -> Vec<f64> {
 /// defaults (3 area ranges instead of 4, max 20 detections instead of 1/10/100).
 #[derive(Debug, Clone)]
 pub struct Params {
-    /// IoU computation type (bbox, segm, or keypoints).
+    /// IoU computation type (bbox, segm, keypoints, or obb).
     pub iou_type: IouType,
     /// Image IDs to evaluate (empty = all images).
     pub img_ids: Vec<u64>,

@@ -6,12 +6,18 @@ import tempfile
 
 import numpy as np
 import pytest
-
 from hotcoco import COCO, CocoDetection, CocoEvaluator
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
 GT_FILE = os.path.join(DATA_DIR, "annotations", "instances_val2017.json")
 DT_FILE = os.path.join(DATA_DIR, "bbox_val2017_results.json")
+
+# `data/` is gitignored, so a fresh clone / CI has no val2017 files. Tests that
+# read them must *skip*, not error — apply this marker to every class that
+# touches GT_FILE/DT_FILE (TestCOCODict stays unguarded on purpose).
+requires_data = pytest.mark.skipif(
+    not os.path.exists(GT_FILE), reason="requires gitignored data/ (COCO val2017 annotations)"
+)
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +30,7 @@ def coco_gt():
 # ---------------------------------------------------------------------------
 
 
+@requires_data
 class TestImgsAnnsCats:
     def test_imgs_keys_are_ids(self, coco_gt):
         imgs = coco_gt.imgs
@@ -99,6 +106,7 @@ class FakeTensor:
         return FakeTensor(self._data[idx])
 
 
+@requires_data
 class TestCocoEvaluator:
     def test_string_iou_type_wrapped(self, coco_gt):
         ev = CocoEvaluator(coco_gt, "bbox")
@@ -115,7 +123,6 @@ class TestCocoEvaluator:
         ev = CocoEvaluator(coco_gt, ["bbox"])
 
         # Load detections as COCO-format dicts and feed directly into results
-        import json
 
         with open(DT_FILE) as f:
             det_dicts = json.load(f)
@@ -172,13 +179,7 @@ class TestCocoEvaluator:
         img_id = sorted(coco_gt.get_img_ids())[0]
         # 1 detection, 2 keypoints, each (x, y, v)
         kpts = [[[100.0, 200.0, 2.0], [150.0, 250.0, 1.0]]]
-        predictions = {
-            img_id: {
-                "keypoints": FakeTensor(kpts),
-                "scores": FakeTensor([0.8]),
-                "labels": FakeTensor([1]),
-            }
-        }
+        predictions = {img_id: {"keypoints": FakeTensor(kpts), "scores": FakeTensor([0.8]), "labels": FakeTensor([1])}}
         ev.update(predictions)
         assert len(ev.results["keypoints"]) == 1
         r = ev.results["keypoints"][0]
@@ -190,13 +191,7 @@ class TestCocoEvaluator:
         img_id = sorted(coco_gt.get_img_ids())[0]
         # 1 detection, mask shape (1, 1, 10, 10), all ones
         mask = np.ones((1, 1, 10, 10), dtype=np.float32)
-        predictions = {
-            img_id: {
-                "masks": FakeTensor(mask),
-                "scores": FakeTensor([0.9]),
-                "labels": FakeTensor([1]),
-            }
-        }
+        predictions = {img_id: {"masks": FakeTensor(mask), "scores": FakeTensor([0.9]), "labels": FakeTensor([1])}}
         ev.update(predictions)
         assert len(ev.results["segm"]) == 1
         r = ev.results["segm"][0]
@@ -226,11 +221,7 @@ class TestCocoEvaluator:
         ev = CocoEvaluator(coco_gt, ["bbox"])
         img_id = sorted(coco_gt.get_img_ids())[0]
         predictions = {
-            img_id: {
-                "boxes": FakeTensor(np.empty((0, 4))),
-                "scores": FakeTensor([]),
-                "labels": FakeTensor([]),
-            }
+            img_id: {"boxes": FakeTensor(np.empty((0, 4))), "scores": FakeTensor([]), "labels": FakeTensor([])}
         }
         ev.update(predictions)
         assert len(ev.results["bbox"]) == 0
@@ -241,6 +232,7 @@ class TestCocoEvaluator:
 # ---------------------------------------------------------------------------
 
 
+@requires_data
 class TestCocoDetection:
     def test_len(self, coco_gt):
         ds = CocoDetection(root="/tmp", ann_file=GT_FILE)
@@ -349,27 +341,10 @@ class TestCOCODict:
                 {"id": 2, "width": 800, "height": 600, "file_name": "b.jpg"},
             ],
             "annotations": [
-                {
-                    "id": 1,
-                    "image_id": 1,
-                    "category_id": 1,
-                    "bbox": [10, 20, 30, 40],
-                    "area": 1200,
-                    "iscrowd": 0,
-                },
-                {
-                    "id": 2,
-                    "image_id": 2,
-                    "category_id": 2,
-                    "bbox": [50, 60, 70, 80],
-                    "area": 5600,
-                    "iscrowd": 0,
-                },
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 20, 30, 40], "area": 1200, "iscrowd": 0},
+                {"id": 2, "image_id": 2, "category_id": 2, "bbox": [50, 60, 70, 80], "area": 5600, "iscrowd": 0},
             ],
-            "categories": [
-                {"id": 1, "name": "cat"},
-                {"id": 2, "name": "dog"},
-            ],
+            "categories": [{"id": 1, "name": "cat"}, {"id": 2, "name": "dog"}],
         }
         c = COCO(dataset)
         assert len(c.imgs) == 2
@@ -384,26 +359,12 @@ class TestCOCODict:
         dataset = {
             "images": [{"id": 1, "width": 640, "height": 480}],
             "annotations": [
-                {
-                    "id": 1,
-                    "image_id": 1,
-                    "category_id": 1,
-                    "bbox": [10, 20, 30, 40],
-                    "area": 1200,
-                    "iscrowd": 0,
-                },
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 20, 30, 40], "area": 1200, "iscrowd": 0}
             ],
             "categories": [{"id": 1, "name": "cat"}],
         }
         gt = COCO(dataset)
-        dt = gt.load_res([
-            {
-                "image_id": 1,
-                "category_id": 1,
-                "bbox": [12, 22, 28, 38],
-                "score": 0.9,
-            },
-        ])
+        dt = gt.load_res([{"image_id": 1, "category_id": 1, "bbox": [12, 22, 28, 38], "score": 0.9}])
         assert len(dt.anns) == 1
 
     def test_coco_from_dict_type_error(self):

@@ -50,8 +50,9 @@ pub(super) struct PairCell<'a> {
     gt_anns: Vec<&'a Annotation>,
     /// Index into `gt_anns` -> column in the pair's IoU matrix.
     gt_iou_indices: Vec<usize>,
-    /// Number of ids returned before annotation lookup, which can drop entries.
-    /// The skip conditions in [`evaluate_cell`] test the *raw* count.
+    /// Number of GT ids returned before annotation lookup, which can drop
+    /// entries. Only [`evaluate_cell`]'s final skip gate reads it — see the
+    /// comment there for which counts gate the skip.
     gt_raw_count: usize,
     /// Detections score-descending and truncated to `max_det`.
     dt_anns: Vec<&'a Annotation>,
@@ -486,7 +487,10 @@ pub(super) fn evaluate_cell(
 
     // Nothing non-ignored on either side means this cell contributes nothing —
     // but only skip it when there were no ground-truth ids at all, matching the
-    // original condition. Note both tests use the *raw* id counts.
+    // original condition. The two tests read different counts: `has_content`
+    // reads the *resolved* views (non-ignored GTs, in-range detections after
+    // the score sort and `max_det` cap), while the final gate is the *raw* GT
+    // id count — the ids returned before annotation lookup, `gt_raw_count`.
     let has_content = gt.num_not_ignored > 0 || dt.area_ignore.iter().any(|&ignored| !ignored);
     if !has_content && pair.gt_raw_count == 0 {
         return None;
@@ -580,8 +584,8 @@ impl EvalImg {
     }
 }
 
-/// Read-only context shared across all [`evaluate_img`] calls within a single
-/// [`COCOeval::evaluate`] invocation.
+/// Read-only context shared across all [`gather_pair`]/[`evaluate_cell`] calls
+/// within a single [`COCOeval::evaluate`] invocation.
 ///
 /// Grouping these shared references avoids passing them individually to every
 /// call and removes the `#[allow(clippy::too_many_arguments)]` suppressor.

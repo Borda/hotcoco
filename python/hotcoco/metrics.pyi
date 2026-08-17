@@ -27,5 +27,20 @@ def calibration_error(scores: _Floats, matched: _Bools, n_bins: int = 10) -> tup
 def confusion_matrix(
     gt: Sequence[Optional[int]], dt: Sequence[Optional[int]], num_classes: int
 ) -> npt.NDArray[np.uint64]: ...
+def is_computed(v: float) -> bool:
+    """Whether a metric value was actually computed (``-1.0`` means "not computed")."""
+    ...
 
-__all__ = ["average_precision", "calibration_curve", "calibration_error", "confusion_matrix", "precision_recall_curve"]
+def is_missing(v: float) -> bool:
+    """Whether a metric value is the ``-1.0`` "not computed" sentinel."""
+    ...
+
+__all__ = [
+    "average_precision",
+    "calibration_curve",
+    "calibration_error",
+    "confusion_matrix",
+    "is_computed",
+    "is_missing",
+    "precision_recall_curve",
+]

@@ -1,8 +1,8 @@
 //! Dataset statistics: the DTOs and the `COCO::stats` computation.
 //!
-//! These are *outputs* of inspecting a dataset, not part of its schema, which
-//! is why they no longer live in [`crate::types`]. `types` describes what a
-//! COCO file contains; this describes what we found in one.
+//! These are *outputs* of inspecting a dataset, not part of its schema:
+//! [`crate::types`] describes what a COCO file contains; this describes what
+//! was found in one.
 
 use std::collections::HashMap;
 

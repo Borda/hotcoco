@@ -1,34 +1,25 @@
 //! `EvalReport` — the shape every family's results take.
 //!
-//! Detection produces one today; panoptic, tracking, and concepts produce the
-//! same type as they land, and composed metrics built from these primitives
-//! produce it too. That is the point: a dashboard, a CLI renderer, or a report
-//! writer consumes `EvalReport` and does not care which family filled it in.
+//! Detection produces one today; panoptic, tracking, concepts, and composed
+//! metrics produce the same type as they land. A dashboard, a CLI renderer, or a
+//! report writer consumes `EvalReport` without caring which family filled it in.
 //!
 //! # Provenance is enforced, not advisory
 //!
 //! [`Provenance`] records whether a number is a benchmark-standard result, a
 //! labeled hotcoco extension, or something a user composed from primitives.
-//! Family drivers set it; the Python constructor hardwires
-//! [`Provenance::UserComposed`], so a report cannot claim parity it was never
-//! checked for. It survives serialization, so a deserialized report renders as
-//! whatever it actually is rather than as whatever the renderer assumes.
-//!
-//! Without this, composed and extension numbers look exactly like leaderboard
-//! numbers once they reach a chart.
+//! Family drivers set it, the Python constructor hardwires
+//! [`Provenance::UserComposed`], and it survives serialization — so a report
+//! cannot claim parity it was never checked for. Without it, composed and
+//! extension numbers look exactly like leaderboard numbers once they reach a chart.
 //!
 //! # What belongs in `curves`
 //!
-//! Whatever a renderer needs to draw the result and cannot recompute: PR curves,
-//! HOTA's alpha sweep, calibration reliability bins. It is an open string-keyed
-//! map rather than typed fields so families can add their own without a breaking
-//! change.
-//!
-//! It is **not** a dump of the full evaluation arrays. Detection's complete
-//! precision tensor is `T×R×K×A×M` — on COCO that is ~1M floats, which no report
-//! should carry and no JSON file should hold. Producers put the *aggregate* slice
-//! here (see [`crate::detection`]'s report assembly) and leave the full arrays
-//! reachable through the family's own types.
+//! Whatever a renderer needs to draw the result and cannot recompute (PR curves,
+//! HOTA's alpha sweep, calibration bins) — an open string-keyed map so families
+//! extend it without a breaking change. **Not** a dump of the full evaluation
+//! arrays: detection's precision tensor is ~1M floats on COCO, and stays
+//! reachable through the family's own types instead.
 
 use std::collections::BTreeMap;
 
@@ -90,6 +81,21 @@ pub struct EvalReport {
     /// frequency buckets, dataset slices, area ranges.
     pub per_group: BTreeMap<String, BTreeMap<String, f64>>,
     /// Renderable curves. See the module docs for what belongs here.
+    ///
+    /// # X-axis convention
+    ///
+    /// A curve holds **y-values only**; its x-axis is a sibling entry in this
+    /// same map, so the two ship together and cannot drift. Detection writes
+    /// `pr@<iou>` keys (e.g. `"pr@0.50"`) holding precision sampled on the
+    /// recall grid, and stores that grid under `"rec_thrs"` — by default the
+    /// 101-point COCO grid from [`crate::params::default_rec_thrs`]. Every
+    /// `pr@` curve has the same length as `"rec_thrs"` and is index-aligned
+    /// with it; recall thresholds no evaluated category reaches hold `0.0`
+    /// (pycocotools-style), and a point where nothing was computed at all
+    /// carries the crate's `-1.0` sentinel
+    /// ([`crate::metrics::is_computed`]). Families adding sampled curves
+    /// should follow the same pattern: attach the axis as its own named curve
+    /// rather than assuming a renderer knows the grid.
     pub curves: BTreeMap<String, Vec<f64>>,
     /// The evaluation parameters, as the producer chose to describe them.
     /// Opaque `Value` because each family's parameters differ.
@@ -122,13 +128,19 @@ impl EvalReport {
         Self::new(task, Provenance::UserComposed)
     }
 
-    /// Set the headline metrics.
+    /// Add headline metrics.
+    ///
+    /// **Extends** the map rather than replacing it, like every other
+    /// `with_*` builder here — chaining two calls keeps both sets (it used to
+    /// silently discard the first). A repeated key takes the later value, the
+    /// usual map-insert rule.
     #[must_use]
     pub fn with_metrics<K: Into<String>>(
         mut self,
         metrics: impl IntoIterator<Item = (K, f64)>,
     ) -> Self {
-        self.metrics = metrics.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        self.metrics
+            .extend(metrics.into_iter().map(|(k, v)| (k.into(), v)));
         self
     }
 
@@ -223,6 +235,19 @@ mod tests {
             assert_eq!(back.metric("AP"), Some(0.5));
             assert_eq!(back.curves["pr@0.50"], vec![1.0, 0.5, 0.0]);
         }
+    }
+
+    /// `with_metrics` extends like the other builders — a second call must not
+    /// wipe the first (it used to replace the whole map).
+    #[test]
+    fn with_metrics_extends_instead_of_replacing() {
+        let r = EvalReport::user_composed("m")
+            .with_metrics([("AP", 0.5), ("AP50", 0.7)])
+            .with_metrics([("AR", 0.6), ("AP", 0.55)]);
+        assert_eq!(r.metric("AP50"), Some(0.7), "earlier batch survives");
+        assert_eq!(r.metric("AR"), Some(0.6), "later batch lands");
+        assert_eq!(r.metric("AP"), Some(0.55), "repeated key takes later value");
+        assert_eq!(r.metrics.len(), 3);
     }
 
     #[test]

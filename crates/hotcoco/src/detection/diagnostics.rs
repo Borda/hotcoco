@@ -91,9 +91,9 @@ pub struct LabelError {
 
 /// Per-image diagnostic results: annotation index, image scores, and label error candidates.
 ///
-/// Produced by [`COCOeval::image_diagnostics`]. Subsumes the per-annotation TP/FP/FN
-/// classification previously done by `build_eval_index()` in Python, and adds per-image
-/// F1/AP scores, error profiles, and label error detection.
+/// Produced by [`COCOeval::image_diagnostics`]: per-annotation TP/FP/FN
+/// classification plus per-image F1/AP scores, error profiles, and label error
+/// detection.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageDiagnostics {
     /// Per-annotation TP/FP/FN classification and matching pairs.
@@ -105,6 +105,24 @@ pub struct ImageDiagnostics {
     /// The IoU threshold used (snapped to nearest in params).
     pub iou_thr: f64,
 }
+
+/// Bbox IoU at or above which a high-confidence FP overlapping an undetected
+/// GT of a *different* category is flagged as a suspected wrong label. The
+/// value mirrors TIDE's positive-match threshold (`pos_thr` = 0.5): the
+/// detection localizes the box well enough that only the class disagrees.
+const WRONG_LABEL_IOU: f64 = 0.5;
+
+/// Bbox IoU below which a high-confidence FP counts as overlapping nothing and
+/// is flagged as a suspected missing annotation. Mirrors TIDE's background
+/// threshold (`bg_thr` = 0.1): under it, a detection is "on background" rather
+/// than a poor localization of something annotated.
+const MISSING_ANNOTATION_IOU: f64 = 0.1;
+
+/// How many times one error kind must outnumber the other before an image's
+/// profile reads [`ErrorProfile::FpHeavy`]/[`ErrorProfile::FnHeavy`] rather
+/// than [`ErrorProfile::Mixed`]. 2× is a judgment call — far enough from
+/// parity that the label survives one stray detection on a small image.
+const PROFILE_DOMINANCE_FACTOR: u32 = 2;
 
 /// Bbox IoU between two `[x, y, w, h]` boxes — the shared scalar kernel.
 ///
@@ -145,6 +163,49 @@ fn compute_image_ap(scores: &[f64], matched: &[bool], n_gt: u32, rec_thrs: &[f64
     crate::metrics::counts::average_precision(scores, matched, None, n_gt as usize, rec_thrs)
 }
 
+/// One image's running tally during the classification walk.
+///
+/// `scores`/`matched` are two vectors rather than one of pairs because that is
+/// the shape [`compute_image_ap`] takes — building pairs here only to split them
+/// again per image allocated twice more for no reason.
+#[derive(Default)]
+struct ImageTally {
+    tp: u32,
+    fp: u32,
+    fn_count: u32,
+    scores: Vec<f64>,
+    matched: Vec<bool>,
+}
+
+/// A high-confidence false positive, and what it might be evidence of.
+struct FpDt {
+    dt_id: u64,
+    score: f64,
+    cat_id: u64,
+    bbox: [f64; 4],
+}
+
+/// An undetected ground truth, as a candidate mislabel.
+struct FnGt {
+    gt_id: u64,
+    cat_id: u64,
+    bbox: [f64; 4],
+}
+
+/// Everything in one image that the label-error scan compares against.
+///
+/// One map keyed by image rather than three: the FP list, the FN list and the
+/// all-GT list are always read together for the same image, and keeping them in
+/// step was previously the caller's problem.
+#[derive(Default)]
+struct ImageCandidates {
+    fps: Vec<FpDt>,
+    fn_gts: Vec<FnGt>,
+    /// Every GT bbox in the image, matched or not — the `missing_annotation`
+    /// check asks whether a detection overlaps *anything*, not just failures.
+    all_gt_bboxes: Vec<[f64; 4]>,
+}
+
 impl COCOeval {
     /// Compute per-image diagnostics: annotation TP/FP/FN index, per-image F1 and AP
     /// scores, error profiles, and label error candidates.
@@ -175,68 +236,83 @@ impl COCOeval {
 
         // Snap to nearest IoU threshold — the reported `iou_thr` says which one.
         let t_idx = self.params.nearest_iou_thr_idx(iou_thr);
-        let actual_iou_thr = self.params.iou_thrs[t_idx];
 
-        let mut dt_status: HashMap<u64, DtStatus> = HashMap::new();
-        let mut gt_status: HashMap<u64, GtStatus> = HashMap::new();
-        let mut dt_match_map: HashMap<u64, u64> = HashMap::new();
-        let mut gt_match_map: HashMap<u64, u64> = HashMap::new();
+        let (annotations, tallies) = self.classify_annotations(t_idx);
+        let images = summarize_images(tallies, &self.params.rec_thrs);
+        let label_errors = self.find_label_errors(&annotations, score_thr);
 
-        // Per-image: parallel (score, is_tp) arrays for AP, and tp/fp/fn counts.
-        // Two vectors rather than one of pairs, because that is the shape
-        // `average_precision` takes — building pairs here only to split them again
-        // per image allocated twice more for no reason.
-        let mut img_detections: HashMap<u64, (Vec<f64>, Vec<bool>)> = HashMap::new();
-        let mut img_counts: HashMap<u64, (u32, u32, u32)> = HashMap::new(); // (tp, fp, fn)
+        Ok(ImageDiagnostics {
+            annotations,
+            images,
+            label_errors,
+            iou_thr: self.params.iou_thrs[t_idx],
+        })
+    }
+
+    /// Pass 1 — walk every in-scope cell, sorting detections into TP/FP and
+    /// ground truths into matched/FN, and tallying both per image.
+    ///
+    /// An annotation is classified once even though it can appear in several
+    /// cells; the first cell to reach it wins.
+    fn classify_annotations(&self, t_idx: usize) -> (AnnotationIndex, HashMap<u64, ImageTally>) {
+        let mut index = AnnotationIndex {
+            dt_status: HashMap::new(),
+            gt_status: HashMap::new(),
+            dt_match: HashMap::new(),
+            gt_match: HashMap::new(),
+        };
+        let mut tallies: HashMap<u64, ImageTally> = HashMap::new();
 
         // `default_cells` owns the (area = "all", default max_det) predicate.
         for eval_img in self.default_cells() {
-            if t_idx >= eval_img.dt_matched.num_rows() {
-                continue;
-            }
+            // Shape trust, not bounds checks: `evaluate()` builds every
+            // `EvalImg` with one threshold row per `params.iou_thrs` entry and
+            // one column per `dt_ids`/`gt_ids` element, and `t_idx` comes from
+            // `nearest_iou_thr_idx` over the same list. `accumulate` and TIDE
+            // index the identical shapes unguarded; runtime guards here would
+            // only hide a real shape defect as silently skipped cells.
+            debug_assert!(t_idx < eval_img.dt_matched.num_rows());
 
-            let img_id = eval_img.image_id;
             let matched = eval_img.dt_matched.row(t_idx);
             let ignored = eval_img.dt_ignore.row(t_idx);
             let matches = eval_img.dt_matches.row(t_idx);
             debug_assert_eq!(matched.len(), matches.len());
+            debug_assert_eq!(eval_img.dt_ids.len(), matched.len());
+            debug_assert_eq!(eval_img.dt_ids.len(), ignored.len());
 
-            // Both entries are the same for every annotation in this cell, so they
-            // are resolved once per cell rather than once per annotation.
-            let counts = img_counts.entry(img_id).or_insert((0, 0, 0));
-            let dets = img_detections.entry(img_id).or_default();
+            // Resolved once per cell rather than once per annotation — every
+            // annotation in this cell belongs to the same image.
+            let tally = tallies.entry(eval_img.image_id).or_default();
 
-            // Classify detections. `entry`, not `contains_key` then `insert`:
-            // one hash lookup instead of two, and the "already seen" test and the
-            // write cannot drift apart.
+            // `entry`, not `contains_key` then `insert`: one hash lookup instead
+            // of two, and the "already seen" test and the write cannot drift apart.
             for (d, &did) in eval_img.dt_ids.iter().enumerate() {
-                if d >= ignored.len() || ignored[d] {
+                if ignored[d] {
                     continue;
                 }
-                let Entry::Vacant(slot) = dt_status.entry(did) else {
+                let Entry::Vacant(slot) = index.dt_status.entry(did) else {
                     continue;
                 };
 
-                let is_tp = d < matched.len() && matched[d];
+                let is_tp = matched[d];
                 if is_tp {
                     slot.insert(DtStatus::Tp);
-                    let gt_id = matches[d];
-                    dt_match_map.insert(did, gt_id);
-                    gt_match_map.insert(gt_id, did);
-                    counts.0 += 1;
+                    index.dt_match.insert(did, matches[d]);
+                    index.gt_match.insert(matches[d], did);
+                    tally.tp += 1;
                 } else {
                     slot.insert(DtStatus::Fp);
-                    counts.1 += 1;
+                    tally.fp += 1;
                 }
 
-                dets.0.push(eval_img.dt_scores[d]);
-                dets.1.push(is_tp);
+                tally.scores.push(eval_img.dt_scores[d]);
+                tally.matched.push(is_tp);
             }
 
-            // Classify ground truths
             let gt_matched_at_t = eval_img.gt_matched.row(t_idx);
+            debug_assert_eq!(eval_img.gt_ids.len(), gt_matched_at_t.len());
             for (g, &gid) in eval_img.gt_ids.iter().enumerate() {
-                let Entry::Vacant(slot) = gt_status.entry(gid) else {
+                let Entry::Vacant(slot) = index.gt_status.entry(gid) else {
                     continue;
                 };
                 // `counts_as_miss`, not `!gt_ignore` — otherwise per-image
@@ -245,20 +321,94 @@ impl COCOeval {
                 if !eval_img.counts_as_miss(g) {
                     continue;
                 }
-                let is_matched = g < gt_matched_at_t.len() && gt_matched_at_t[g];
-                if is_matched {
+                if gt_matched_at_t[g] {
                     slot.insert(GtStatus::Matched);
                 } else {
                     slot.insert(GtStatus::Fn);
-                    counts.2 += 1;
+                    tally.fn_count += 1;
                 }
             }
         }
 
-        // Compute per-image F1, AP, and error profile
-        let mut images: HashMap<u64, ImageSummary> = HashMap::new();
+        (index, tallies)
+    }
 
-        for (&img_id, &(tp, fp, fn_count)) in &img_counts {
+    /// Pass 3 — flag ground truths that look wrong, judged by the detections that
+    /// disagree with them.
+    ///
+    /// Only high-confidence false positives are evidence: a low-scoring FP is far
+    /// likelier to be the model's mistake than the annotator's.
+    fn find_label_errors(&self, index: &AnnotationIndex, score_thr: f64) -> Vec<LabelError> {
+        let mut by_image: HashMap<u64, ImageCandidates> = HashMap::new();
+
+        for (&dt_id, &status) in &index.dt_status {
+            if status != DtStatus::Fp {
+                continue;
+            }
+            let Some(ann) = self.coco_dt.get_ann(dt_id) else {
+                continue;
+            };
+            let (Some(score), Some(bbox)) = (ann.score, ann.bbox) else {
+                continue;
+            };
+            if score < score_thr {
+                continue;
+            }
+            by_image.entry(ann.image_id).or_default().fps.push(FpDt {
+                dt_id,
+                score,
+                cat_id: ann.category_id,
+                bbox,
+            });
+        }
+
+        for (&gt_id, &status) in &index.gt_status {
+            let Some(ann) = self.coco_gt.get_ann(gt_id) else {
+                continue;
+            };
+            let Some(bbox) = ann.bbox else {
+                continue;
+            };
+            let cand = by_image.entry(ann.image_id).or_default();
+            cand.all_gt_bboxes.push(bbox);
+            if status == GtStatus::Fn {
+                cand.fn_gts.push(FnGt {
+                    gt_id,
+                    cat_id: ann.category_id,
+                    bbox,
+                });
+            }
+        }
+
+        let mut errors: Vec<LabelError> = by_image
+            .iter()
+            .flat_map(|(&img_id, cand)| {
+                cand.fps
+                    .iter()
+                    .filter_map(move |fp| classify_label_error(img_id, fp, cand))
+            })
+            .collect();
+
+        // `by_image` iterates in hash order, so this sort is what makes the output
+        // deterministic — the `dt_id` tiebreak is load-bearing, not cosmetic.
+        errors.sort_by(|a, b| {
+            b.dt_score
+                .partial_cmp(&a.dt_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.dt_id.cmp(&b.dt_id))
+        });
+        errors
+    }
+}
+
+/// Pass 2 — turn each image's tally into its reported summary.
+fn summarize_images(
+    tallies: HashMap<u64, ImageTally>,
+    rec_thrs: &[f64],
+) -> HashMap<u64, ImageSummary> {
+    tallies
+        .into_iter()
+        .map(|(img_id, t)| {
             // F1 straight from the counts: algebraically 2PR/(P+R), but computed as
             // one division of exact integers rather than two divisions fed into
             // `f_beta`. Same value in real arithmetic, and this form has no
@@ -267,180 +417,91 @@ impl COCOeval {
             // The empty-image convention (nothing to detect, nothing predicted, so
             // nothing to get wrong) lives here rather than in `metrics::counts`,
             // per that module's rule: the shared formulas take no policy flag.
-            let denom = 2 * tp + fp + fn_count;
+            let denom = 2 * t.tp + t.fp + t.fn_count;
             let f1 = if denom == 0 {
                 1.0
             } else {
-                (2 * tp) as f64 / denom as f64
+                (2 * t.tp) as f64 / denom as f64
             };
 
             // No sort here: `average_precision` ranks its input with the same
             // stable comparator this used, so sorting first only sorted an array
             // that was about to be sorted again.
-            let (scores, matched) = img_detections.remove(&img_id).unwrap_or_default();
-            let n_gt = tp + fn_count; // total non-ignored GT for this image
-            let ap = compute_image_ap(&scores, &matched, n_gt, &self.params.rec_thrs);
+            let n_gt = t.tp + t.fn_count; // total non-ignored GT for this image
+            let ap = compute_image_ap(&t.scores, &t.matched, n_gt, rec_thrs);
 
-            let error_profile = match (fp, fn_count) {
+            let error_profile = match (t.fp, t.fn_count) {
                 (0, 0) => ErrorProfile::Perfect,
-                (f, n) if f > 2 * n => ErrorProfile::FpHeavy,
-                (f, n) if n > 2 * f => ErrorProfile::FnHeavy,
+                (f, n) if f > PROFILE_DOMINANCE_FACTOR * n => ErrorProfile::FpHeavy,
+                (f, n) if n > PROFILE_DOMINANCE_FACTOR * f => ErrorProfile::FnHeavy,
                 _ => ErrorProfile::Mixed,
             };
 
-            images.insert(
+            (
                 img_id,
                 ImageSummary {
-                    tp,
-                    fp,
-                    fn_count,
+                    tp: t.tp,
+                    fp: t.fp,
+                    fn_count: t.fn_count,
                     f1,
                     ap,
                     error_profile,
                 },
-            );
-        }
-
-        // Label error detection
-        let mut label_errors = Vec::new();
-
-        // Group FP detections and FN GTs by image for efficient matching
-        struct FpDt {
-            dt_id: u64,
-            score: f64,
-            cat_id: u64,
-            bbox: [f64; 4],
-        }
-        let mut img_fp_dts: HashMap<u64, Vec<FpDt>> = HashMap::new();
-        struct FnGt {
-            gt_id: u64,
-            cat_id: u64,
-            bbox: [f64; 4],
-        }
-        let mut img_fn_gts: HashMap<u64, Vec<FnGt>> = HashMap::new();
-        let mut img_all_gts: HashMap<u64, Vec<[f64; 4]>> = HashMap::new(); // all GT bboxes for missing_annotation check
-
-        // Collect FP detections above score threshold
-        for (&dt_id, &status) in &dt_status {
-            if status != DtStatus::Fp {
-                continue;
-            }
-            if let Some(ann) = self.coco_dt.get_ann(dt_id) {
-                if let Some(score) = ann.score {
-                    if score < score_thr {
-                        continue;
-                    }
-                    if let Some(bbox) = ann.bbox {
-                        img_fp_dts.entry(ann.image_id).or_default().push(FpDt {
-                            dt_id,
-                            score,
-                            cat_id: ann.category_id,
-                            bbox,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Collect all GTs per image (for missing_annotation IoU check)
-        // and FN GTs per image (for wrong_label cross-category check)
-        for (&gt_id, &status) in &gt_status {
-            if let Some(ann) = self.coco_gt.get_ann(gt_id) {
-                if let Some(bbox) = ann.bbox {
-                    img_all_gts.entry(ann.image_id).or_default().push(bbox);
-                    if status == GtStatus::Fn {
-                        img_fn_gts.entry(ann.image_id).or_default().push(FnGt {
-                            gt_id,
-                            cat_id: ann.category_id,
-                            bbox,
-                        });
-                    }
-                }
-            }
-        }
-
-        // For each image with high-confidence FPs, check for label errors
-        for (&img_id, fp_dts) in &img_fp_dts {
-            let fn_gts = img_fn_gts.get(&img_id);
-            let all_gts = img_all_gts.get(&img_id);
-
-            for fp in fp_dts {
-                let (dt_id, dt_score, dt_cat, dt_bbox) = (fp.dt_id, fp.score, fp.cat_id, fp.bbox);
-                // Check against FN GTs for wrong_label
-                let mut best_fn_iou = 0.0f64;
-                let mut best_fn_gt: Option<(u64, u64)> = None; // (gt_id, gt_cat_id)
-
-                if let Some(fn_gts) = fn_gts {
-                    for fg in fn_gts {
-                        if fg.cat_id == dt_cat {
-                            continue; // same category — not a label error
-                        }
-                        let iou = bbox_iou_plain(dt_bbox, fg.bbox);
-                        if iou > best_fn_iou {
-                            best_fn_iou = iou;
-                            best_fn_gt = Some((fg.gt_id, fg.cat_id));
-                        }
-                    }
-                }
-
-                if best_fn_iou >= 0.5 {
-                    if let Some((gt_id, gt_cat)) = best_fn_gt {
-                        label_errors.push(LabelError {
-                            image_id: img_id,
-                            dt_id,
-                            dt_score,
-                            dt_category_id: dt_cat,
-                            gt_id: Some(gt_id),
-                            gt_category_id: Some(gt_cat),
-                            iou: best_fn_iou,
-                            error_type: LabelErrorType::WrongLabel,
-                        });
-                        continue; // don't also flag as missing
-                    }
-                }
-
-                // Check for missing_annotation: no nearby GT at all
-                let max_iou_any_gt = all_gts.map_or(0.0, |gts| {
-                    gts.iter()
-                        .map(|&gt_bbox| bbox_iou_plain(dt_bbox, gt_bbox))
-                        .fold(0.0f64, f64::max)
-                });
-
-                if max_iou_any_gt < 0.1 {
-                    label_errors.push(LabelError {
-                        image_id: img_id,
-                        dt_id,
-                        dt_score,
-                        dt_category_id: dt_cat,
-                        gt_id: None,
-                        gt_category_id: None,
-                        iou: 0.0,
-                        error_type: LabelErrorType::MissingAnnotation,
-                    });
-                }
-            }
-        }
-
-        // Sort label errors by score descending
-        label_errors.sort_by(|a, b| {
-            b.dt_score
-                .partial_cmp(&a.dt_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.dt_id.cmp(&b.dt_id))
-        });
-
-        Ok(ImageDiagnostics {
-            annotations: AnnotationIndex {
-                dt_status,
-                gt_status,
-                dt_match: dt_match_map,
-                gt_match: gt_match_map,
-            },
-            images,
-            label_errors,
-            iou_thr: actual_iou_thr,
+            )
         })
+        .collect()
+}
+
+/// Decide whether one high-confidence false positive indicts the ground truth.
+///
+/// `WrongLabel` is checked first and returns outright: a detection that lands on
+/// a mislabeled box is not also evidence that the box is missing.
+fn classify_label_error(img_id: u64, fp: &FpDt, cand: &ImageCandidates) -> Option<LabelError> {
+    // The most-overlapping undetected GT of a *different* category. Strictly
+    // greater, so ties keep the earliest, and a zero overlap never claims the
+    // slot. Deliberately not spelled with the greedy-matcher's variable names —
+    // this ranks candidate annotation defects, it does not assign detections.
+    let mut best_fn: Option<(f64, &FnGt)> = None;
+    for fg in cand.fn_gts.iter().filter(|fg| fg.cat_id != fp.cat_id) {
+        let overlap = bbox_iou_plain(fp.bbox, fg.bbox);
+        if overlap > best_fn.map_or(0.0, |(best, _)| best) {
+            best_fn = Some((overlap, fg));
+        }
     }
+
+    if let Some((iou, fg)) = best_fn {
+        if iou >= WRONG_LABEL_IOU {
+            return Some(LabelError {
+                image_id: img_id,
+                dt_id: fp.dt_id,
+                dt_score: fp.score,
+                dt_category_id: fp.cat_id,
+                gt_id: Some(fg.gt_id),
+                gt_category_id: Some(fg.cat_id),
+                iou,
+                error_type: LabelErrorType::WrongLabel,
+            });
+        }
+    }
+
+    // No nearby GT at all — the detection is probably right and the annotation
+    // absent.
+    let max_iou_any_gt = cand
+        .all_gt_bboxes
+        .iter()
+        .map(|&gt_bbox| bbox_iou_plain(fp.bbox, gt_bbox))
+        .fold(0.0f64, f64::max);
+
+    (max_iou_any_gt < MISSING_ANNOTATION_IOU).then_some(LabelError {
+        image_id: img_id,
+        dt_id: fp.dt_id,
+        dt_score: fp.score,
+        dt_category_id: fp.cat_id,
+        gt_id: None,
+        gt_category_id: None,
+        iou: 0.0,
+        error_type: LabelErrorType::MissingAnnotation,
+    })
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@
 //! | [`report`] | [`EvalReport`] — the shape every metric family reports in. |
 //! | [`detection`] | The detection metric family: AP/AR, LVIS, Open Images, TIDE. |
 //! | [`quality`] | Dataset introspection: health checks and statistics. |
-//! | [`convert`] | YOLO, Pascal VOC, CVAT, and DOTA conversion. |
+//! | [`convert`] | YOLO, Pascal VOC, CVAT, DOTA, and Open Images conversion. |
 //!
 //! # The functional layer
 //!
@@ -52,35 +52,11 @@
 //! AP accumulated?" — there is exactly one implementation of each, and
 //! `tests/architecture.rs` fails the build if a second appears.
 //!
-//! # Module renames in 1.0
+//! # Coming from 0.x
 //!
-//! 1.0 renamed `eval` to [`detection`], because detection is now one metric family
-//! among several rather than the only one. Three modules moved for the same reason:
-//! the Open Images hierarchy is detection machinery, health checks belong with
-//! dataset statistics rather than beside the schema, and `counts` computes numbers
-//! from matches so it belongs in [`metrics`], not [`primitives`].
-//!
-//! | Pre-1.0 module path | Now |
-//! |---|---|
-//! | `hotcoco::eval` | [`detection`] |
-//! | `hotcoco::hierarchy` | [`detection::hierarchy`] |
-//! | `hotcoco::healthcheck` | [`quality::healthcheck`](mod@quality::healthcheck) |
-//! | `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | [`quality`] |
-//! | `hotcoco::primitives::counts` | [`metrics::counts`] |
-//!
-//! **The crate-root re-exports absorbed every one of these**, so most code needs no
-//! edit at all: [`COCOeval`], [`EvalImg`], [`Hierarchy`], [`HealthReport`],
-//! [`SummaryStats`] and the rest resolve exactly as before.
-//!
-//! There are no compatibility aliases for the old *module* paths. 0.x is
-//! pre-release under SemVer — "anything MAY change at any time" — so those paths
-//! carried no stability promise, and keeping them would have meant a multi-year
-//! obligation to a surface nothing depended on. 1.0 is where the API is fixed;
-//! from here breaking changes wait for 2.0.
-//!
-//! The Python API is entirely unaffected: `hotcoco.COCOeval`,
-//! `init_as_pycocotools()`, and the `pycocotools`/LVIS drop-in surface are
-//! permanent compatibility guarantees.
+//! 1.0 renamed several module paths (`eval` → [`detection`] and friends) with no
+//! aliases; the crate-root re-exports resolve unchanged. The rename table is in
+//! the [migration guide](https://derekallman.github.io/hotcoco/getting-started/migration/).
 
 pub mod coco;
 pub mod convert;
@@ -96,7 +72,9 @@ pub mod report;
 pub mod types;
 
 pub use coco::COCO;
-pub use convert::{ConvertError, CvatStats, DotaStats, VocStats, YoloStats};
+pub use convert::{
+    ConvertError, CvatImportStats, CvatStats, DotaStats, OidStats, VocStats, YoloStats,
+};
 pub use detection::{
     AccumulatedEval, AnnotationIndex, COCOeval, CalibrationResult, CategoryDelta, CompareOpts,
     ComparisonResult, ConfusionMatrix, DtStatus, ErrorProfile, EvalImg, EvalMode, EvalParams,

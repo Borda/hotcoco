@@ -162,7 +162,7 @@ class CocoEvaluator:
             world_size = dist.get_world_size()
             sizes = [torch.tensor([0], dtype=torch.long) for _ in range(world_size)]
             dist.all_gather(sizes, local_size)
-            max_size = max(s.item() for s in sizes)
+            max_size = int(max(s.item() for s in sizes))
 
             # Pad to uniform size
             padded = torch.zeros(max_size, dtype=torch.uint8)

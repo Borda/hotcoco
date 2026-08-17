@@ -171,7 +171,17 @@ pub fn obb_to_aabb(obb: &[f64; 5]) -> [f64; 4] {
 ///
 /// Center is the mean of the 4 corners. Width is the distance between corners 0-1,
 /// height is the distance between corners 1-2, angle is atan2 of the first edge.
-pub fn corners_to_obb(coords: &[f64]) -> [f64; 5] {
+///
+/// Errors when `coords` does not hold exactly 8 values (4 corner points) —
+/// corner lists reach this function from untrusted converter input.
+pub fn corners_to_obb(coords: &[f64]) -> crate::error::Result<[f64; 5]> {
+    if coords.len() != 8 {
+        return Err(format!(
+            "corners_to_obb: expected exactly 8 coordinates (4 corner points), got {}",
+            coords.len()
+        )
+        .into());
+    }
     let cx = (coords[0] + coords[2] + coords[4] + coords[6]) / 4.0;
     let cy = (coords[1] + coords[3] + coords[5] + coords[7]) / 4.0;
 
@@ -185,7 +195,7 @@ pub fn corners_to_obb(coords: &[f64]) -> [f64; 5] {
 
     let angle = dy01.atan2(dx01);
 
-    [cx, cy, w, h, angle]
+    Ok([cx, cy, w, h, angle])
 }
 
 /// Intersection area of two rotated rectangles, via Sutherland-Hodgman clipping.

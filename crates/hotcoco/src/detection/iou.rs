@@ -96,8 +96,49 @@ fn uses_ioa(ann: &crate::types::Annotation, eval_mode: EvalMode) -> bool {
     }
 }
 
+/// Scatter a kernel's valid-only matrix back to the full `d × g` shape, with
+/// zero rows/columns for annotations that contributed no geometry.
+///
+/// `dt_rows[i]` / `gt_cols[j]` are the original positions (index into the raw id
+/// slice) of the kernel's row `i` / column `j`. This is what keeps every matrix
+/// builder aligned with `matching::gather_pair`, which assigns `iou_indices` by
+/// enumerating the same raw id slices: a bbox-less annotation between two valid
+/// ones must occupy a zero row/column, not vanish and shift every later
+/// annotation onto its neighbor's IoU row. A zero never matches — the match
+/// floors are strictly positive — so a geometry-less annotation scores as
+/// unmatched rather than borrowing someone else's overlap.
+fn scatter_full(
+    valid: Vec<Vec<f64>>,
+    dt_rows: &[usize],
+    gt_cols: &[usize],
+    d: usize,
+    g: usize,
+) -> Vec<Vec<f64>> {
+    if dt_rows.len() == d && gt_cols.len() == g {
+        // Every annotation had geometry: the index lists are strictly increasing
+        // subsequences of 0..d / 0..g, so full length means identity.
+        return valid;
+    }
+    let mut full = vec![vec![0.0_f64; g]; d];
+    for (vi, &di) in dt_rows.iter().enumerate() {
+        for (vj, &gj) in gt_cols.iter().enumerate() {
+            full[di][gj] = valid[vi][vj];
+        }
+    }
+    full
+}
+
 impl COCOeval {
     /// Compute the IoU/OKS matrix for a given image and category.
+    ///
+    /// **Shape contract:** the result is either empty (no ids on one side) or
+    /// exactly `dt_ids.len() × gt_ids.len()`, with row `i` / column `j`
+    /// corresponding to the `i`-th detection id / `j`-th ground-truth id —
+    /// including annotations whose geometry is missing, which occupy all-zero
+    /// rows/columns via [`scatter_full`]. `matching::gather_pair` indexes this
+    /// matrix by position in the same id slices, so a builder that dropped a
+    /// geometry-less annotation would silently shift every later annotation
+    /// onto its neighbor's IoU row.
     pub(super) fn compute_iou_static(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -158,20 +199,30 @@ impl COCOeval {
         eval_mode: EvalMode,
         segm_rles: Option<&SegmRles>,
     ) -> Vec<Vec<f64>> {
-        let dt_rles: Vec<Rle> = dt_ids
+        let (dt_rows, dt_rles): (Vec<usize>, Vec<Rle>) = dt_ids
             .iter()
-            .filter_map(|&id| SegmRles::dt_rle_or_convert(segm_rles, coco_dt, id))
-            .collect();
-        let (gt_rles, iscrowd): (Vec<Rle>, Vec<bool>) = gt_ids
-            .iter()
-            .filter_map(|&id| {
-                let ann = coco_gt.get_ann(id)?;
-                let crowd = uses_ioa(ann, eval_mode);
-                Some((SegmRles::gt_rle_or_convert(segm_rles, coco_gt, id)?, crowd))
+            .enumerate()
+            .filter_map(|(idx, &id)| {
+                Some((idx, SegmRles::dt_rle_or_convert(segm_rles, coco_dt, id)?))
             })
             .unzip();
+        let mut gt_cols = Vec::with_capacity(gt_ids.len());
+        let mut gt_rles = Vec::with_capacity(gt_ids.len());
+        let mut iscrowd = Vec::with_capacity(gt_ids.len());
+        for (idx, &id) in gt_ids.iter().enumerate() {
+            let Some(ann) = coco_gt.get_ann(id) else {
+                continue;
+            };
+            let Some(rle) = SegmRles::gt_rle_or_convert(segm_rles, coco_gt, id) else {
+                continue;
+            };
+            gt_cols.push(idx);
+            gt_rles.push(rle);
+            iscrowd.push(uses_ioa(ann, eval_mode));
+        }
 
-        sim::mask_iou(&dt_rles, &gt_rles, &iscrowd)
+        let valid = sim::mask_iou(&dt_rles, &gt_rles, &iscrowd);
+        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
     }
 
     /// Compute bounding box IoU by extracting bbox arrays and calling `sim::bbox_iou`.
@@ -182,20 +233,28 @@ impl COCOeval {
         gt_ids: &[u64],
         eval_mode: EvalMode,
     ) -> Vec<Vec<f64>> {
-        let dt_bbs: Vec<[f64; 4]> = dt_ids
+        let (dt_rows, dt_bbs): (Vec<usize>, Vec<[f64; 4]>) = dt_ids
             .iter()
-            .filter_map(|&id| coco_dt.get_ann(id)?.bbox)
-            .collect();
-        let (gt_bbs, iscrowd): (Vec<[f64; 4]>, Vec<bool>) = gt_ids
-            .iter()
-            .filter_map(|&id| {
-                let ann = coco_gt.get_ann(id)?;
-                let crowd = uses_ioa(ann, eval_mode);
-                Some((ann.bbox?, crowd))
-            })
+            .enumerate()
+            .filter_map(|(idx, &id)| Some((idx, coco_dt.get_ann(id)?.bbox?)))
             .unzip();
+        let mut gt_cols = Vec::with_capacity(gt_ids.len());
+        let mut gt_bbs = Vec::with_capacity(gt_ids.len());
+        let mut iscrowd = Vec::with_capacity(gt_ids.len());
+        for (idx, &id) in gt_ids.iter().enumerate() {
+            let Some(ann) = coco_gt.get_ann(id) else {
+                continue;
+            };
+            let Some(bb) = ann.bbox else {
+                continue;
+            };
+            gt_cols.push(idx);
+            gt_bbs.push(bb);
+            iscrowd.push(uses_ioa(ann, eval_mode));
+        }
 
-        sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd)
+        let valid = sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd);
+        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
     }
 
     /// Compute OKS (Object Keypoint Similarity) between detection and GT keypoints.
@@ -215,15 +274,19 @@ impl COCOeval {
         // (COCO-decoupled, matrix-shaped). Here we only marshal the annotations
         // into the kernel's flat-slice form. A missing `keypoints` field maps to
         // an empty slice, which the kernel skips — matching the previous
-        // `None => continue` behavior that left that row/column zero.
-        let gt_anns: Vec<_> = gt_ids
+        // `None => continue` behavior that left that row/column zero. Only an
+        // id with no annotation record at all goes through `scatter_full`'s
+        // zero-fill.
+        let (gt_cols, gt_anns): (Vec<usize>, Vec<_>) = gt_ids
             .iter()
-            .filter_map(|&id| coco_gt.get_ann(id))
-            .collect();
-        let dt_anns: Vec<_> = dt_ids
+            .enumerate()
+            .filter_map(|(idx, &id)| Some((idx, coco_gt.get_ann(id)?)))
+            .unzip();
+        let (dt_rows, dt_anns): (Vec<usize>, Vec<_>) = dt_ids
             .iter()
-            .filter_map(|&id| coco_dt.get_ann(id))
-            .collect();
+            .enumerate()
+            .filter_map(|(idx, &id)| Some((idx, coco_dt.get_ann(id)?)))
+            .unzip();
 
         let gt: Vec<crate::primitives::sim::GtPose<'_>> = gt_anns
             .iter()
@@ -238,7 +301,8 @@ impl COCOeval {
             .map(|a| a.keypoints.as_deref().unwrap_or(&[]))
             .collect();
 
-        crate::primitives::sim::oks_matrix(&dt_keypoints, &gt, &params.kpt_oks_sigmas)
+        let valid = crate::primitives::sim::oks_matrix(&dt_keypoints, &gt, &params.kpt_oks_sigmas);
+        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
     }
 
     /// Compute oriented bounding box IoU by extracting OBB arrays and calling `sim::obb_iou`.
@@ -249,19 +313,27 @@ impl COCOeval {
         gt_ids: &[u64],
         eval_mode: EvalMode,
     ) -> Vec<Vec<f64>> {
-        let dt_obbs: Vec<[f64; 5]> = dt_ids
+        let (dt_rows, dt_obbs): (Vec<usize>, Vec<[f64; 5]>) = dt_ids
             .iter()
-            .filter_map(|&id| coco_dt.get_ann(id)?.obb)
-            .collect();
-        let (gt_obbs, iscrowd): (Vec<[f64; 5]>, Vec<bool>) = gt_ids
-            .iter()
-            .filter_map(|&id| {
-                let ann = coco_gt.get_ann(id)?;
-                let crowd = uses_ioa(ann, eval_mode);
-                Some((ann.obb?, crowd))
-            })
+            .enumerate()
+            .filter_map(|(idx, &id)| Some((idx, coco_dt.get_ann(id)?.obb?)))
             .unzip();
+        let mut gt_cols = Vec::with_capacity(gt_ids.len());
+        let mut gt_obbs = Vec::with_capacity(gt_ids.len());
+        let mut iscrowd = Vec::with_capacity(gt_ids.len());
+        for (idx, &id) in gt_ids.iter().enumerate() {
+            let Some(ann) = coco_gt.get_ann(id) else {
+                continue;
+            };
+            let Some(obb) = ann.obb else {
+                continue;
+            };
+            gt_cols.push(idx);
+            gt_obbs.push(obb);
+            iscrowd.push(uses_ioa(ann, eval_mode));
+        }
 
-        sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd)
+        let valid = sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd);
+        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
     }
 }

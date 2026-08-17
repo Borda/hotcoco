@@ -14,15 +14,87 @@ mod mask;
 mod metrics;
 mod primitives;
 
+/// Read `(width, height)` for every image in `dir`, keyed by file stem.
+///
+/// YOLO, DOTA and Open Images all store coordinates normalized to the image, and
+/// none of the three records the pixel size, so denormalizing means measuring the
+/// images. Pillow is an optional dependency — its absence is only an error once a
+/// caller actually asks for dimensions by passing `images_dir`.
+fn read_image_dims(py: Python<'_>, dir: &str) -> PyResult<HashMap<String, (u32, u32)>> {
+    let pil_image = py.import("PIL.Image").map_err(|_| {
+        pyo3::exceptions::PyImportError::new_err(
+            "Pillow is required to read image dimensions. \
+             Install it with: pip install Pillow",
+        )
+    })?;
+
+    let read_dir = std::fs::read_dir(dir).map_err(|e| {
+        pyo3::exceptions::PyIOError::new_err(format!("cannot read images_dir: {e}"))
+    })?;
+
+    let img_exts = ["jpg", "jpeg", "png", "bmp", "tif", "tiff"];
+    let mut image_dims: HashMap<String, (u32, u32)> = HashMap::new();
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let ext_lower = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase);
+        let Some(ext) = ext_lower else { continue };
+        if !img_exts.contains(&ext.as_str()) {
+            continue;
+        }
+
+        let path_str = path.to_string_lossy().into_owned();
+        let pil_img = pil_image.getattr("open")?.call1((path_str.as_str(),))?;
+        let size: (u32, u32) = pil_img.getattr("size")?.extract()?;
+        let _ = pil_img.call_method0("close");
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        image_dims.insert(stem, size);
+    }
+
+    Ok(image_dims)
+}
+
 /// Convert a hotcoco error to a Python exception with appropriate type mapping.
-fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
-    use hotcoco_core::Error;
+///
+/// The file-wide convention: I/O problems are `IOError`, malformed data is
+/// `ValueError`. Every binding that surfaces a core error must come through
+/// here (for `ConvertError`, via `e.into()`), not map to `PyRuntimeError` ad
+/// hoc — `except OSError` / `except ValueError` in user code should catch what
+/// their names promise.
+pub(crate) fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
+    use hotcoco_core::{ConvertError, Error};
     match err {
-        Error::Io(e) => pyo3::exceptions::PyIOError::new_err(e.to_string()),
+        Error::Io(e) | Error::Convert(ConvertError::Io(e)) => {
+            pyo3::exceptions::PyIOError::new_err(e.to_string())
+        }
         Error::Json(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+        Error::JsonParse(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
         Error::Convert(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
         Error::Other(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
     }
+}
+
+/// Emit a `UserWarning` through Python's `warnings` machinery.
+///
+/// `eprintln!` writes to fd 2, which bypasses `sys.stderr` — invisible in a
+/// Jupyter cell, uncatchable by `warnings.catch_warnings`. Routing through
+/// `PyErr::warn` makes filters, `-W` flags, and `pytest.warns` all work.
+fn warn_user(py: Python<'_>, msg: &str) -> PyResult<()> {
+    let msg = std::ffi::CString::new(msg)
+        .unwrap_or_else(|_| c"hotcoco: warning text contained a NUL byte".to_owned());
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+        &msg,
+        1,
+    )
 }
 
 /// Hand Python a serde-serializable value as plain dicts and lists.
@@ -58,7 +130,7 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 use convert::{
     IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
     dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_dataset,
-    rle_to_py,
+    rle_to_coco_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -80,12 +152,40 @@ struct PyCOCO {
     image_dir: Option<String>,
 }
 
-impl Clone for PyCOCO {
-    fn clone(&self) -> Self {
+/// Constructors, kept out of `#[pymethods]` so they stay Rust-only.
+///
+/// Every `PyCOCO` in this file comes from one of these three. The distinction
+/// they encode is whether the new object inherits `image_dir`: a dataset derived
+/// from this one sits in the same image directory, while one built from a
+/// foreign format or merged from several sources does not.
+impl PyCOCO {
+    /// A dataset derived from this one — same images, so same `image_dir`.
+    fn derived(&self, inner: hotcoco_core::COCO) -> PyCOCO {
         PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(self.inner.dataset.clone()),
+            inner,
             image_dir: self.image_dir.clone(),
         }
+    }
+
+    /// Same, starting from a bare [`Dataset`](hotcoco_core::Dataset).
+    fn derived_from(&self, dataset: hotcoco_core::Dataset) -> PyCOCO {
+        self.derived(hotcoco_core::COCO::from_dataset(dataset))
+    }
+
+    /// A dataset with no image directory to inherit: a conversion from a foreign
+    /// format, a merge whose inputs came from different directories, or a view
+    /// onto an evaluator's own copy.
+    fn without_image_dir(dataset: hotcoco_core::Dataset) -> PyCOCO {
+        PyCOCO {
+            inner: hotcoco_core::COCO::from_dataset(dataset),
+            image_dir: None,
+        }
+    }
+}
+
+impl Clone for PyCOCO {
+    fn clone(&self) -> Self {
+        self.derived_from(self.inner.dataset.clone())
     }
 }
 
@@ -110,13 +210,7 @@ impl PyCOCO {
                     ));
                 }
             }
-            None => hotcoco_core::COCO::from_dataset(hotcoco_core::Dataset {
-                info: None,
-                images: vec![],
-                annotations: vec![],
-                categories: vec![],
-                licenses: vec![],
-            }),
+            None => hotcoco_core::COCO::from_dataset(hotcoco_core::Dataset::default()),
         };
         Ok(PyCOCO { inner, image_dir })
     }
@@ -201,10 +295,7 @@ impl PyCOCO {
             return self
                 .inner
                 .load_res(Path::new(&path))
-                .map(|inner| PyCOCO {
-                    inner,
-                    image_dir: self.image_dir.clone(),
-                })
+                .map(|inner| self.derived(inner))
                 .map_err(to_pyerr);
         }
 
@@ -224,10 +315,7 @@ impl PyCOCO {
             return self
                 .inner
                 .load_res_anns(anns)
-                .map(|inner| PyCOCO {
-                    inner,
-                    image_dir: self.image_dir.clone(),
-                })
+                .map(|inner| self.derived(inner))
                 .map_err(to_pyerr);
         }
 
@@ -253,22 +341,13 @@ impl PyCOCO {
                     category_id: if ncols == 7 { row[6] as u64 } else { 1 },
                     bbox: Some([row[1], row[2], row[3], row[4]]),
                     score: Some(row[5]),
-                    area: None,
-                    segmentation: None,
-                    iscrowd: false,
-                    keypoints: None,
-                    num_keypoints: None,
-                    obb: None,
-                    is_group_of: None,
+                    ..Default::default()
                 })
                 .collect::<Vec<_>>();
             return self
                 .inner
                 .load_res_anns(anns)
-                .map(|inner| PyCOCO {
-                    inner,
-                    image_dir: self.image_dir.clone(),
-                })
+                .map(|inner| self.derived(inner))
                 .map_err(to_pyerr);
         }
 
@@ -278,10 +357,15 @@ impl PyCOCO {
         ))
     }
 
+    /// Convert an annotation's segmentation to RLE.
+    ///
+    /// Returns the same shape as ``mask.encode`` and pycocotools:
+    /// ``{"size": [h, w], "counts": bytes}`` — so the result feeds straight
+    /// into ``mask.decode`` / ``mask.area`` / ``mask.iou``.
     fn ann_to_rle(&self, py: Python<'_>, ann: &Bound<'_, PyDict>) -> PyResult<Py<PyAny>> {
         let annotation = py_to_annotation(ann)?;
         match self.inner.ann_to_rle(&annotation) {
-            Some(rle) => rle_to_py(py, &rle),
+            Some(rle) => rle_to_coco_py(py, &rle),
             None => Err(pyo3::exceptions::PyValueError::new_err(
                 "Could not convert annotation to RLE (image not found?)",
             )),
@@ -345,10 +429,7 @@ impl PyCOCO {
             area_rng,
             drop_empty_images,
         );
-        PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(result),
-            image_dir: self.image_dir.clone(),
-        }
+        self.derived_from(result)
     }
 
     /// Merge a list of `COCO` datasets into one.
@@ -361,10 +442,7 @@ impl PyCOCO {
         let ds_refs: Vec<&hotcoco_core::Dataset> =
             datasets.iter().map(|p| &p.inner.dataset).collect();
         let result = hotcoco_core::COCO::merge(&ds_refs).map_err(to_pyerr)?;
-        Ok(PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(result),
-            image_dir: None, // inputs may come from different directories
-        })
+        Ok(PyCOCO::without_image_dir(result))
     }
 
     /// Split the dataset into train/val (or train/val/test) subsets.
@@ -380,28 +458,10 @@ impl PyCOCO {
         seed: u64,
     ) -> PyResult<Py<PyAny>> {
         let (train_ds, val_ds, test_ds) = self.inner.split(val_frac, test_frac, seed);
-        let train_py = Py::new(
-            py,
-            PyCOCO {
-                inner: hotcoco_core::COCO::from_dataset(train_ds),
-                image_dir: self.image_dir.clone(),
-            },
-        )?;
-        let val_py = Py::new(
-            py,
-            PyCOCO {
-                inner: hotcoco_core::COCO::from_dataset(val_ds),
-                image_dir: self.image_dir.clone(),
-            },
-        )?;
+        let train_py = Py::new(py, self.derived_from(train_ds))?;
+        let val_py = Py::new(py, self.derived_from(val_ds))?;
         if let Some(test_ds) = test_ds {
-            let test_py = Py::new(
-                py,
-                PyCOCO {
-                    inner: hotcoco_core::COCO::from_dataset(test_ds),
-                    image_dir: self.image_dir.clone(),
-                },
-            )?;
+            let test_py = Py::new(py, self.derived_from(test_ds))?;
             Ok(PyTuple::new(py, [train_py, val_py, test_py])?
                 .into_any()
                 .unbind())
@@ -417,10 +477,7 @@ impl PyCOCO {
     #[pyo3(signature = (n=None, frac=None, seed=42))]
     fn sample(&self, n: Option<usize>, frac: Option<f64>, seed: u64) -> PyCOCO {
         let result = self.inner.sample(n, frac, seed);
-        PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(result),
-            image_dir: self.image_dir.clone(),
-        }
+        self.derived_from(result)
     }
 
     /// Serialize the dataset to a COCO-format JSON file.
@@ -522,28 +579,30 @@ impl PyCOCO {
     /// Returns
     /// -------
     /// dict
-    ///     ``{"images": int, "annotations": int, "skipped_crowd": int, "missing_bbox": int}``
+    ///     ``{"images": int, "annotations": int, "skipped_crowd": int, "skipped_no_bbox": int}``
     ///
     /// Raises
     /// ------
-    /// RuntimeError
+    /// ValueError
     ///     If any image has ``width == 0`` or ``height == 0`` (normalization
-    ///     requires valid dimensions).
+    ///     requires valid dimensions), or two images share a file stem.
+    /// IOError
+    ///     If the output directory cannot be written.
     ///
     /// Examples
     /// --------
     /// >>> coco = COCO("instances_val2017.json")
     /// >>> stats = coco.to_yolo("labels/val2017/")
     /// >>> print(stats)
-    /// {'images': 5000, 'annotations': 36781, 'skipped_crowd': 12, 'missing_bbox': 0}
+    /// {'images': 5000, 'annotations': 36781, 'skipped_crowd': 12, 'skipped_no_bbox': 0}
     fn to_yolo(&self, py: Python<'_>, output_dir: &str) -> PyResult<Py<PyAny>> {
         let stats = hotcoco_core::convert::coco_to_yolo(&self.inner.dataset, Path::new(output_dir))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| to_pyerr(e.into()))?;
         let dict = PyDict::new(py);
         dict.set_item("images", stats.images)?;
         dict.set_item("annotations", stats.annotations)?;
         dict.set_item("skipped_crowd", stats.skipped_crowd)?;
-        dict.set_item("missing_bbox", stats.missing_bbox)?;
+        dict.set_item("skipped_no_bbox", stats.skipped_no_bbox)?;
         Ok(dict.into_any().unbind())
     }
 
@@ -572,8 +631,10 @@ impl PyCOCO {
     /// ------
     /// ImportError
     ///     If ``images_dir`` is provided but Pillow is not installed.
-    /// RuntimeError
+    /// ValueError
     ///     If ``data.yaml`` is missing or a label file cannot be parsed.
+    /// IOError
+    ///     If the directory cannot be read.
     ///
     /// Examples
     /// --------
@@ -590,53 +651,14 @@ impl PyCOCO {
         yolo_dir: &str,
         images_dir: Option<&str>,
     ) -> PyResult<PyCOCO> {
-        use std::collections::HashMap;
-
-        let py = cls.py();
-        let mut image_dims: HashMap<String, (u32, u32)> = HashMap::new();
-
-        if let Some(dir) = images_dir {
-            let pil_image = py.import("PIL.Image").map_err(|_| {
-                pyo3::exceptions::PyImportError::new_err(
-                    "Pillow is required to read image dimensions. \
-                     Install it with: pip install Pillow",
-                )
-            })?;
-
-            let read_dir = std::fs::read_dir(dir).map_err(|e| {
-                pyo3::exceptions::PyIOError::new_err(format!("cannot read images_dir: {e}"))
-            })?;
-
-            let img_exts = ["jpg", "jpeg", "png", "bmp", "tif", "tiff"];
-            for entry in read_dir.flatten() {
-                let path = entry.path();
-                let ext_lower = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_lowercase);
-                if let Some(ext) = ext_lower {
-                    if img_exts.contains(&ext.as_str()) {
-                        let path_str = path.to_string_lossy().into_owned();
-                        let pil_img = pil_image.getattr("open")?.call1((path_str.as_str(),))?;
-                        let size: (u32, u32) = pil_img.getattr("size")?.extract()?;
-                        let _ = pil_img.call_method0("close");
-                        let stem = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                            .to_string();
-                        image_dims.insert(stem, size);
-                    }
-                }
-            }
-        }
+        let image_dims = match images_dir {
+            Some(dir) => read_image_dims(cls.py(), dir)?,
+            None => HashMap::new(),
+        };
 
         hotcoco_core::convert::yolo_to_coco(Path::new(yolo_dir), &image_dims)
-            .map(|ds| PyCOCO {
-                inner: hotcoco_core::COCO::from_dataset(ds),
-                image_dir: None,
-            })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map(PyCOCO::without_image_dir)
+            .map_err(|e| to_pyerr(e.into()))
     }
 
     /// Export the dataset to Pascal VOC annotation format.
@@ -652,22 +674,22 @@ impl PyCOCO {
     /// Returns
     /// -------
     /// dict
-    ///     ``{'images': int, 'annotations': int, 'crowd_as_difficult': int, 'missing_bbox': int}``
+    ///     ``{'images': int, 'annotations': int, 'crowd_as_difficult': int, 'skipped_no_bbox': int}``
     ///
     /// Examples
     /// --------
     /// >>> coco = COCO("instances_val2017.json")
     /// >>> stats = coco.to_voc("voc_output/")
     /// >>> print(stats)
-    /// {'images': 5000, 'annotations': 36781, 'crowd_as_difficult': 12, 'missing_bbox': 0}
+    /// {'images': 5000, 'annotations': 36781, 'crowd_as_difficult': 12, 'skipped_no_bbox': 0}
     fn to_voc(&self, py: Python<'_>, output_dir: &str) -> PyResult<Py<PyAny>> {
         let stats = hotcoco_core::convert::coco_to_voc(&self.inner.dataset, Path::new(output_dir))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| to_pyerr(e.into()))?;
         let dict = PyDict::new(py);
         dict.set_item("images", stats.images)?;
         dict.set_item("annotations", stats.annotations)?;
         dict.set_item("crowd_as_difficult", stats.crowd_as_difficult)?;
-        dict.set_item("missing_bbox", stats.missing_bbox)?;
+        dict.set_item("skipped_no_bbox", stats.skipped_no_bbox)?;
         Ok(dict.into_any().unbind())
     }
 
@@ -693,8 +715,10 @@ impl PyCOCO {
     ///
     /// Raises
     /// ------
-    /// RuntimeError
+    /// ValueError
     ///     If XML files cannot be parsed or required elements are missing.
+    /// IOError
+    ///     If the directory cannot be read.
     ///
     /// Examples
     /// --------
@@ -706,24 +730,8 @@ impl PyCOCO {
     fn from_voc(cls: &Bound<'_, PyType>, voc_dir: &str) -> PyResult<PyCOCO> {
         let _ = cls;
         hotcoco_core::convert::voc_to_coco(Path::new(voc_dir))
-            .map(|ds| PyCOCO {
-                inner: hotcoco_core::COCO::from_dataset(ds),
-                image_dir: None,
-            })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Export the dataset to Pascal VOC format (camelCase alias).
-    #[pyo3(name = "toVoc")]
-    fn to_voc_camel(&self, py: Python<'_>, output_dir: &str) -> PyResult<Py<PyAny>> {
-        self.to_voc(py, output_dir)
-    }
-
-    /// Load a Pascal VOC annotation directory (camelCase alias).
-    #[classmethod]
-    #[pyo3(name = "fromVoc")]
-    fn from_voc_camel(cls: &Bound<'_, PyType>, voc_dir: &str) -> PyResult<PyCOCO> {
-        Self::from_voc(cls, voc_dir)
+            .map(PyCOCO::without_image_dir)
+            .map_err(|e| to_pyerr(e.into()))
     }
 
     /// Export the dataset to CVAT for Images 1.1 XML format.
@@ -740,23 +748,25 @@ impl PyCOCO {
     /// Returns
     /// -------
     /// dict
-    ///     ``{'images': int, 'boxes': int, 'polygons': int, 'skipped_no_geometry': int}``
+    ///     ``{'images': int, 'boxes': int, 'polygons': int, 'skipped_no_geometry': int,
+    ///     'skipped_degenerate': int}``
     ///
     /// Examples
     /// --------
     /// >>> coco = COCO("instances_val2017.json")
     /// >>> stats = coco.to_cvat("annotations.xml")
     /// >>> print(stats)
-    /// {'images': 5000, 'boxes': 36781, 'polygons': 0, 'skipped_no_geometry': 0}
+    /// {'images': 5000, 'boxes': 36781, 'polygons': 0, 'skipped_no_geometry': 0, 'skipped_degenerate': 0}
     fn to_cvat(&self, py: Python<'_>, output_path: &str) -> PyResult<Py<PyAny>> {
         let stats =
             hotcoco_core::convert::coco_to_cvat(&self.inner.dataset, Path::new(output_path))
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(|e| to_pyerr(e.into()))?;
         let dict = PyDict::new(py);
         dict.set_item("images", stats.images)?;
         dict.set_item("boxes", stats.boxes)?;
         dict.set_item("polygons", stats.polygons)?;
         dict.set_item("skipped_no_geometry", stats.skipped_no_geometry)?;
+        dict.set_item("skipped_degenerate", stats.skipped_degenerate)?;
         Ok(dict.into_any().unbind())
     }
 
@@ -778,8 +788,17 @@ impl PyCOCO {
     ///
     /// Raises
     /// ------
-    /// RuntimeError
+    /// ValueError
     ///     If the XML file cannot be parsed or required attributes are missing.
+    /// IOError
+    ///     If the file cannot be read.
+    ///
+    /// Warns
+    /// -----
+    /// UserWarning
+    ///     When shapes were skipped — kinds COCO cannot express (``<polyline>``,
+    ///     ``<points>``, ``<cuboid>``) or polygons with fewer than 3 points —
+    ///     so a partial import is visible rather than silent.
     ///
     /// Examples
     /// --------
@@ -789,26 +808,253 @@ impl PyCOCO {
     /// >>> coco.save("cvat_as_coco.json")
     #[classmethod]
     fn from_cvat(cls: &Bound<'_, PyType>, cvat_path: &str) -> PyResult<PyCOCO> {
-        let _ = cls;
-        hotcoco_core::convert::cvat_to_coco(Path::new(cvat_path))
-            .map(|ds| PyCOCO {
-                inner: hotcoco_core::COCO::from_dataset(ds),
+        let (dataset, stats) = hotcoco_core::convert::cvat_to_coco(Path::new(cvat_path))
+            .map_err(|e| to_pyerr(e.into()))?;
+        if stats.skipped_unsupported > 0 || stats.skipped_degenerate > 0 {
+            warn_user(
+                cls.py(),
+                &format!(
+                    "hotcoco: CVAT import of {cvat_path} skipped {} unsupported shape(s) \
+                     and {} degenerate polygon(s)",
+                    stats.skipped_unsupported, stats.skipped_degenerate
+                ),
+            )?;
+        }
+        Ok(PyCOCO::without_image_dir(dataset))
+    }
+
+    /// Export the dataset to DOTA oriented-bounding-box format.
+    ///
+    /// Writes one ``.txt`` file per image into ``output_dir``. Each line holds the
+    /// four corner points of the rotated box, the category name, and a difficulty
+    /// flag (1 for crowd annotations, 0 otherwise).
+    ///
+    /// Only annotations carrying an ``obb`` field are written — axis-aligned boxes
+    /// have no rotation to record and are counted in ``skipped_no_obb``.
+    ///
+    /// Parameters
+    /// ----------
+    /// output_dir : str
+    ///     Directory to write the DOTA label files into.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``{'images': int, 'annotations': int, 'skipped_no_obb': int}``
+    ///
+    /// Examples
+    /// --------
+    /// >>> coco = COCO("aerial_annotations.json")
+    /// >>> stats = coco.to_dota("labelTxt/")
+    /// >>> print(stats)
+    /// {'images': 458, 'annotations': 18211, 'skipped_no_obb': 0}
+    fn to_dota(&self, py: Python<'_>, output_dir: &str) -> PyResult<Py<PyAny>> {
+        let stats = hotcoco_core::convert::coco_to_dota(&self.inner.dataset, Path::new(output_dir))
+            .map_err(|e| to_pyerr(e.into()))?;
+        let dict = PyDict::new(py);
+        dict.set_item("images", stats.images)?;
+        dict.set_item("annotations", stats.annotations)?;
+        dict.set_item("skipped_no_obb", stats.skipped_no_obb)?;
+        Ok(dict.into_any().unbind())
+    }
+
+    /// Load a DOTA label directory as a COCO dataset with oriented boxes.
+    ///
+    /// Parses every ``.txt`` file in ``label_dir`` as
+    /// ``x1 y1 x2 y2 x3 y3 x4 y4 category difficulty``. Each annotation gets both
+    /// an ``obb`` (the rotated box) and a ``bbox`` (its axis-aligned envelope), so
+    /// the result evaluates under either ``iou_type``.
+    ///
+    /// Parameters
+    /// ----------
+    /// label_dir : str
+    ///     Directory containing DOTA ``.txt`` label files.
+    /// images_dir : str, optional
+    ///     Directory of source images. DOTA labels are in absolute pixels, so this
+    ///     only populates ``width``/``height`` on the image records; box
+    ///     coordinates are unaffected. Requires ``pip install Pillow``.
+    /// categories : list of str, optional
+    ///     Category names in the order they should be numbered. Without this,
+    ///     categories are discovered from the label files and sorted, which means
+    ///     two splits of the same dataset can disagree on IDs if one split is
+    ///     missing a class.
+    ///
+    /// Returns
+    /// -------
+    /// COCO
+    ///     A new ``COCO`` object containing the parsed dataset.
+    ///
+    /// Examples
+    /// --------
+    /// >>> coco = COCO.from_dota("labelTxt/", images_dir="images/")
+    /// >>> ev = COCOeval(coco, preds, "obb")
+    #[classmethod]
+    #[pyo3(signature = (label_dir, images_dir=None, categories=None))]
+    fn from_dota(
+        cls: &Bound<'_, PyType>,
+        label_dir: &str,
+        images_dir: Option<&str>,
+        categories: Option<Vec<String>>,
+    ) -> PyResult<PyCOCO> {
+        let image_dims = match images_dir {
+            Some(dir) => read_image_dims(cls.py(), dir)?,
+            None => HashMap::new(),
+        };
+
+        hotcoco_core::convert::dota_to_coco(Path::new(label_dir), categories, &image_dims)
+            .map(PyCOCO::without_image_dir)
+            .map_err(|e| to_pyerr(e.into()))
+    }
+
+    /// Export the dataset to Open Images challenge CSV format.
+    ///
+    /// Writes ``ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf`` with coordinates
+    /// normalized back to ``[0, 1]``. Note the column order — Open Images puts
+    /// ``XMax`` before ``YMin``. When any annotation carries a score, a ``Score``
+    /// column is inserted so detection files round-trip too.
+    ///
+    /// ``LabelName`` is written as the COCO category name. A dataset that was
+    /// imported with ``class_descriptions`` therefore exports display names
+    /// ("Beer") rather than the MIDs it came from ("/m/0cmf2").
+    ///
+    /// Parameters
+    /// ----------
+    /// output_csv : str
+    ///     Path of the CSV file to write.
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``{'images': int, 'annotations': int, 'group_of': int, 'skipped_no_bbox': int}``
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If an image has zero or unknown dimensions — coordinates cannot be
+    ///     normalized back to ``[0, 1]`` without them.
+    ///
+    /// Examples
+    /// --------
+    /// >>> coco = COCO("instances_val2017.json")
+    /// >>> stats = coco.to_oid("boxes.csv")
+    fn to_oid(&self, py: Python<'_>, output_csv: &str) -> PyResult<Py<PyAny>> {
+        let stats = hotcoco_core::convert::coco_to_oid(&self.inner.dataset, Path::new(output_csv))
+            .map_err(|e| to_pyerr(e.into()))?;
+        let dict = PyDict::new(py);
+        dict.set_item("images", stats.images)?;
+        dict.set_item("annotations", stats.annotations)?;
+        dict.set_item("group_of", stats.group_of)?;
+        dict.set_item("skipped_no_bbox", stats.skipped_no_bbox)?;
+        Ok(dict.into_any().unbind())
+    }
+
+    /// Load an Open Images annotation CSV as a COCO dataset.
+    ///
+    /// Reads the full V6 layout and the challenge subset alike — columns are
+    /// resolved by name, not position. ``IsGroupOf`` becomes the ``is_group_of``
+    /// annotation field, which Open Images evaluation matches with IoA rather than
+    /// IoU.
+    ///
+    /// Parameters
+    /// ----------
+    /// csv_path : str
+    ///     Path to the annotations CSV (for example
+    ///     ``challenge-2019-validation-detection-bbox.csv``).
+    /// class_descriptions : str, optional
+    ///     Path to ``class-descriptions-boxable.csv``. Resolves ``LabelName`` MIDs
+    ///     such as ``/m/0cmf2`` to readable names such as ``Beer``. Without it,
+    ///     category names remain MIDs.
+    /// images_dir : str, optional
+    ///     Directory of source images, used to denormalize coordinates into
+    ///     pixels. Requires ``pip install Pillow``.
+    ///
+    /// Notes
+    /// -----
+    /// Open Images coordinates are normalized and the CSV does not record image
+    /// sizes. Without ``images_dir``, boxes stay in ``[0, 1]`` against a 1x1 image.
+    /// IoU and IoA are ratios of areas scaled identically on both axes, so Open
+    /// Images AP is unchanged — but absolute areas, and therefore the
+    /// small/medium/large ranges, are not meaningful in that mode.
+    ///
+    /// Returns
+    /// -------
+    /// COCO
+    ///     A new ``COCO`` object containing the parsed dataset.
+    ///
+    /// Examples
+    /// --------
+    /// >>> gt = COCO.from_oid(
+    /// ...     "challenge-2019-validation-detection-bbox.csv",
+    /// ...     class_descriptions="class-descriptions-boxable.csv",
+    /// ... )
+    /// >>> dt = gt.load_res_oid("predictions.csv")
+    /// >>> ev = COCOeval(gt, dt, "bbox", oid_style=True)
+    /// >>> ev.run()
+    #[classmethod]
+    #[pyo3(signature = (csv_path, class_descriptions=None, images_dir=None))]
+    fn from_oid(
+        cls: &Bound<'_, PyType>,
+        csv_path: &str,
+        class_descriptions: Option<&str>,
+        images_dir: Option<&str>,
+    ) -> PyResult<PyCOCO> {
+        let image_dims = match images_dir {
+            Some(dir) => read_image_dims(cls.py(), dir)?,
+            None => HashMap::new(),
+        };
+
+        hotcoco_core::convert::oid_to_coco(
+            Path::new(csv_path),
+            class_descriptions.map(Path::new),
+            &image_dims,
+        )
+        .map(PyCOCO::without_image_dir)
+        .map_err(|e| to_pyerr(e.into()))
+    }
+
+    /// Load Open Images detections as a result ``COCO``, aligned to this dataset.
+    ///
+    /// The Open Images equivalent of :meth:`load_res`. Detections must land on the
+    /// same image and category IDs as the ground truth, so ``ImageID`` is matched
+    /// against image file-name stems and ``LabelName`` against category names —
+    /// pass the same ``class_descriptions`` used to load the ground truth.
+    ///
+    /// A detection referencing an unknown image or category raises rather than
+    /// being dropped: silently discarding detections moves recall, which is
+    /// invisible once the metrics come out.
+    ///
+    /// Parameters
+    /// ----------
+    /// csv_path : str
+    ///     Detection CSV with a ``Score`` column.
+    /// class_descriptions : str, optional
+    ///     Same file passed to :meth:`from_oid`, if any.
+    ///
+    /// Returns
+    /// -------
+    /// COCO
+    ///     A result object suitable as the ``coco_dt`` argument to ``COCOeval``.
+    ///
+    /// Examples
+    /// --------
+    /// >>> gt = COCO.from_oid("boxes.csv")
+    /// >>> dt = gt.load_res_oid("predictions.csv")
+    #[pyo3(signature = (csv_path, class_descriptions=None))]
+    fn load_res_oid(&self, csv_path: &str, class_descriptions: Option<&str>) -> PyResult<PyCOCO> {
+        let anns = hotcoco_core::convert::oid_results_to_anns(
+            &self.inner.dataset,
+            Path::new(csv_path),
+            class_descriptions.map(Path::new),
+        )
+        .map_err(|e| to_pyerr(e.into()))?;
+
+        self.inner
+            .load_res_anns(anns)
+            .map(|inner| PyCOCO {
+                inner,
                 image_dir: None,
             })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Export to CVAT format (camelCase alias).
-    #[pyo3(name = "toCvat")]
-    fn to_cvat_camel(&self, py: Python<'_>, output_path: &str) -> PyResult<Py<PyAny>> {
-        self.to_cvat(py, output_path)
-    }
-
-    /// Load a CVAT XML file (camelCase alias).
-    #[classmethod]
-    #[pyo3(name = "fromCvat")]
-    fn from_cvat_camel(cls: &Bound<'_, PyType>, cvat_path: &str) -> PyResult<PyCOCO> {
-        Self::from_cvat(cls, cvat_path)
+            .map_err(to_pyerr)
     }
 
     /// pycocotools builds COCO objects by assignment — `coco = COCO();
@@ -827,7 +1073,7 @@ impl PyCOCO {
     /// a formality kept for the canonical `coco.dataset = d;
     /// coco.createIndex()` sequence.
     fn create_index(&mut self) {
-        self.inner = hotcoco_core::COCO::from_dataset(self.inner.dataset.clone());
+        self.inner.create_index();
     }
 
     #[pyo3(name = "createIndex")]
@@ -835,6 +1081,23 @@ impl PyCOCO {
         self.create_index();
     }
 
+    /// Warnings collected while loading and indexing this dataset.
+    ///
+    /// Each entry was also printed to stderr at the moment it arose; this
+    /// property exists for notebooks and servers where stderr is invisible.
+    /// An empty list means the load was clean.
+    #[getter]
+    fn load_warnings(&self) -> Vec<String> {
+        self.inner.load_warnings().to_vec()
+    }
+
+    /// The dataset as plain dicts: ``{"images": [...], "annotations": [...],
+    /// "categories": [...]}``.
+    ///
+    /// **Returns a fresh copy on every access.** Mutating it in place —
+    /// ``coco.dataset["annotations"].append(...)`` — changes a temporary and is
+    /// a silent no-op. Take the copy, edit it, and assign it back
+    /// (``coco.dataset = d``), which re-indexes immediately.
     #[getter]
     fn dataset(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let ds = &self.inner.dataset;
@@ -895,12 +1158,81 @@ impl PyCOCO {
         }
         Ok(dict.into_any().unbind())
     }
+
+    /// Launch an interactive dataset browser.
+    ///
+    /// Defined here rather than on a Python subclass so that every ``COCO``
+    /// this class hands back — ``load_res``, ``filter``, ``split``, ``sample``,
+    /// ``merge`` — carries the full API. A Python-side subclass could not
+    /// survive those methods: PyO3 constructs the base class.
+    ///
+    /// Parameters
+    /// ----------
+    /// image_dir : str, optional
+    ///     Root directory for image files. Overrides ``self.image_dir``.
+    /// dt : COCO or str, optional
+    ///     Detection results to overlay. Pass a COCO object (from
+    ///     ``self.load_res()``) or a path string (auto-loaded).
+    /// iou_type : str
+    ///     Evaluation type: ``"bbox"``, ``"segm"``, or ``"keypoints"``
+    ///     (default ``"bbox"``). Only used when ``dt`` is provided.
+    /// iou_thr : float
+    ///     Initial IoU threshold for TP/FP classification (default 0.5).
+    ///     Sets the starting position of the browser's IoU slider, which
+    ///     snaps it to the slider's 0.50-0.95 range in steps of 0.05.
+    /// eval : COCOeval, optional
+    ///     Pre-computed COCOeval (must have ``evaluate()`` called).
+    ///     When provided, ``iou_type`` is ignored.
+    /// slices : dict or str, optional
+    ///     Image subsets for sliced browsing. Pass a dict mapping slice
+    ///     names to image ID lists, or a path to a JSON file.
+    /// batch_size : int
+    ///     Number of images loaded per batch (default 12).
+    /// port : int
+    ///     Local server port (default 7860).
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If ``image_dir`` is ``None`` and ``self.image_dir`` is also ``None``.
+    /// ImportError
+    ///     If browse dependencies are not installed
+    ///     (``pip install hotcoco[browse]``).
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "(self, image_dir=None, dt=None, iou_type='bbox', iou_thr=0.5, \
+                          eval=None, slices=None, batch_size=12, port=7860)"
+    )]
+    fn browse(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        // The implementation lives in Python (`hotcoco.browse.browse_coco`):
+        // it drives a web server, Jupyter display, and matplotlib — Python's
+        // half of the project. Arguments pass through verbatim, so the
+        // signature above is documentation and the Python function is the
+        // arbiter (it raises `TypeError` for anything unexpected).
+        let py = slf.py();
+        let func = py.import("hotcoco.browse")?.getattr("browse_coco")?;
+        let mut all_args: Vec<Py<PyAny>> = vec![slf.as_any().clone().unbind()];
+        all_args.extend(args.iter().map(pyo3::Bound::unbind));
+        func.call(PyTuple::new(py, all_args)?, kwargs)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
 
+#[doc = "Evaluation parameters controlling IoU thresholds, area ranges, etc.
+
+Attribute reads return **copies**: ``p.max_dets.append(200)`` appends to a
+temporary list and is a silent no-op. Assign the whole attribute instead —
+``p.max_dets = [1, 10, 100, 200]`` — the same way for every list-valued field
+and its camelCase alias (``p.maxDets``, ``p.iouThrs``, ...). ``ev.params``
+itself is a live object: assigning to its attributes configures the run."]
 #[pyclass(name = "Params", from_py_object)]
 #[derive(Clone)]
 struct PyParams {
@@ -1247,56 +1579,23 @@ Open Images workflow::
 struct PyCOCOeval {
     inner: hotcoco_core::COCOeval,
     /// The `params` object handed to Python, held so every access returns the
-    /// *same* object.
-    ///
-    /// The getter used to clone `inner.params` into a fresh `PyParams`, which
-    /// made pycocotools' canonical idiom a silent no-op:
-    ///
-    /// ```python
-    /// E = COCOeval(gt, dt, "bbox")
-    /// E.params.imgIds = img_ids   # mutated a temporary, then dropped it
-    /// E.evaluate()                # evaluated the whole dataset anyway
-    /// ```
-    ///
-    /// That is the documented way to restrict evaluation to a subset — it is in
-    /// pycocotools' own demo — so a drop-in replacement has to honour it.
-    /// `sync_params` copies this object's state into `inner` before evaluation.
+    /// *same* object — `E.params.imgIds = [...]` (pycocotools' canonical idiom,
+    /// used in its own demo) must configure the run, not mutate a temporary.
+    /// `with_params` copies this object's state into `inner` before evaluation.
     params: Py<PyParams>,
 }
 
 impl PyCOCOeval {
-    /// Run `f` against the evaluator with `ev.params` reconciled on both sides.
+    /// Run `f` against the evaluator with `ev.params` reconciled on both sides:
+    /// pull the Python-visible `Params` in, run, push the result back.
     ///
-    /// `PyCOCOeval` keeps the Python-visible `Params` in a separate object so that
-    /// `ev.params.imgIds = [...]` — pycocotools' canonical idiom, and the one in
-    /// its own demo — configures the run instead of mutating a temporary. That
-    /// only works if *every* entry point syncs: patching `evaluate()` alone left
-    /// `run()` ignoring params entirely, and left a post-`evaluate()` mutation
-    /// invisible to `summarize()`, which then reported `parity_verified` for an
-    /// off-reference configuration. One owner for the sync, not one call site.
-    ///
-    /// Pull in, run, push back. The push-back matters: `evaluate()` resolves empty
-    /// `img_ids`/`cat_ids` to the whole dataset and sorts them, and pycocotools
-    /// likewise leaves the resolved lists on `params`, so a caller reading
-    /// `ev.params.imgIds` afterwards sees what actually ran.
-    ///
-    /// **Every method that reads `params` goes through here.** The inventory,
-    /// so the next one added is checked against a list rather than against
-    /// memory:
-    ///
-    /// - drivers: `evaluate`, `accumulate`, `summarize`, `summary_lines`, `run`
-    /// - provenance: `provenance`, `is_benchmark_standard`, `reference_deviations`
-    /// - results: `metric_keys`, `metric_defs`, `get_results`, `report`,
-    ///   `results`, `save_results`, `f_scores`
-    /// - analysis: `confusion_matrix`, `tide_errors`, `calibration`, `slice_by`,
-    ///   `image_diagnostics`
-    ///
-    /// The analysis methods are the ones this was demonstrated on:
-    /// `ev.params.catIds = [1]; ev.confusion_matrix()` silently evaluated every
-    /// category, because `confusion_matrix` is documented as standalone — no
-    /// `evaluate()` first — so nothing else had ever synced `params` for it.
-    /// Adding `py: Python<'_>` to a method's signature to reach this is free:
-    /// PyO3 fills the argument in, and Python sees the same signature.
+    /// **Every method that reads `params` — drivers, provenance, results, and
+    /// the standalone analysis methods alike — must go through here**; a method
+    /// that skips the sync silently ignores `ev.params` mutations. The push-back
+    /// matters too: `evaluate()` resolves empty `img_ids`/`cat_ids` to the whole
+    /// dataset and sorts them, and pycocotools likewise leaves the resolved
+    /// lists on `params`, so a caller reading `ev.params.imgIds` afterwards sees
+    /// what actually ran.
     fn with_params<R>(
         &mut self,
         py: Python<'_>,
@@ -1404,45 +1703,36 @@ impl PyCOCOeval {
         self.with_params(py, |ev| py.detach(|| ev.evaluate()));
     }
 
-    fn accumulate(&mut self, py: Python<'_>) {
+    fn accumulate(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.inner.eval_imgs().is_empty() {
-            eprintln!(
+            warn_user(
+                py,
                 "hotcoco: accumulate() called before evaluate(). \
-                 Call evaluate() first or the results will be empty."
-            );
+                 Call evaluate() first or the results will be empty.",
+            )?;
         }
         self.with_params(py, |ev| py.detach(|| ev.accumulate()));
+        Ok(())
     }
 
     fn summarize(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.inner.accumulated().is_none() {
-            eprintln!(
+            warn_user(
+                py,
                 "hotcoco: summarize() called before accumulate(). \
-                 Call evaluate() then accumulate() first."
-            );
+                 Call evaluate() then accumulate() first.",
+            )?;
         }
 
         // Re-raise the comparability warnings as real Python warnings.
-        //
-        // `COCOeval::summarize` writes them with `eprintln!`, which goes straight
-        // to file descriptor 2 and therefore bypasses `sys.stderr`: invisible in a
-        // Jupyter cell, invisible to `capsys`, and uncatchable by
-        // `warnings.catch_warnings`. Notebook users are the primary audience for
-        // this library and never saw them. Emitting here means the usual controls
-        // — filters, -W flags, pytest.warns — all work.
-        // Syncing here, not only in `evaluate()`: mutating `ev.params` afterwards
-        // must still reach the comparability check, or `ev.params` and the
-        // provenance marker end up describing different runs.
+        // `COCOeval::summarize` writes them with `eprintln!` to fd 2, which
+        // bypasses `sys.stderr` — invisible in a Jupyter cell, uncatchable by
+        // `warnings.catch_warnings`. Emitting here makes filters, -W flags, and
+        // pytest.warns all work. Synced via `with_params` so a post-`evaluate()`
+        // params mutation still reaches the comparability check.
         let deviations = self.with_params(py, |ev| ev.reference_deviations());
         for w in &deviations {
-            let msg = std::ffi::CString::new(format!("hotcoco: {w}"))
-                .unwrap_or_else(|_| c"hotcoco: run is not reference-comparable".to_owned());
-            PyErr::warn(
-                py,
-                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
-                &msg,
-                1,
-            )?;
+            warn_user(py, &format!("hotcoco: {w}"))?;
         }
 
         // `summarize_lines()` rather than `summarize()`: the latter also prints the
@@ -1464,14 +1754,15 @@ Use this instead of ``summarize()`` when you need to capture or restyle the outp
 >>> for line in lines:
 ...     print(line)
 "]
-    fn summary_lines(&mut self, py: Python<'_>) -> Vec<String> {
+    fn summary_lines(&mut self, py: Python<'_>) -> PyResult<Vec<String>> {
         if self.inner.accumulated().is_none() {
-            eprintln!(
+            warn_user(
+                py,
                 "hotcoco: summary_lines() called before accumulate(). \
-                 Call evaluate() then accumulate() first."
-            );
+                 Call evaluate() then accumulate() first.",
+            )?;
         }
-        self.with_params(py, hotcoco_core::COCOeval::summarize_lines)
+        Ok(self.with_params(py, hotcoco_core::COCOeval::summarize_lines))
     }
 
     #[doc = "Run the full evaluation pipeline: evaluate → accumulate → summarize.
@@ -1789,21 +2080,24 @@ Examples
     #[pyo3(signature = (beta = 1.0))]
     fn f_scores(&mut self, py: Python<'_>, beta: f64) -> PyResult<Py<PyAny>> {
         if self.inner.accumulated().is_none() {
-            eprintln!(
+            warn_user(
+                py,
                 "hotcoco: f_scores() called before accumulate(). \
-                 Call evaluate() then accumulate() first. Returning empty dict."
-            );
+                 Call evaluate() then accumulate() first. Returning empty dict.",
+            )?;
         }
         let scores = self.with_params(py, |ev| ev.f_scores(beta));
         Ok(map_to_dict(py, scores)?.into_any().unbind())
     }
 
+    /// The ground-truth dataset this evaluator was built from.
+    ///
+    /// **Each access returns a fresh copy** — two reads give two independent
+    /// objects, and mutating one never reaches the evaluator. To evaluate
+    /// against different ground truth, construct a new ``COCOeval``.
     #[getter]
     fn coco_gt(&self) -> PyCOCO {
-        PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(self.inner.coco_gt.dataset.clone()),
-            image_dir: None,
-        }
+        PyCOCO::without_image_dir(self.inner.coco_gt.dataset.clone())
     }
 
     #[getter(cocoGt)]
@@ -1811,12 +2105,12 @@ Examples
         self.coco_gt()
     }
 
+    /// The detection dataset this evaluator was built from.
+    ///
+    /// **Each access returns a fresh copy** — see ``coco_gt``.
     #[getter]
     fn coco_dt(&self) -> PyCOCO {
-        PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(self.inner.coco_dt.dataset.clone()),
-            image_dir: None,
-        }
+        PyCOCO::without_image_dir(self.inner.coco_dt.dataset.clone())
     }
 
     #[getter(cocoDt)]
@@ -1824,11 +2118,23 @@ Examples
         self.coco_dt()
     }
 
+    /// The evaluation parameters — the **same live object** on every access.
+    ///
+    /// Assigning to its attributes (``ev.params.imgIds = [...]``) configures
+    /// the run; the evaluator re-reads them on every call. But attribute
+    /// *reads* return copies, so ``ev.params.maxDets.append(200)`` mutates a
+    /// temporary — assign the whole list instead. See ``Params``.
     #[getter]
     fn params(&self, py: Python<'_>) -> Py<PyParams> {
         self.params.clone_ref(py)
     }
 
+    /// Replace the evaluation parameters.
+    ///
+    /// **Assignment stores a copy** of ``value`` — mutating the original object
+    /// afterwards does not reach the evaluator. Either finish configuring
+    /// before assigning, or mutate ``ev.params`` attributes after (that object
+    /// is live: the evaluator re-reads it on every call).
     #[setter]
     fn set_params(&mut self, py: Python<'_>, params: &PyParams) -> PyResult<()> {
         self.inner.params = params.inner.clone();
@@ -1841,9 +2147,16 @@ Examples
         Ok(())
     }
 
+    /// Summary metrics — pycocotools semantics.
+    ///
+    /// An empty list before ``summarize()`` has run, then a numpy ``float64``
+    /// array (12 values for bbox/segm, 10 for keypoints, 13 for LVIS).
     #[getter]
-    fn stats(&self) -> Option<Vec<f64>> {
-        self.inner.stats().map(<[f64]>::to_vec)
+    fn stats(&self, py: Python<'_>) -> Py<PyAny> {
+        match self.inner.stats() {
+            Some(s) => numpy::PyArray1::from_slice(py, s).into_any().unbind(),
+            None => PyList::empty(py).into_any().unbind(),
+        }
     }
 
     #[getter]
@@ -2074,11 +2387,10 @@ Example\n\
             let gt_images = &self.inner.coco_gt.dataset.images;
             let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
             for img in gt_images {
-                let img_dict = PyDict::new(py);
-                img_dict.set_item("id", img.id)?;
-                img_dict.set_item("file_name", &img.file_name)?;
-                img_dict.set_item("height", img.height)?;
-                img_dict.set_item("width", img.width)?;
+                // The callable sees the *full* image dict — every standard
+                // field plus any custom keys — so slicing on user metadata
+                // (`img["weather"]`, `img["camera"]`) works.
+                let img_dict = image_to_py(py, img)?;
                 let result = slices.call1((img_dict,))?;
                 if result.is_none() {
                     continue;
@@ -2461,9 +2773,12 @@ fn compare(
         seed,
         confidence,
     };
+    // `ValueError` for every failure here: not-yet-evaluated inputs and
+    // mismatched parameter catalogs (iou_thrs, rec_thrs, max_dets, area
+    // ranges) are both bad arguments to *this* call, not runtime faults.
     let result = py
         .detach(|| hotcoco_core::compare(&eval_a.inner, &eval_b.inner, &opts))
-        .map_err(to_pyerr)?;
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let metrics_a = map_to_dict(py, &result.metrics_a)?;
     let metrics_b = map_to_dict(py, &result.metrics_b)?;

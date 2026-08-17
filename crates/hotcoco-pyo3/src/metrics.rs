@@ -106,9 +106,11 @@ fn precision_recall_curve(
     let thrs = rec_thrs.unwrap_or_else(default_rec_thrs);
     let (final_recall, curve) = rcounts::precision_recall_curve(&tp_cum, &fp_cum, num_gt, &thrs);
 
+    // Emit the same `(threshold_index, precision, rank)` tuples as before the
+    // core function grew named `PrPoint` fields — the Python surface is stable.
     let points = PyList::empty(py);
-    for (t_idx, prec, rank) in curve {
-        points.append((t_idx, prec, rank))?;
+    for p in curve {
+        points.append((p.rec_thr_idx, p.precision, p.detection_rank))?;
     }
     Ok((final_recall, points)
         .into_pyobject(py)?
@@ -236,6 +238,31 @@ fn confusion_matrix(
     confusion_counts_to_py(py, flat, num_classes + 1)
 }
 
+#[pyfunction]
+#[doc = "Whether a metric value was actually computed.
+
+hotcoco reports ``-1.0`` for a metric that was *not computed for this
+configuration* — an area range with no ground truth, a category absent from the
+split — never as a low score. This is the one place that convention is decided;
+call it rather than re-deriving ``v >= 0.0`` by hand.
+
+Example:
+    >>> from hotcoco import metrics
+    >>> [v for v in report['per_class']['dog'].values() if metrics.is_computed(v)]
+"]
+fn is_computed(v: f64) -> bool {
+    hotcoco_core::metrics::is_computed(v)
+}
+
+#[pyfunction]
+#[doc = "Whether a metric value is the 'not computed' sentinel (``-1.0``).
+
+The negation of :func:`is_computed`, provided so filters read in either
+direction without a hand-rolled comparison."]
+fn is_missing(v: f64) -> bool {
+    hotcoco_core::metrics::is_missing(v)
+}
+
 /// Build the `hotcoco.metrics` submodule.
 pub fn register(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     let m = PyModule::new(py, "metrics")?;
@@ -244,5 +271,7 @@ pub fn register(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     m.add_function(wrap_pyfunction!(calibration_curve, &m)?)?;
     m.add_function(wrap_pyfunction!(calibration_error, &m)?)?;
     m.add_function(wrap_pyfunction!(confusion_matrix, &m)?)?;
+    m.add_function(wrap_pyfunction!(is_computed, &m)?)?;
+    m.add_function(wrap_pyfunction!(is_missing, &m)?)?;
     Ok(m)
 }

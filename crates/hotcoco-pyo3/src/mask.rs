@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::convert::{py_to_rle, rle_to_coco_py};
+use crate::to_pyerr;
 
 /// Transpose between row-major (numpy) and column-major (hotcoco) mask layouts.
 ///
@@ -86,7 +87,11 @@ fn encode_2d(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         transpose_mask(slice, h, w)
     };
 
-    let rle = rmask::encode(&col_major, h as u32, w as u32);
+    // Owned buffer from here on, so the encode itself runs without the GIL —
+    // same convention as the COCOeval driver paths.
+    let rle = py
+        .detach(|| rmask::encode(&col_major, h as u32, w as u32))
+        .map_err(to_pyerr)?;
     rle_to_coco_py(py, &rle)
 }
 
@@ -108,7 +113,9 @@ fn encode_3d(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
                 col_major.push(slice_2d[[y, x]]);
             }
         }
-        let rle = rmask::encode(&col_major, h as u32, w as u32);
+        let rle = py
+            .detach(|| rmask::encode(&col_major, h as u32, w as u32))
+            .map_err(to_pyerr)?;
         list.append(rle_to_coco_py(py, &rle)?)?;
     }
     Ok(list.into_any().unbind())
@@ -135,7 +142,7 @@ pub fn decode(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(dict) = rle.cast::<PyDict>() {
         // Single RLE → (H, W) Fortran-order
         let r = py_to_rle(dict)?;
-        let col_major = rmask::decode(&r);
+        let col_major = py.detach(|| rmask::decode(&r));
         let h = r.h as usize;
         let w = r.w as usize;
         // col_major is already in Fortran order — create array and set flag
@@ -160,10 +167,13 @@ pub fn decode(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // Build (H, W, N) Fortran-order: for each slice, decode gives
         // column-major data. In Fortran order for 3D, axis 0 varies fastest,
         // so memory layout is: all (h*w) of slice 0, then slice 1, etc.
-        let mut data = Vec::with_capacity(h * w * n);
-        for r in &rles {
-            data.extend_from_slice(&rmask::decode(r));
-        }
+        let data = py.detach(|| {
+            let mut data = Vec::with_capacity(h * w * n);
+            for r in &rles {
+                data.extend_from_slice(&rmask::decode(r));
+            }
+            data
+        });
         let flat = PyArray1::from_vec(py, data);
         let arr3d =
             flat.reshape_with_order([h, w, n], numpy::npyffi::NPY_ORDER::NPY_FORTRANORDER)?;
@@ -191,7 +201,10 @@ pub fn area(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(a.into_pyobject(py)?.into_any().unbind())
     } else {
         let rles = extract_rle_list(rle)?;
-        let areas: Vec<u64> = rles.iter().map(rmask::area).collect();
+        // `uint32`, matching pycocotools' array dtype exactly — the parity
+        // suite checks dtypes, not just values. (The scalar path above hands
+        // back a Python int, which has no dtype to match.)
+        let areas: Vec<u32> = rles.iter().map(|r| rmask::area(r) as u32).collect();
         let arr = PyArray1::from_vec(py, areas);
         Ok(arr.into_any().unbind())
     }
@@ -244,7 +257,7 @@ pub fn to_bbox_camel(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAn
 #[pyo3(signature = (rles, intersect = false))]
 pub fn merge(py: Python<'_>, rles: &Bound<'_, PyAny>, intersect: bool) -> PyResult<Py<PyAny>> {
     let rle_vec = extract_rle_list(rles)?;
-    let result = rmask::merge(&rle_vec, intersect);
+    let result = rmask::merge(&rle_vec, intersect).map_err(to_pyerr)?;
     rle_to_coco_py(py, &result)
 }
 
@@ -298,7 +311,9 @@ pub fn iou(
     let gt_rles = extract_rle_list(gt)?;
     let iscrowd = extract_iscrowd(iscrowd)?;
     check_iscrowd_len(iscrowd.len(), gt_rles.len())?;
-    let result = rmask::iou(&dt_rles, &gt_rles, &iscrowd);
+    // All inputs are owned by now; the O(D*G) kernel runs GIL-free like the
+    // COCOeval paths.
+    let result = py.detach(|| rmask::iou(&dt_rles, &gt_rles, &iscrowd));
     let d = dt_rles.len();
     let g = gt_rles.len();
     let mut flat = Vec::with_capacity(d * g);
@@ -339,7 +354,7 @@ pub fn bbox_iou(
 #[pyfunction]
 #[pyo3(text_signature = "(xy, h, w)")]
 pub fn fr_poly(py: Python<'_>, xy: Vec<f64>, h: u32, w: u32) -> PyResult<Py<PyAny>> {
-    let rle = rmask::fr_poly(&xy, h, w);
+    let rle = rmask::fr_poly(&xy, h, w).map_err(to_pyerr)?;
     rle_to_coco_py(py, &rle)
 }
 
@@ -357,7 +372,7 @@ pub fn fr_poly_camel(py: Python<'_>, xy: Vec<f64>, h: u32, w: u32) -> PyResult<P
 #[pyfunction]
 #[pyo3(text_signature = "(bb, h, w)")]
 pub fn fr_bbox(py: Python<'_>, bb: [f64; 4], h: u32, w: u32) -> PyResult<Py<PyAny>> {
-    let rle = rmask::fr_bbox(&bb, h, w);
+    let rle = rmask::fr_bbox(&bb, h, w).map_err(to_pyerr)?;
     rle_to_coco_py(py, &rle)
 }
 
@@ -400,7 +415,7 @@ pub fn rle_from_string(py: Python<'_>, s: &str, h: u32, w: u32) -> PyResult<Py<P
 ///     - List of flattened polygons ``[x1, y1, x2, y2, ...]`` → list of RLE dicts.
 ///       Entries of exactly 4 values are boxes, more than 4 are polygons —
 ///       the same length-based dispatch pycocotools uses.
-///     - Single uncompressed RLE dict → list of 1 RLE dict.
+///     - Single RLE dict (compressed or uncompressed) → one RLE dict.
 ///     - List of uncompressed RLE dicts → list of RLE dicts.
 /// h : int
 ///     Image height.
@@ -409,8 +424,9 @@ pub fn rle_from_string(py: Python<'_>, s: &str, h: u32, w: u32) -> PyResult<Py<P
 ///
 /// Returns
 /// -------
-/// list[dict]
-///     List of RLE dicts in pycocotools format.
+/// dict or list[dict]
+///     A single RLE dict when ``seg`` is a dict, a list of RLE dicts when it
+///     is a list — dict in, dict out, exactly as pycocotools does it.
 #[pyfunction]
 #[pyo3(name = "frPyObjects", text_signature = "(seg, h, w)")]
 pub fn fr_py_objects(
@@ -442,22 +458,21 @@ pub fn fr_py_objects(
         }
         Ok(list.into_any().unbind())
     } else {
-        // List (or ndarray) of coordinate sequences. pycocotools dispatches on the
-        // length of the first entry — exactly 4 is a `[x, y, w, h]` box, more than
-        // 4 is a flattened polygon — and routing everything to `fr_poly` was
-        // silently wrong for boxes: `fr_poly` returns an empty RLE below three
-        // points, so every bbox produced a blank mask instead of a rectangle.
+        // List (or ndarray) of coordinate sequences, dispatched on entry length like
+        // pycocotools: exactly 4 is a `[x, y, w, h]` box, more than 4 a flattened
+        // polygon. `fr_poly` returns an empty RLE below three points, so a box must
+        // not reach it.
         //
-        // One deliberate deviation: pycocotools' box path is reachable only with a
-        // numpy array and raises `TypeError` on a list of lists. Accepting both is
-        // strictly more permissive, so nothing that works against pycocotools
-        // breaks here.
+        // Deliberate deviation: pycocotools' box path requires a numpy array and
+        // raises `TypeError` on a list of lists. Accepting both is strictly more
+        // permissive.
         let list = PyList::empty(py);
         for item in &items {
             let coords: Vec<f64> = item.extract()?;
             let rle = match coords.len() {
-                4 => rmask::fr_bbox(&[coords[0], coords[1], coords[2], coords[3]], h, w),
-                n if n > 4 => rmask::fr_poly(&coords, h, w),
+                4 => rmask::fr_bbox(&[coords[0], coords[1], coords[2], coords[3]], h, w)
+                    .map_err(to_pyerr)?,
+                n if n > 4 => rmask::fr_poly(&coords, h, w).map_err(to_pyerr)?,
                 n => {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "frPyObjects: each entry must be a box [x, y, w, h] (4 values) \
@@ -473,7 +488,12 @@ pub fn fr_py_objects(
 }
 
 /// Snake-case alias for `frPyObjects`.
+///
+/// The explicit `name` is load-bearing: PyO3 falls back to the Rust identifier,
+/// so without it the snake_case spelling this alias exists to provide is the one
+/// spelling not reachable from Python.
 #[pyfunction]
+#[pyo3(name = "fr_py_objects", text_signature = "(seg, h, w)")]
 pub fn fr_py_objects_snake(
     py: Python<'_>,
     seg: &Bound<'_, PyAny>,

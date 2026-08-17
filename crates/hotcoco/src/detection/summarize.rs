@@ -1,7 +1,7 @@
 //! The summary reduction: accumulated eval arrays + metric definitions -> numbers.
 //!
 //! This module computes and nothing else. The catalog of *which* metrics exist
-//! is [`super::metrics`]; turning the resulting numbers into printed lines,
+//! is [`super::catalog`]; turning the resulting numbers into printed lines,
 //! result maps, or DTOs is [`super::report`].
 
 use std::collections::{BTreeMap, HashSet};
@@ -167,12 +167,17 @@ pub(super) fn summarize_impl(
     metrics: &[MetricDef],
 ) -> Vec<f64> {
     let summarize_stat = |ap: bool, iou_thr: Option<f64>, area_lbl: &str, max_det: usize| -> f64 {
-        let a_idx = params.area_range_idx(area_lbl).unwrap_or(0);
-        let m_idx = params
-            .max_dets
-            .iter()
-            .position(|&d| d == max_det)
-            .unwrap_or(0);
+        // A missing area label or max-det setting degrades to the `-1.0` "not
+        // computed" sentinel, exactly like the missing-IoU-threshold branch
+        // below. Falling back to index 0 instead reported the "all" slice (or
+        // an arbitrary M slot) under a per-size metric's name — a plausible
+        // wrong number with nothing to flag it.
+        let Some(a_idx) = params.area_range_idx(area_lbl) else {
+            return -1.0;
+        };
+        let Some(m_idx) = params.max_dets.iter().position(|&d| d == max_det) else {
+            return -1.0;
+        };
 
         let t_indices: Vec<usize> = if let Some(thr) = iou_thr {
             // `Params::iou_thr_idx` owns this lookup — a single-threshold metric

@@ -11,7 +11,14 @@ use crate::types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
 
 /// The COCO dataset API for loading, querying, and indexing annotations.
 pub struct COCO {
+    /// The raw dataset. Public and mutable for pycocotools-style direct
+    /// manipulation — but the query indices do **not** track it: after
+    /// mutating `dataset` in place, call [`create_index`](Self::create_index)
+    /// or every `get_*`/`load_*` method answers from the stale index.
     pub dataset: Dataset,
+    /// Non-fatal problems noticed while loading/indexing; see
+    /// [`load_warnings`](Self::load_warnings).
+    warnings: Vec<String>,
     /// ann_id -> index into dataset.annotations
     anns: HashMap<u64, usize>,
     /// img_id -> index into dataset.images
@@ -32,6 +39,45 @@ pub struct COCO {
     /// order observable through `evalImgs`. Official COCO files are id-ordered
     /// anyway; converted or merged files are where the two orders differ.
     img_cat_to_anns: HashMap<(u64, u64), Vec<u64>>,
+}
+
+/// What kind of results a detection file holds, decided from its first
+/// annotation.
+///
+/// pycocotools' `loadRes` infers this the same way and in the same order — a
+/// bbox wins outright, then a segmentation, then keypoints — and derives the
+/// missing geometry to match. The kind is a property of the *file*, not of each
+/// annotation: one detection deciding for all of them is the pycocotools
+/// behavior, faithfully kept.
+///
+/// `Obb` is a hotcoco extension with no pycocotools counterpart, so it sits last
+/// and cannot displace any of the three.
+#[derive(Clone, Copy)]
+enum ResultKind {
+    Bbox,
+    Segm,
+    Keypoints,
+    Obb,
+}
+
+impl ResultKind {
+    /// `None` when the annotation carries no geometry at all, in which case
+    /// nothing is derived and the results pass through untouched.
+    fn of(first: &Annotation) -> Option<Self> {
+        if first.bbox.is_some() {
+            Some(ResultKind::Bbox)
+        } else if first.segmentation.is_some() {
+            // Segmentation outranks keypoints even when both are present —
+            // pycocotools' `elif 'segmentation' in anns[0]` order.
+            Some(ResultKind::Segm)
+        } else if first.keypoints.is_some() {
+            Some(ResultKind::Keypoints)
+        } else if first.obb.is_some() {
+            Some(ResultKind::Obb)
+        } else {
+            None
+        }
+    }
 }
 
 /// Normalize non-finite JSON float tokens (`NaN`, `Infinity`, `-Infinity`) to
@@ -173,20 +219,53 @@ mod sanitize_tests {
     }
 }
 
+/// Inclusive area-range predicate shared by [`COCO::get_ann_ids`] and
+/// [`COCO::filter`] — the one owner of the missing-`area` convention.
+///
+/// An annotation without an `area` value never matches an explicit range.
+/// pycocotools' `getAnnIds` reads `ann['area']` unconditionally and raises
+/// `KeyError` on a missing key; a filter cannot raise, so exclusion is the
+/// closest faithful behavior (it never fabricates an area of 0.0, which used
+/// to make area-less annotations match any range starting at 0).
+fn area_in_range(ann: &Annotation, rng: [f64; 2]) -> bool {
+    ann.area.is_some_and(|a| a >= rng[0] && a <= rng[1])
+}
+
 impl COCO {
     /// Load a COCO annotation JSON file and build indices.
+    ///
+    /// Non-fatal problems (non-finite floats normalized to `null`, duplicate
+    /// annotation ids) are printed to stderr and retained on the returned
+    /// object — see [`load_warnings`](Self::load_warnings).
     pub fn new(annotation_file: &Path) -> crate::error::Result<Self> {
         let raw = std::fs::read(annotation_file)?;
         let (mut bytes, n_fixed) = Self::sanitize_owned(raw);
+        let dataset: Dataset = simd_json::serde::from_slice(&mut bytes)?;
+        let mut coco = Self::from_dataset(dataset);
         if n_fixed > 0 {
-            eprintln!(
-                "hotcoco: normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
+            coco.warn(format!(
+                "normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
                 annotation_file.display()
-            );
+            ));
         }
-        let dataset: Dataset = simd_json::serde::from_slice(&mut bytes)
-            .map_err(|e| crate::error::Error::from(format!("invalid JSON: {e}")))?;
-        Ok(Self::from_dataset(dataset))
+        Ok(coco)
+    }
+
+    /// Warnings collected while loading and indexing this dataset.
+    ///
+    /// Each entry was also printed to stderr at the moment it arose (so CLI
+    /// behavior is unchanged); this accessor exists for callers — the Python
+    /// bindings, notebooks, servers — where stderr is invisible. Empty for a
+    /// clean load.
+    pub fn load_warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Record a non-fatal problem: print it to stderr and retain it for
+    /// [`load_warnings`](Self::load_warnings).
+    fn warn(&mut self, msg: String) {
+        eprintln!("hotcoco: {msg}");
+        self.warnings.push(msg);
     }
 
     /// [`sanitize_non_finite`] over an owned buffer: hands the original buffer
@@ -203,6 +282,7 @@ impl COCO {
     pub fn from_dataset(dataset: Dataset) -> Self {
         let mut coco = COCO {
             dataset,
+            warnings: Vec::new(),
             anns: HashMap::new(),
             imgs: HashMap::new(),
             cats: HashMap::new(),
@@ -214,8 +294,16 @@ impl COCO {
         coco
     }
 
-    /// Build internal index structures from the dataset.
-    fn create_index(&mut self) {
+    /// Rebuild the internal query indices from `dataset`.
+    ///
+    /// Call this after mutating [`dataset`](Self::dataset) directly (the
+    /// pycocotools `createIndex()` idiom) — the indices are snapshots, not
+    /// views, and every `get_*`/`load_*` method answers from them.
+    ///
+    /// Duplicate annotation ids are indexed the way pycocotools does —
+    /// last-write-wins in the id lookup, while per-image lists keep every
+    /// occurrence — and reported via [`load_warnings`](Self::load_warnings).
+    pub fn create_index(&mut self) {
         let n_anns = self.dataset.annotations.len();
         let n_imgs = self.dataset.images.len();
         let n_cats = self.dataset.categories.len();
@@ -234,8 +322,13 @@ impl COCO {
         self.img_cat_to_anns.reserve(n_anns);
 
         // Single pass over annotations: build all annotation-derived indices at once
+        let mut dup_ann_ids = 0usize;
+        let mut first_dup: Option<u64> = None;
         for (i, ann) in self.dataset.annotations.iter().enumerate() {
-            self.anns.insert(ann.id, i);
+            if self.anns.insert(ann.id, i).is_some() {
+                dup_ann_ids += 1;
+                first_dup.get_or_insert(ann.id);
+            }
             self.img_to_anns
                 .entry(ann.image_id)
                 .or_default()
@@ -248,6 +341,17 @@ impl COCO {
                 .entry(ann.category_id)
                 .or_default()
                 .push(ann.image_id);
+        }
+        if let Some(id) = first_dup {
+            // pycocotools parity: the id lookup keeps the last annotation with
+            // a given id, while imgToAnns keeps every occurrence — both are
+            // preserved here, and the condition is surfaced instead of silent.
+            self.warn(format!(
+                "{dup_ann_ids} duplicate annotation id(s) found (first: {id}). Lookups by id \
+                 see only the last occurrence; per-image annotation lists keep every \
+                 occurrence, so duplicates are double-counted there (pycocotools behaves \
+                 the same way). Deduplicate ids to make this dataset unambiguous."
+            ));
         }
 
         for (i, img) in self.dataset.images.iter().enumerate() {
@@ -281,8 +385,7 @@ impl COCO {
                 return false;
             }
             if let Some(rng) = area_rng {
-                let a = ann.area.unwrap_or(0.0);
-                if a < rng[0] || a > rng[1] {
+                if !area_in_range(ann, rng) {
                     return false;
                 }
             }
@@ -460,12 +563,6 @@ impl COCO {
     pub fn load_res(&self, res_file: &Path) -> crate::error::Result<COCO> {
         let raw = std::fs::read(res_file)?;
         let (mut bytes, n_fixed) = Self::sanitize_owned(raw);
-        if n_fixed > 0 {
-            eprintln!(
-                "hotcoco: normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
-                res_file.display()
-            );
-        }
 
         // The shape is decided by the first non-whitespace byte rather than by
         // try-parse-then-fallback: simd-json parses in place (it unescapes
@@ -475,16 +572,21 @@ impl COCO {
             .iter()
             .find(|b| !b.is_ascii_whitespace())
             .is_some_and(|&b| b == b'[');
-        let json_err =
-            |e: simd_json::Error| crate::error::Error::from(format!("invalid JSON: {e}"));
         let anns: Vec<Annotation> = if is_array {
-            simd_json::serde::from_slice(&mut bytes).map_err(json_err)?
+            simd_json::serde::from_slice(&mut bytes)?
         } else {
-            let ds: Dataset = simd_json::serde::from_slice(&mut bytes).map_err(json_err)?;
+            let ds: Dataset = simd_json::serde::from_slice(&mut bytes)?;
             ds.annotations
         };
 
-        self.load_res_anns(anns)
+        let mut res = self.load_res_anns(anns)?;
+        if n_fixed > 0 {
+            res.warn(format!(
+                "normalized {n_fixed} non-finite float value(s) (NaN/Infinity) to null while loading {}",
+                res_file.display()
+            ));
+        }
+        Ok(res)
     }
 
     /// Load detection results from an already-parsed list of annotations.
@@ -497,36 +599,85 @@ impl COCO {
     /// a round-trip through the filesystem. The Python binding uses this internally
     /// when `load_res` is called with a list of dicts or a numpy array.
     pub fn load_res_anns(&self, anns: Vec<Annotation>) -> crate::error::Result<COCO> {
+        let warnings = self.validate_results(&anns)?;
+
+        let mut dataset = Dataset {
+            info: self.dataset.info.clone(),
+            images: self.dataset.images.clone(),
+            annotations: anns,
+            categories: self.dataset.categories.clone(),
+            licenses: self.dataset.licenses.clone(),
+        };
+
+        // One kind for the whole file, from the first annotation, as pycocotools
+        // does — then fill in whatever geometry that kind implies.
+        if let Some(kind) = dataset.annotations.first().and_then(ResultKind::of) {
+            for ann in &mut dataset.annotations {
+                // Detection results are never crowd regions, whatever the input
+                // file claimed.
+                ann.iscrowd = false;
+                match kind {
+                    ResultKind::Bbox => Self::derive_from_bbox(ann),
+                    ResultKind::Segm => self.derive_from_segmentation(ann),
+                    ResultKind::Keypoints => Self::derive_from_keypoints(ann),
+                    ResultKind::Obb => Self::derive_from_obb(ann),
+                }
+            }
+        }
+
+        // Assign IDs to result annotations (1-indexed, unconditional like pycocotools)
+        for (i, ann) in dataset.annotations.iter_mut().enumerate() {
+            ann.id = (i + 1) as u64;
+        }
+
+        let mut res = COCO::from_dataset(dataset);
+        for w in warnings {
+            res.warn(w);
+        }
+        Ok(res)
+    }
+
+    /// Reject results that would make the run meaningless, and warn about ones
+    /// that merely make it wrong.
+    ///
+    /// The split is deliberate: a mismatched id yields misleadingly low metrics
+    /// that the user can still investigate, while a NaN score has no correct
+    /// interpretation at all.
+    ///
+    /// Returns the warnings so the caller can attach them to the result `COCO`
+    /// (they are emitted to stderr there, via [`warn`](Self::warn)).
+    fn validate_results(&self, anns: &[Annotation]) -> crate::error::Result<Vec<String>> {
+        let mut warnings = Vec::new();
+
         // Warn on the first annotation whose image_id or category_id isn't in the GT —
         // a common mistake that causes DTs to silently produce misleadingly low metrics.
         let gt_img_ids: HashSet<u64> = self.dataset.images.iter().map(|i| i.id).collect();
         if let Some(ann) = anns.iter().find(|a| !gt_img_ids.contains(&a.image_id)) {
-            eprintln!(
-                "hotcoco: load_res() warning — found annotation with image_id {} not in the \
+            warnings.push(format!(
+                "load_res() warning — found annotation with image_id {} not in the \
                  GT dataset. These DTs will never match. Check your results file matches the \
                  correct GT split.",
                 ann.image_id
-            );
+            ));
         }
 
         if !self.dataset.categories.is_empty() {
             let gt_cat_ids: HashSet<u64> = self.dataset.categories.iter().map(|c| c.id).collect();
             if let Some(ann) = anns.iter().find(|a| !gt_cat_ids.contains(&a.category_id)) {
-                eprintln!(
-                    "hotcoco: load_res() warning — found annotation with category_id {} not \
+                warnings.push(format!(
+                    "load_res() warning — found annotation with category_id {} not \
                      in the GT dataset. These DTs will never match.",
                     ann.category_id
-                );
+                ));
             }
         }
 
-        // A NaN score is rejected rather than warned about, because it corrupts the
-        // whole run rather than one annotation. Every ranking path sorts with
-        // `partial_cmp(..).unwrap_or(Equal)`, and that comparator is not transitive
-        // once NaN is present: the sort does not panic, it silently produces an
-        // arbitrary order, so AP becomes a function of the sort implementation.
-        // There is no sensible score to substitute — a detection with no confidence
-        // has no place in a ranked list at all.
+        // A NaN score is rejected rather than warned about: it corrupts the whole
+        // run, not one annotation. Every ranking path sorts with
+        // `partial_cmp(..).unwrap_or(Equal)`, which is not transitive once NaN is
+        // present — the sort silently produces an arbitrary order, so AP becomes
+        // a function of the sort implementation. (`healthcheck` reports the same
+        // condition as an error and points here.)
         if let Some((i, ann)) = anns
             .iter()
             .enumerate()
@@ -542,98 +693,80 @@ impl COCO {
             .into());
         }
 
-        let mut dataset = Dataset {
-            info: self.dataset.info.clone(),
-            images: self.dataset.images.clone(),
-            annotations: anns,
-            categories: self.dataset.categories.clone(),
-            licenses: self.dataset.licenses.clone(),
+        Ok(warnings)
+    }
+
+    /// Area from the box, and a rectangular segmentation when none was given.
+    fn derive_from_bbox(ann: &mut Annotation) {
+        let Some(bbox) = ann.bbox else {
+            return;
         };
-
-        // Determine result type from first annotation (matching pycocotools loadRes logic)
-        // Priority: bbox (if present and non-empty) > segmentation > keypoints
-        if let Some(first) = dataset.annotations.first() {
-            let has_bbox = first.bbox.is_some();
-            let has_seg = first.segmentation.is_some();
-            let has_kpts = first.keypoints.is_some();
-            let has_obb = first.obb.is_some();
-
-            if has_bbox {
-                // bbox results: area = bbox w*h, create segmentation from bbox if missing
-                for ann in &mut dataset.annotations {
-                    if let Some(ref bbox) = ann.bbox {
-                        ann.area = Some(bbox[2] * bbox[3]);
-                        if ann.segmentation.is_none() {
-                            let (x1, y1, bw, bh) = (bbox[0], bbox[1], bbox[2], bbox[3]);
-                            let (x2, y2) = (x1 + bw, y1 + bh);
-                            ann.segmentation = Some(crate::types::Segmentation::Polygon(vec![
-                                vec![x1, y1, x1, y2, x2, y2, x2, y1],
-                            ]));
-                        }
-                    }
-                    ann.iscrowd = false;
-                }
-            } else if has_seg && !has_kpts {
-                // segmentation results: area from mask RLE.
-                // Only CompressedRle is handled here, matching pycocotools' loadRes behavior.
-                // Polygon and UncompressedRle results are not expected in detection output files.
-                // Use the GT COCO (self) for image lookups — detection results
-                // share the same images, so self.get_img finds the right dims.
-                for ann in &mut dataset.annotations {
-                    if let Some(crate::types::Segmentation::CompressedRle { .. }) = ann.segmentation
-                    {
-                        if let Some(rle) = self.ann_to_rle(ann) {
-                            ann.area = Some(mask::area(&rle) as f64);
-                            if ann.bbox.is_none() {
-                                let bb = mask::to_bbox(&rle);
-                                ann.bbox = Some(bb);
-                            }
-                        }
-                    }
-                    ann.iscrowd = false;
-                }
-            } else if has_kpts {
-                // keypoints results: area and bbox from keypoint extent
-                for ann in &mut dataset.annotations {
-                    if let Some(ref kpts) = ann.keypoints {
-                        let (x0, x1) = kpts
-                            .iter()
-                            .step_by(3)
-                            .copied()
-                            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), v| {
-                                (mn.min(v), mx.max(v))
-                            });
-                        let (y0, y1) = kpts
-                            .iter()
-                            .skip(1)
-                            .step_by(3)
-                            .copied()
-                            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), v| {
-                                (mn.min(v), mx.max(v))
-                            });
-                        ann.area = Some((x1 - x0) * (y1 - y0));
-                        ann.bbox = Some([x0, y0, x1 - x0, y1 - y0]);
-                    }
-                    ann.iscrowd = false;
-                }
-            } else if has_obb {
-                // OBB results: area = w*h, bbox = axis-aligned bounding box of rotated rect
-                for ann in &mut dataset.annotations {
-                    if let Some(ref obb) = ann.obb {
-                        ann.area = Some(obb[2] * obb[3]);
-                        ann.bbox = Some(crate::geometry::obb_to_aabb(obb));
-                    }
-                    ann.iscrowd = false;
-                }
-            }
+        ann.area = Some(bbox[2] * bbox[3]);
+        if ann.segmentation.is_none() {
+            let (x1, y1, bw, bh) = (bbox[0], bbox[1], bbox[2], bbox[3]);
+            let (x2, y2) = (x1 + bw, y1 + bh);
+            ann.segmentation = Some(Segmentation::Polygon(vec![vec![
+                x1, y1, x1, y2, x2, y2, x2, y1,
+            ]]));
         }
+    }
 
-        // Assign IDs to result annotations (1-indexed, unconditional like pycocotools)
-        for (i, ann) in dataset.annotations.iter_mut().enumerate() {
-            ann.id = (i + 1) as u64;
+    /// Area and box from the mask.
+    ///
+    /// Only `CompressedRle` is handled, matching pycocotools' `loadRes`: polygon
+    /// and uncompressed-RLE results are not expected in a detection output file.
+    /// Image lookups go through the GT `COCO` (`self`), since detection results
+    /// share its images and therefore its dimensions.
+    fn derive_from_segmentation(&self, ann: &mut Annotation) {
+        if !matches!(ann.segmentation, Some(Segmentation::CompressedRle { .. })) {
+            return;
         }
+        let Some(rle) = self.ann_to_rle(ann) else {
+            return;
+        };
+        ann.area = Some(mask::area(&rle) as f64);
+        if ann.bbox.is_none() {
+            ann.bbox = Some(mask::to_bbox(&rle));
+        }
+    }
 
-        Ok(COCO::from_dataset(dataset))
+    /// Area and box from the extent of the keypoints.
+    ///
+    /// An annotation with no keypoint values is left untouched (`area`/`bbox`
+    /// stay `None`): folding an empty extent would produce a
+    /// `[inf, inf, -inf, -inf]` bbox with infinite area that flows into
+    /// evaluation unflagged. (pycocotools errors outright on an empty
+    /// keypoints array here.)
+    fn derive_from_keypoints(ann: &mut Annotation) {
+        let Some(kpts) = ann.keypoints.as_ref() else {
+            return;
+        };
+        if kpts.len() < 2 {
+            return;
+        }
+        // Keypoints are flat (x, y, visibility) triples.
+        let extent = |offset: usize| {
+            kpts.iter()
+                .skip(offset)
+                .step_by(3)
+                .copied()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), v| {
+                    (mn.min(v), mx.max(v))
+                })
+        };
+        let (x0, x1) = extent(0);
+        let (y0, y1) = extent(1);
+        ann.area = Some((x1 - x0) * (y1 - y0));
+        ann.bbox = Some([x0, y0, x1 - x0, y1 - y0]);
+    }
+
+    /// Area from the rotated box, and its axis-aligned envelope as the bbox.
+    fn derive_from_obb(ann: &mut Annotation) {
+        let Some(obb) = ann.obb else {
+            return;
+        };
+        ann.area = Some(obb[2] * obb[3]);
+        ann.bbox = Some(crate::geometry::obb_to_aabb(&obb));
     }
 
     /// Convert an annotation's segmentation to RLE.
@@ -643,18 +776,29 @@ impl COCO {
         let w = img.width;
 
         match &ann.segmentation {
-            Some(Segmentation::Polygon(polys)) => Some(mask::fr_polys(polys, h, w)),
+            Some(Segmentation::Polygon(polys)) => mask::fr_polys(polys, h, w).ok(),
             Some(Segmentation::CompressedRle { size, counts }) => {
                 mask::rle_from_string(counts, size[0], size[1]).ok()
             }
-            Some(Segmentation::UncompressedRle { size, counts }) => Some(Rle {
-                h: size[0],
-                w: size[1],
-                counts: counts.clone(),
-            }),
+            Some(Segmentation::UncompressedRle { size, counts }) => {
+                // Same untrusted boundary as the compressed form, same
+                // validation: counts must fit the image (`rle_from_string`
+                // checks this for compressed input).
+                let total: u64 = counts.iter().map(|&c| c as u64).sum();
+                if total > size[0] as u64 * size[1] as u64 {
+                    return None;
+                }
+                Some(Rle {
+                    h: size[0],
+                    w: size[1],
+                    counts: counts.clone(),
+                })
+            }
             None => {
                 // For bbox-only annotations, convert bbox to RLE
-                ann.bbox.as_ref().map(|bb| mask::fr_bbox(bb, h, w))
+                ann.bbox
+                    .as_ref()
+                    .and_then(|bb| mask::fr_bbox(bb, h, w).ok())
             }
         }
     }
@@ -697,8 +841,7 @@ impl COCO {
                     }
                 }
                 if let Some(rng) = area_rng {
-                    let a = ann.area.unwrap_or(0.0);
-                    if a < rng[0] || a > rng[1] {
+                    if !area_in_range(ann, rng) {
                         return false;
                     }
                 }
@@ -804,6 +947,15 @@ impl COCO {
         let mut current_max_img_id: u64 = 0;
         let mut current_max_ann_id: u64 = 0;
 
+        // All id arithmetic is checked: ids come from untrusted JSON, and a
+        // wrapped offset in release would produce silent id collisions in the
+        // merged dataset.
+        let id_overflow = |what: &str, id: u64, offset: u64| {
+            crate::error::Error::from(format!(
+                "Cannot merge: {what} id {id} + offset {offset} overflows u64. \
+                 Renumber the input ids to something smaller first."
+            ))
+        };
         for (i, ds) in datasets.iter().enumerate() {
             let img_offset = current_max_img_id;
             let ann_offset = current_max_ann_id;
@@ -812,7 +964,10 @@ impl COCO {
             let mut max_img_id = 0u64;
             for img in &ds.images {
                 let mut new_img = img.clone();
-                new_img.id = img.id + img_offset;
+                new_img.id = img
+                    .id
+                    .checked_add(img_offset)
+                    .ok_or_else(|| id_overflow("image", img.id, img_offset))?;
                 all_images.push(new_img);
                 max_img_id = max_img_id.max(img.id);
             }
@@ -820,15 +975,25 @@ impl COCO {
             let mut max_ann_id = 0u64;
             for ann in &ds.annotations {
                 let mut new_ann = ann.clone();
-                new_ann.id = ann.id + ann_offset;
-                new_ann.image_id = ann.image_id + img_offset;
+                new_ann.id = ann
+                    .id
+                    .checked_add(ann_offset)
+                    .ok_or_else(|| id_overflow("annotation", ann.id, ann_offset))?;
+                new_ann.image_id = ann
+                    .image_id
+                    .checked_add(img_offset)
+                    .ok_or_else(|| id_overflow("annotation image", ann.image_id, img_offset))?;
                 new_ann.category_id = *cat_remap.get(&ann.category_id).unwrap_or(&ann.category_id);
                 all_anns.push(new_ann);
                 max_ann_id = max_ann_id.max(ann.id);
             }
 
-            current_max_img_id = max_img_id + img_offset;
-            current_max_ann_id = max_ann_id + ann_offset;
+            current_max_img_id = max_img_id
+                .checked_add(img_offset)
+                .ok_or_else(|| id_overflow("image", max_img_id, img_offset))?;
+            current_max_ann_id = max_ann_id
+                .checked_add(ann_offset)
+                .ok_or_else(|| id_overflow("annotation", max_ann_id, ann_offset))?;
         }
 
         Ok(Dataset {
@@ -953,24 +1118,14 @@ mod tests {
                     file_name: "img1.jpg".into(),
                     height: 100,
                     width: 100,
-                    license: None,
-                    coco_url: None,
-                    flickr_url: None,
-                    date_captured: None,
-                    neg_category_ids: vec![],
-                    not_exhaustive_category_ids: vec![],
+                    ..Default::default()
                 },
                 Image {
                     id: 2,
                     file_name: "img2.jpg".into(),
                     height: 200,
                     width: 200,
-                    license: None,
-                    coco_url: None,
-                    flickr_url: None,
-                    date_captured: None,
-                    neg_category_ids: vec![],
-                    not_exhaustive_category_ids: vec![],
+                    ..Default::default()
                 },
             ],
             annotations: vec![
@@ -980,13 +1135,7 @@ mod tests {
                     category_id: 1,
                     bbox: Some([10.0, 10.0, 20.0, 20.0]),
                     area: Some(400.0),
-                    segmentation: None,
-                    iscrowd: false,
-                    keypoints: None,
-                    num_keypoints: None,
-                    obb: None,
-                    score: None,
-                    is_group_of: None,
+                    ..Default::default()
                 },
                 Annotation {
                     id: 2,
@@ -994,13 +1143,7 @@ mod tests {
                     category_id: 2,
                     bbox: Some([30.0, 30.0, 10.0, 10.0]),
                     area: Some(100.0),
-                    segmentation: None,
-                    iscrowd: false,
-                    keypoints: None,
-                    num_keypoints: None,
-                    obb: None,
-                    score: None,
-                    is_group_of: None,
+                    ..Default::default()
                 },
                 Annotation {
                     id: 3,
@@ -1008,13 +1151,8 @@ mod tests {
                     category_id: 1,
                     bbox: Some([0.0, 0.0, 50.0, 50.0]),
                     area: Some(2500.0),
-                    segmentation: None,
                     iscrowd: true,
-                    keypoints: None,
-                    num_keypoints: None,
-                    obb: None,
-                    score: None,
-                    is_group_of: None,
+                    ..Default::default()
                 },
             ],
             categories: vec![
@@ -1022,17 +1160,13 @@ mod tests {
                     id: 1,
                     name: "cat".into(),
                     supercategory: Some("animal".into()),
-                    skeleton: None,
-                    keypoints: None,
-                    frequency: None,
+                    ..Default::default()
                 },
                 Category {
                     id: 2,
                     name: "dog".into(),
                     supercategory: Some("animal".into()),
-                    skeleton: None,
-                    keypoints: None,
-                    frequency: None,
+                    ..Default::default()
                 },
             ],
             licenses: vec![],

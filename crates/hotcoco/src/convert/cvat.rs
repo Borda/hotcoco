@@ -11,16 +11,36 @@ use crate::types::{Annotation, Category, Dataset, Image, Segmentation};
 use super::ConvertError;
 
 /// Statistics returned by [`coco_to_cvat`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CvatStats {
-    /// Total number of images written.
+    /// Images written (every image in the dataset gets an `<image>` element).
     pub images: usize,
-    /// Number of `<box>` elements written.
+    /// `<box>` elements written.
     pub boxes: usize,
-    /// Number of `<polygon>` elements written.
+    /// `<polygon>` elements written.
     pub polygons: usize,
-    /// Annotations skipped because they had neither bbox nor segmentation.
+    /// Annotations that produced no element: neither bbox nor usable polygon.
     pub skipped_no_geometry: usize,
+    /// Polygons skipped because they have fewer than 3 points (CVAT rejects
+    /// them on import, so writing them would produce a file that cannot
+    /// round-trip). Counted per polygon, not per annotation.
+    pub skipped_degenerate: usize,
+}
+
+/// Statistics returned by [`cvat_to_coco`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CvatImportStats {
+    /// `<image>` elements read.
+    pub images: usize,
+    /// `<box>` shapes imported.
+    pub boxes: usize,
+    /// `<polygon>` shapes imported.
+    pub polygons: usize,
+    /// Polygons skipped because they have fewer than 3 points.
+    pub skipped_degenerate: usize,
+    /// Shapes of kinds COCO cannot express (`<polyline>`, `<points>`,
+    /// `<cuboid>`, `<mask>`, ...), skipped together with their children.
+    pub skipped_unsupported: usize,
 }
 
 /// Convert a COCO dataset to CVAT for Images 1.1 XML format.
@@ -31,15 +51,17 @@ pub struct CvatStats {
 ///
 /// - COCO `bbox [x, y, w, h]` → CVAT `<box xtl="x" ytl="y" xbr="x+w" ybr="y+h">`
 /// - COCO `Segmentation::Polygon` → CVAT `<polygon points="x0,y0;x1,y1;...">`
-///   (one `<polygon>` per polygon in the segmentation)
-/// - Annotations with a polygon get both `<polygon>` and no separate `<box>`
-/// - Annotations with only a bbox get a `<box>`
-/// - Annotations with neither are skipped
+///   (one `<polygon>` per polygon with at least 3 points)
+/// - Annotations with a usable polygon get `<polygon>` elements and no `<box>`;
+///   annotations whose polygons are all degenerate fall back to their bbox
+/// - Annotations with neither are counted in [`CvatStats::skipped_no_geometry`]
 ///
 /// # Errors
 ///
-/// Returns [`ConvertError::Io`] on filesystem errors or [`ConvertError::XmlError`]
-/// on XML writing failures.
+/// Returns [`ConvertError::Io`] on filesystem errors,
+/// [`ConvertError::XmlError`] on XML writing failures, or
+/// [`ConvertError::UnknownCategory`] if an annotation references a category id
+/// that is not in the dataset.
 pub fn coco_to_cvat(
     dataset: &Dataset,
     output_path: &std::path::Path,
@@ -75,9 +97,10 @@ pub fn coco_to_cvat(
     writer.write_event(Event::End(BytesEnd::new("task")))?;
     writer.write_event(Event::End(BytesEnd::new("meta")))?;
 
-    let mut total_boxes = 0usize;
-    let mut total_polygons = 0usize;
-    let mut skipped_no_geometry = 0usize;
+    let mut stats = CvatStats {
+        images: dataset.images.len(),
+        ..Default::default()
+    };
 
     for img in &dataset.images {
         let mut img_elem = BytesStart::new("image");
@@ -89,16 +112,23 @@ pub fn coco_to_cvat(
 
         if let Some(anns) = anns_by_image.get(&img.id) {
             for ann in anns {
-                let label = match cat_name.get(&ann.category_id) {
-                    Some(n) => *n,
-                    None => continue,
-                };
+                let label =
+                    *cat_name
+                        .get(&ann.category_id)
+                        .ok_or(ConvertError::UnknownCategory {
+                            ann_id: ann.id,
+                            category_id: ann.category_id,
+                        })?;
 
-                // Prefer polygon segmentation if available
+                // Prefer polygon segmentation if available.
+                let mut wrote_shape = false;
                 if let Some(Segmentation::Polygon(ref polys)) = ann.segmentation {
                     for poly in polys {
-                        if poly.len() < 4 {
-                            continue; // need at least 2 points
+                        if poly.len() < 6 {
+                            // Fewer than 3 points — the importer (ours and
+                            // CVAT's) rejects these, so don't write them.
+                            stats.skipped_degenerate += 1;
+                            continue;
                         }
                         let points_str = poly
                             .chunks_exact(2)
@@ -110,21 +140,24 @@ pub fn coco_to_cvat(
                         elem.push_attribute(("points", points_str.as_str()));
                         elem.push_attribute(("occluded", "0"));
                         writer.write_event(Event::Empty(elem))?;
-                        total_polygons += 1;
+                        stats.polygons += 1;
+                        wrote_shape = true;
                     }
-                } else if let Some([x, y, w, h]) = ann.bbox {
-                    // Bbox only — no segmentation
-                    let mut elem = BytesStart::new("box");
-                    elem.push_attribute(("label", label));
-                    elem.push_attribute(("xtl", format!("{:.2}", x).as_str()));
-                    elem.push_attribute(("ytl", format!("{:.2}", y).as_str()));
-                    elem.push_attribute(("xbr", format!("{:.2}", x + w).as_str()));
-                    elem.push_attribute(("ybr", format!("{:.2}", y + h).as_str()));
-                    elem.push_attribute(("occluded", "0"));
-                    writer.write_event(Event::Empty(elem))?;
-                    total_boxes += 1;
-                } else {
-                    skipped_no_geometry += 1;
+                }
+                if !wrote_shape {
+                    if let Some([x, y, w, h]) = ann.bbox {
+                        let mut elem = BytesStart::new("box");
+                        elem.push_attribute(("label", label));
+                        elem.push_attribute(("xtl", format!("{:.2}", x).as_str()));
+                        elem.push_attribute(("ytl", format!("{:.2}", y).as_str()));
+                        elem.push_attribute(("xbr", format!("{:.2}", x + w).as_str()));
+                        elem.push_attribute(("ybr", format!("{:.2}", y + h).as_str()));
+                        elem.push_attribute(("occluded", "0"));
+                        writer.write_event(Event::Empty(elem))?;
+                        stats.boxes += 1;
+                    } else {
+                        stats.skipped_no_geometry += 1;
+                    }
                 }
             }
         }
@@ -134,12 +167,7 @@ pub fn coco_to_cvat(
 
     writer.write_event(Event::End(BytesEnd::new("annotations")))?;
 
-    Ok(CvatStats {
-        images: dataset.images.len(),
-        boxes: total_boxes,
-        polygons: total_polygons,
-        skipped_no_geometry,
-    })
+    Ok(stats)
 }
 
 /// Convert a CVAT for Images 1.1 XML file to COCO format.
@@ -152,21 +180,77 @@ pub fn coco_to_cvat(
 ///
 /// - CVAT `<box>` `xtl,ytl,xbr,ybr` → COCO `bbox` `[xtl, ytl, xbr-xtl, ybr-ytl]`
 /// - CVAT `<polygon>` `points` → COCO `Segmentation::Polygon` + computed bbox and area
-/// - `<polyline>`, `<points>`, `<cuboid>` → skipped
+/// - Shapes are read whether self-closing or written as open/close pairs (CVAT
+///   uses the latter whenever a shape has `<attribute>` children; the
+///   attributes themselves are not imported)
+/// - `<polyline>`, `<points>`, `<cuboid>`, and other unsupported shape kinds →
+///   skipped, counted in [`CvatImportStats::skipped_unsupported`]
+/// - Polygons with fewer than 3 points → skipped, counted in
+///   [`CvatImportStats::skipped_degenerate`]
 ///
 /// # Errors
 ///
-/// Returns [`ConvertError::XmlError`] on malformed XML or [`ConvertError::ParseError`]
-/// if required attributes are missing.
-pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError> {
+/// Returns [`ConvertError::XmlError`] on malformed XML or
+/// [`ConvertError::ParseError`] if a required attribute (an image's `name`,
+/// `width`, or `height`; a shape's `label` or coordinates) is missing or
+/// unparseable. Errors name the file and the byte position where available.
+pub fn cvat_to_coco(
+    cvat_path: &std::path::Path,
+) -> Result<(Dataset, CvatImportStats), ConvertError> {
     let file = fs::File::open(cvat_path)?;
-    let mut xml = Reader::from_reader(BufReader::new(file));
+    let parsed = parse_cvat_xml(BufReader::new(file)).map_err(|e| e.with_path(cvat_path))?;
+
+    let shape_count = |want_box: bool| {
+        parsed
+            .images
+            .iter()
+            .flat_map(|img| &img.shapes)
+            .filter(|s| matches!(s.kind, ShapeKind::Box { .. }) == want_box)
+            .count()
+    };
+    let stats = CvatImportStats {
+        images: parsed.images.len(),
+        boxes: shape_count(true),
+        polygons: shape_count(false),
+        skipped_degenerate: parsed.skipped_degenerate,
+        skipped_unsupported: parsed.skipped_unsupported,
+    };
+
+    let names = derive_category_names(parsed.meta_labels, &parsed.images);
+    Ok((build_dataset(parsed.images, names), stats))
+}
+
+/// What one CVAT XML file yields: the declared label list, the images, and the
+/// per-shape skip counts.
+struct ParsedCvat {
+    /// Labels from the `<meta><task><labels>` block, in the order declared there.
+    /// Empty when the file has no `<meta>` block.
+    meta_labels: Vec<String>,
+    images: Vec<ParsedCvatImage>,
+    /// Polygons dropped for having fewer than 3 points.
+    skipped_degenerate: usize,
+    /// Shapes of kinds COCO cannot express, dropped with their children.
+    skipped_unsupported: usize,
+}
+
+/// Read a CVAT for Images 1.1 document into its labels and images.
+///
+/// Shapes arrive either self-closing (`<box .../>`) or as open/close pairs —
+/// CVAT writes the pair form whenever a shape carries `<attribute>` children.
+/// Both are handled: geometry always lives in the element's own attributes, so
+/// the children are skipped wholesale. Unsupported shape kinds cost their
+/// annotation (counted), not the file.
+fn parse_cvat_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedCvat, ConvertError> {
+    let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
 
     let mut meta_labels: Vec<String> = Vec::new();
-    let mut parsed_images: Vec<ParsedCvatImage> = Vec::new();
+    let mut images: Vec<ParsedCvatImage> = Vec::new();
+    let mut skipped_degenerate = 0usize;
+    let mut skipped_unsupported = 0usize;
 
-    // State machine
+    // The `<meta><task><labels><label>` path, tracked one level at a time so a
+    // `<label>` outside that path cannot contribute a category name.
     let mut in_meta = false;
     let mut in_task = false;
     let mut in_labels = false;
@@ -174,10 +258,12 @@ pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError
     let mut current_tag: Vec<u8> = Vec::new();
     let mut label_name = String::new();
 
-    // Current image being parsed
+    // The `<image>` currently being filled; shapes arrive as its children.
     let mut current_image: Option<ParsedCvatImage> = None;
 
     let mut buf = Vec::new();
+    // Scratch for skipping a shape's children (`<attribute>` etc.).
+    let mut skip_buf = Vec::new();
     loop {
         match xml.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
@@ -191,8 +277,30 @@ pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError
                         in_label = true;
                         label_name.clear();
                     }
-                    b"image" => {
-                        current_image = Some(parse_image_attrs(e)?);
+                    b"image" => current_image = Some(parse_image_attrs(e)?),
+                    // CVAT writes a shape as an open/close pair whenever it has
+                    // `<attribute>` children. The geometry lives on the element
+                    // itself, so parse it here and skip the children.
+                    b"box" | b"polygon" => {
+                        let pos = xml.buffer_position();
+                        let img = current_image
+                            .as_mut()
+                            .ok_or_else(|| shape_outside_image(tag, pos))?;
+                        match parse_shape_attrs(tag, e).map_err(|err| at_byte(err, pos))? {
+                            Some(shape) => img.shapes.push(shape),
+                            None => skipped_degenerate += 1,
+                        }
+                        let end = e.to_end().into_owned();
+                        skip_buf.clear();
+                        xml.read_to_end_into(end.name(), &mut skip_buf)?;
+                    }
+                    // Any other element inside an <image> is a shape kind COCO
+                    // cannot express — skipped with its children, and counted.
+                    _ if current_image.is_some() => {
+                        skipped_unsupported += 1;
+                        let end = e.to_end().into_owned();
+                        skip_buf.clear();
+                        xml.read_to_end_into(end.name(), &mut skip_buf)?;
                     }
                     _ => {}
                 }
@@ -200,18 +308,21 @@ pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError
             }
             Ok(Event::Empty(ref e)) => {
                 let name = e.name();
-                match name.as_ref() {
-                    b"box" => {
-                        if let Some(ref mut img) = current_image {
-                            img.shapes.push(parse_box_attrs(e)?);
+                let tag = name.as_ref();
+                match tag {
+                    // A self-closing image has no shapes.
+                    b"image" => images.push(parse_image_attrs(e)?),
+                    b"box" | b"polygon" => {
+                        let pos = xml.buffer_position();
+                        let img = current_image
+                            .as_mut()
+                            .ok_or_else(|| shape_outside_image(tag, pos))?;
+                        match parse_shape_attrs(tag, e).map_err(|err| at_byte(err, pos))? {
+                            Some(shape) => img.shapes.push(shape),
+                            None => skipped_degenerate += 1,
                         }
                     }
-                    b"polygon" => {
-                        if let Some(ref mut img) = current_image {
-                            img.shapes.push(parse_polygon_attrs(e)?);
-                        }
-                    }
-                    // Skip unsupported shape types
+                    _ if current_image.is_some() => skipped_unsupported += 1,
                     _ => {}
                 }
             }
@@ -229,7 +340,7 @@ pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError
                     }
                     b"image" => {
                         if let Some(img) = current_image.take() {
-                            parsed_images.push(img);
+                            images.push(img);
                         }
                     }
                     _ => {}
@@ -245,48 +356,62 @@ pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(ConvertError::XmlError(e.to_string())),
+            Err(e) => {
+                return Err(ConvertError::XmlError(format!(
+                    "near byte {}: {e}",
+                    xml.error_position()
+                )));
+            }
             _ => {}
         }
         buf.clear();
     }
 
-    // Build category list — prefer meta labels, fall back to collecting from shapes
-    let category_names: Vec<String> = if !meta_labels.is_empty() {
-        let mut names = meta_labels;
-        let mut seen: HashSet<String> = names.iter().cloned().collect();
-        for img in &parsed_images {
-            for shape in &img.shapes {
-                if seen.insert(shape.label.clone()) {
-                    names.push(shape.label.clone());
-                }
-            }
-        }
-        names
-    } else {
-        let mut names = Vec::new();
-        let mut seen = HashSet::new();
-        for img in &parsed_images {
-            for shape in &img.shapes {
-                if seen.insert(shape.label.clone()) {
-                    names.push(shape.label.clone());
-                }
-            }
-        }
-        names.sort();
-        names
-    };
+    Ok(ParsedCvat {
+        meta_labels,
+        images,
+        skipped_degenerate,
+        skipped_unsupported,
+    })
+}
 
+/// Category names in the order they become ids (the first is id 1).
+///
+/// A `<meta>` label list is authoritative when present — it carries the project's
+/// own label order, so ids follow it, and any label used by a shape but missing
+/// from `<meta>` is appended in first-use order. With no `<meta>` block there is
+/// no authored order to preserve, so discovered labels are sorted instead, which
+/// is what keeps ids reproducible across runs.
+fn derive_category_names(meta_labels: Vec<String>, images: &[ParsedCvatImage]) -> Vec<String> {
+    let had_meta = !meta_labels.is_empty();
+    let mut seen: HashSet<String> = meta_labels.iter().cloned().collect();
+    let mut names = meta_labels;
+
+    for shape in images.iter().flat_map(|img| &img.shapes) {
+        if seen.insert(shape.label.clone()) {
+            names.push(shape.label.clone());
+        }
+    }
+
+    if !had_meta {
+        names.sort();
+    }
+    names
+}
+
+/// Assemble the COCO dataset, numbering images and annotations from 1.
+///
+/// A shape whose label is not in `category_names` is dropped — that can only
+/// happen if the name list did not come from [`derive_category_names`], which
+/// collects every label it sees.
+fn build_dataset(parsed_images: Vec<ParsedCvatImage>, category_names: Vec<String>) -> Dataset {
     let categories: Vec<Category> = category_names
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, name)| Category {
             id: (i + 1) as u64,
-            name: name.clone(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            name,
+            ..Default::default()
         })
         .collect();
 
@@ -295,81 +420,69 @@ pub fn cvat_to_coco(cvat_path: &std::path::Path) -> Result<Dataset, ConvertError
 
     let mut images: Vec<Image> = Vec::new();
     let mut annotations: Vec<Annotation> = Vec::new();
-    let mut img_id = 1u64;
-    let mut ann_id = 1u64;
 
-    for parsed in &parsed_images {
+    for (i, parsed) in parsed_images.iter().enumerate() {
+        let img_id = (i + 1) as u64;
         images.push(Image {
             id: img_id,
             file_name: parsed.name.clone(),
             width: parsed.width,
             height: parsed.height,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         });
 
         for shape in &parsed.shapes {
-            let category_id = match name_to_id.get(shape.label.as_str()) {
-                Some(&id) => id,
-                None => continue,
+            let Some(&category_id) = name_to_id.get(shape.label.as_str()) else {
+                continue;
             };
-
-            match &shape.kind {
-                ShapeKind::Box { xtl, ytl, xbr, ybr } => {
-                    let w = xbr - xtl;
-                    let h = ybr - ytl;
-                    annotations.push(Annotation {
-                        id: ann_id,
-                        image_id: img_id,
-                        category_id,
-                        bbox: Some([*xtl, *ytl, w, h]),
-                        area: Some(w * h),
-                        segmentation: None,
-                        iscrowd: false,
-                        keypoints: None,
-                        num_keypoints: None,
-                        obb: None,
-                        score: None,
-                        is_group_of: None,
-                    });
-                    ann_id += 1;
-                }
-                ShapeKind::Polygon { points } => {
-                    let bbox = polygon_bbox(points);
-                    let area = polygon_area(points);
-                    let flat: Vec<f64> = points.iter().flat_map(|&(x, y)| [x, y]).collect();
-                    annotations.push(Annotation {
-                        id: ann_id,
-                        image_id: img_id,
-                        category_id,
-                        bbox: Some(bbox),
-                        area: Some(area),
-                        segmentation: Some(Segmentation::Polygon(vec![flat])),
-                        iscrowd: false,
-                        keypoints: None,
-                        num_keypoints: None,
-                        obb: None,
-                        score: None,
-                        is_group_of: None,
-                    });
-                    ann_id += 1;
-                }
-            }
+            let ann_id = (annotations.len() + 1) as u64;
+            annotations.push(shape_to_annotation(
+                ann_id,
+                img_id,
+                category_id,
+                &shape.kind,
+            ));
         }
-        img_id += 1;
     }
 
-    Ok(Dataset {
+    Dataset {
         info: None,
         images,
         annotations,
         categories,
         licenses: vec![],
-    })
+    }
+}
+
+/// One CVAT shape as a COCO annotation.
+///
+/// A box carries its extent directly; a polygon has its bbox and area derived
+/// from the points and keeps them as its segmentation too. Every other field is
+/// absent — a CVAT shape has no crowd flag, keypoints, or score.
+fn shape_to_annotation(id: u64, image_id: u64, category_id: u64, kind: &ShapeKind) -> Annotation {
+    let (bbox, area, segmentation) = match kind {
+        ShapeKind::Box { xtl, ytl, xbr, ybr } => {
+            let (w, h) = (xbr - xtl, ybr - ytl);
+            ([*xtl, *ytl, w, h], w * h, None)
+        }
+        ShapeKind::Polygon { points } => (
+            polygon_bbox(points),
+            polygon_area(points),
+            Some(Segmentation::Polygon(vec![
+                points.iter().flat_map(|&(x, y)| [x, y]).collect(),
+            ])),
+        ),
+    };
+
+    Annotation {
+        id,
+        image_id,
+        category_id,
+        bbox: Some(bbox),
+        area: Some(area),
+        segmentation,
+        ..Default::default()
+    }
 }
 
 // ── Internal types ───────────────────────────────────────────────────────────
@@ -402,126 +515,150 @@ enum ShapeKind {
 
 use super::write_text_element;
 
-/// Parse `<image>` element attributes.
-fn parse_image_attrs(e: &BytesStart) -> Result<ParsedCvatImage, ConvertError> {
-    let mut name = String::new();
-    let mut width: u32 = 0;
-    let mut height: u32 = 0;
-
-    for attr in e.attributes().flatten() {
-        match attr.key.as_ref() {
-            b"name" => {
-                name = String::from_utf8_lossy(&attr.value).to_string();
-            }
-            b"width" => {
-                width = String::from_utf8_lossy(&attr.value)
-                    .parse()
-                    .map_err(|_| ConvertError::ParseError("invalid image width".into()))?;
-            }
-            b"height" => {
-                height = String::from_utf8_lossy(&attr.value)
-                    .parse()
-                    .map_err(|_| ConvertError::ParseError("invalid image height".into()))?;
-            }
-            _ => {}
+/// Attach the reader's byte offset to a parse error — XML carries no line
+/// numbers a streaming reader can cheaply report, but a byte position still
+/// pins the failing element.
+fn at_byte(err: ConvertError, pos: u64) -> ConvertError {
+    match err {
+        ConvertError::ParseError(msg) => {
+            ConvertError::ParseError(format!("near byte {pos}: {msg}"))
         }
+        other => other,
     }
-
-    if name.is_empty() {
-        return Err(ConvertError::ParseError(
-            "CVAT <image> missing 'name' attribute".into(),
-        ));
-    }
-
-    Ok(ParsedCvatImage {
-        name,
-        width,
-        height,
-        shapes: Vec::new(),
-    })
 }
 
-/// Parse `<box>` element attributes.
-fn parse_box_attrs(e: &BytesStart) -> Result<ParsedCvatShape, ConvertError> {
-    let mut label = String::new();
-    let mut xtl: f64 = 0.0;
-    let mut ytl: f64 = 0.0;
-    let mut xbr: f64 = 0.0;
-    let mut ybr: f64 = 0.0;
+/// The error for a shape encountered outside any `<image>` — the signature of a
+/// CVAT for *video* export, whose shapes live under `<track>` elements.
+fn shape_outside_image(tag: &[u8], pos: u64) -> ConvertError {
+    ConvertError::ParseError(format!(
+        "near byte {pos}: found <{}> outside an <image> element — is this a CVAT for video export? Only CVAT for Images 1.1 is supported",
+        String::from_utf8_lossy(tag)
+    ))
+}
+
+/// Parse one `<box>` or `<polygon>` element's attributes.
+///
+/// `Ok(None)` is a degenerate polygon (fewer than 3 points) — the caller counts
+/// it, so one bad shape costs itself, not the file.
+fn parse_shape_attrs(tag: &[u8], e: &BytesStart) -> Result<Option<ParsedCvatShape>, ConvertError> {
+    if tag == b"box" {
+        parse_box_attrs(e).map(Some)
+    } else {
+        parse_polygon_attrs(e)
+    }
+}
+
+/// Parse `<image>` element attributes. `name`, `width`, and `height` are all
+/// required — CVAT always writes them, and the dimensions are the only record
+/// of the image size the file carries.
+fn parse_image_attrs(e: &BytesStart) -> Result<ParsedCvatImage, ConvertError> {
+    let mut name: Option<String> = None;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
 
     for attr in e.attributes().flatten() {
         let val = String::from_utf8_lossy(&attr.value);
         match attr.key.as_ref() {
-            b"label" => label = val.to_string(),
-            b"xtl" => {
-                xtl = val
-                    .parse()
-                    .map_err(|_| ConvertError::ParseError(format!("invalid xtl: {val}")))?;
+            b"name" => name = Some(val.to_string()),
+            b"width" => {
+                width = Some(val.parse().map_err(|_| {
+                    ConvertError::ParseError(format!("invalid image width: {val}"))
+                })?);
             }
-            b"ytl" => {
-                ytl = val
-                    .parse()
-                    .map_err(|_| ConvertError::ParseError(format!("invalid ytl: {val}")))?;
-            }
-            b"xbr" => {
-                xbr = val
-                    .parse()
-                    .map_err(|_| ConvertError::ParseError(format!("invalid xbr: {val}")))?;
-            }
-            b"ybr" => {
-                ybr = val
-                    .parse()
-                    .map_err(|_| ConvertError::ParseError(format!("invalid ybr: {val}")))?;
+            b"height" => {
+                height = Some(val.parse().map_err(|_| {
+                    ConvertError::ParseError(format!("invalid image height: {val}"))
+                })?);
             }
             _ => {}
         }
     }
 
-    if label.is_empty() {
-        return Err(ConvertError::ParseError(
-            "CVAT <box> missing 'label' attribute".into(),
-        ));
+    let missing =
+        |attr: &str| ConvertError::ParseError(format!("CVAT <image> missing `{attr}` attribute"));
+    Ok(ParsedCvatImage {
+        name: name
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| missing("name"))?,
+        width: width.ok_or_else(|| missing("width"))?,
+        height: height.ok_or_else(|| missing("height"))?,
+        shapes: Vec::new(),
+    })
+}
+
+/// Parse `<box>` element attributes. The label and all four coordinates are
+/// required; a missing coordinate is an error, never a silent `0.0`.
+fn parse_box_attrs(e: &BytesStart) -> Result<ParsedCvatShape, ConvertError> {
+    const COORDS: [&str; 4] = ["xtl", "ytl", "xbr", "ybr"];
+    let mut label: Option<String> = None;
+    let mut coords: [Option<f64>; 4] = [None; 4];
+
+    for attr in e.attributes().flatten() {
+        let val = String::from_utf8_lossy(&attr.value);
+        let key = attr.key.as_ref();
+        if key == b"label" {
+            label = Some(val.to_string());
+        } else if let Some(i) = COORDS.iter().position(|c| c.as_bytes() == key) {
+            coords[i] =
+                Some(val.parse().map_err(|_| {
+                    ConvertError::ParseError(format!("invalid {}: {val}", COORDS[i]))
+                })?);
+        }
     }
+
+    let label = label
+        .filter(|l| !l.is_empty())
+        .ok_or_else(|| ConvertError::ParseError("CVAT <box> missing `label` attribute".into()))?;
+    let coord = |i: usize| {
+        coords[i].ok_or_else(|| {
+            ConvertError::ParseError(format!("CVAT <box> missing `{}` attribute", COORDS[i]))
+        })
+    };
 
     Ok(ParsedCvatShape {
         label,
-        kind: ShapeKind::Box { xtl, ytl, xbr, ybr },
+        kind: ShapeKind::Box {
+            xtl: coord(0)?,
+            ytl: coord(1)?,
+            xbr: coord(2)?,
+            ybr: coord(3)?,
+        },
     })
 }
 
 /// Parse `<polygon>` element attributes.
-fn parse_polygon_attrs(e: &BytesStart) -> Result<ParsedCvatShape, ConvertError> {
-    let mut label = String::new();
-    let mut points_str = String::new();
+///
+/// A missing `label` or `points` attribute is an error; a *present* points list
+/// with fewer than 3 points is degenerate and returns `Ok(None)` for the caller
+/// to count.
+fn parse_polygon_attrs(e: &BytesStart) -> Result<Option<ParsedCvatShape>, ConvertError> {
+    let mut label: Option<String> = None;
+    let mut points_str: Option<String> = None;
 
     for attr in e.attributes().flatten() {
         match attr.key.as_ref() {
-            b"label" => label = String::from_utf8_lossy(&attr.value).to_string(),
-            b"points" => points_str = String::from_utf8_lossy(&attr.value).to_string(),
+            b"label" => label = Some(String::from_utf8_lossy(&attr.value).to_string()),
+            b"points" => points_str = Some(String::from_utf8_lossy(&attr.value).to_string()),
             _ => {}
         }
     }
 
-    if label.is_empty() {
-        return Err(ConvertError::ParseError(
-            "CVAT <polygon> missing 'label' attribute".into(),
-        ));
-    }
+    let label = label.filter(|l| !l.is_empty()).ok_or_else(|| {
+        ConvertError::ParseError("CVAT <polygon> missing `label` attribute".into())
+    })?;
+    let points_str = points_str.ok_or_else(|| {
+        ConvertError::ParseError("CVAT <polygon> missing `points` attribute".into())
+    })?;
 
     let points = parse_cvat_points(&points_str)?;
-
-    // A polygon needs at least 3 vertices (6 coordinate values when flattened)
     if points.len() < 3 {
-        return Err(ConvertError::ParseError(format!(
-            "CVAT <polygon> has {} points, need at least 3",
-            points.len()
-        )));
+        return Ok(None);
     }
 
-    Ok(ParsedCvatShape {
+    Ok(Some(ParsedCvatShape {
         label,
         kind: ShapeKind::Polygon { points },
-    })
+    }))
 }
 
 /// Parse CVAT points string `"x1,y1;x2,y2;..."` into coordinate pairs.

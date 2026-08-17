@@ -40,6 +40,18 @@
 //! know or care which family called it — that adapter is a dozen lines in the
 //! driver, and it is the only detection-shaped code involved.
 //!
+//! # Degenerate-input convention
+//!
+//! These free functions share one policy, the same as `primitives`:
+//!
+//! - **Mismatched parallel-array lengths are a programmer error** and panic via
+//!   `assert!` with a message naming both lengths. Nothing silently truncates,
+//!   no-ops, or degrades ([`primitives::assign::lsap`](crate::primitives::assign::lsap)
+//!   set the pattern). Each function's `# Panics` section states its checks.
+//! - **Empty input is not an error** — it produces the documented empty-set
+//!   value (`0.0`, an empty `Vec`, an all-zero matrix), because "no detections"
+//!   is a legitimate evaluation state, not a bug.
+//!
 //! # Stability
 //!
 //! Provisional through 1.x, like [`primitives`](crate::primitives): public so the
@@ -55,6 +67,11 @@ pub mod counts;
 /// Whether a metric value was actually computed, as opposed to carrying the
 /// crate's `-1.0` "not computed for this configuration" sentinel.
 ///
+/// The sentinel is public contract: evaluation output uses `-1.0` for an area
+/// range with no ground truth or a category absent from the split — never for a
+/// genuinely low score. Callers filtering evaluation arrays should use this
+/// predicate rather than re-deriving `v >= 0.0` by hand.
+///
 /// The predicate half of the sentinel convention whose *producer* is
 /// [`detection::summarize::mean_or_missing`](crate::detection). It lives here
 /// rather than beside the producer because the lower layer has to read it too:
@@ -67,12 +84,12 @@ pub mod counts;
 /// accumulated arrays can hold, and matching the old spelling keeps the fold
 /// bit-identical without anyone having to prove that.
 #[inline]
-pub(crate) fn is_computed(v: f64) -> bool {
+pub fn is_computed(v: f64) -> bool {
     v >= 0.0
 }
 
 /// The complement of [`is_computed`]: `v` is the "not computed" sentinel.
 #[inline]
-pub(crate) fn is_missing(v: f64) -> bool {
+pub fn is_missing(v: f64) -> bool {
     !is_computed(v)
 }

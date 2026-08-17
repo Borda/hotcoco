@@ -66,13 +66,11 @@ def test_top_level_exports_covered():
     # These are re-exports or internal names we don't need to stub.
     # "annotations" is the _Feature object bound by `from __future__ import
     # annotations` in __init__.py — a language directive, not public API.
+    # The LVIS drop-in surface (LVIS, LVISEval, LVISeval, LVISResults) and the
+    # torchvision one (CocoDetection, CocoEvaluator) are deliberately NOT here:
+    # they are documented imports, so the stub must carry them or pyright
+    # rejects `from hotcoco import LVISEval` in every LVIS example.
     skip = {
-        "LVIS",
-        "LVISeval",
-        "LVISEval",
-        "LVISResults",
-        "CocoDetection",
-        "CocoEvaluator",
         "hotcoco",
         "integrations",
         "annotations",
@@ -85,12 +83,21 @@ def test_top_level_exports_covered():
         # primitives.pyi, checked by the tests below.
         "metrics",
         "primitives",
+        # Stubbed as a submodule (`from . import mask as mask` + mask.pyi), so
+        # the AST walk over __init__.pyi does not see it as a top-level def.
+        # test_mask_stub_matches_runtime below checks its members instead.
+        "mask",
         # Pure-Python subpackage — pyright reads its annotations from the source,
         # so it has no .pyi to be missing from. Listed rather than left to chance:
         # `hotcoco.plot` only becomes an attribute of `hotcoco` once something
         # imports it, so whether this test passed depended on which other test
         # ran first.
         "plot",
+        # Same import-order hazard: `COCO.browse()` lazily imports these
+        # pure-Python modules, binding them as package attributes for the rest
+        # of the pytest process.
+        "browse",
+        "server",
     }
     runtime_names -= skip
 
@@ -98,20 +105,65 @@ def test_top_level_exports_covered():
     assert not missing, f"Public names missing from stubs: {sorted(missing)}"
 
 
-@pytest.mark.parametrize("name", ["COCO", "COCOeval", "Params", "mask", "Hierarchy"])
+@pytest.mark.parametrize("name", ["COCO", "COCOeval", "Params", "Hierarchy"])
 def test_members_covered(name):
-    """Every public member of each stubbed top-level object appears in the stub.
+    """Each stubbed top-level object and its stub must list the same members.
 
-    One parametrized case per object rather than five identical functions: adding
+    One parametrized case per object rather than identical functions: adding
     a class to the stub should be a one-line edit here, not a copy-paste that
-    invites a drifting message. `mask` is a module and the rest are classes —
-    `dir()` treats them the same, and so does the stub parser.
+    invites a drifting message. (`mask` moved to its own module stub — see
+    test_mask_stub_matches_runtime.)
+
+    Both directions are checked, and the second is the one that bites. A member
+    missing from the stub is merely invisible to autocomplete; a member the stub
+    invents that the extension never defines is worse, because an IDE offers it
+    and the call raises `AttributeError` at runtime.
     """
     stub_members = _parse_stub_names().get(name, set())
     runtime_members = _public_names(getattr(hotcoco, name))
 
     missing = runtime_members - stub_members
     assert not missing, f"{name} members missing from stubs: {sorted(missing)}"
+
+    # `_public_names` drops underscore-prefixed names, so compare like with like —
+    # otherwise every stubbed `__init__` reads as a phantom.
+    phantom = {m for m in stub_members if not m.startswith("_")} - runtime_members
+    assert not phantom, f"{name} members stubbed but not defined: {sorted(phantom)}"
+
+
+@pytest.mark.parametrize("name", ["LVISeval", "LVISResults", "CocoDetection", "CocoEvaluator"])
+def test_dropin_class_methods_covered(name):
+    """The LVIS / torchvision drop-in classes must be stubbed with their methods.
+
+    Only the missing direction: these stubs also declare instance attributes
+    (``self.coco``, ``self.ids``, ...) that ``dir()`` on the class cannot see,
+    so the phantom check that works for the PyO3 classes would false-positive.
+    The presence of the name itself is enforced by
+    test_top_level_exports_covered, which no longer skip-lists this surface.
+    """
+    stub_members = _parse_stub_names().get(name)
+    assert stub_members is not None, f"{name} missing from __init__.pyi"
+    runtime_members = _public_names(getattr(hotcoco, name))
+    missing = runtime_members - stub_members
+    assert not missing, f"{name} members missing from stubs: {sorted(missing)}"
+
+
+def test_mask_stub_matches_runtime():
+    """mask.pyi must list exactly the runtime `hotcoco.mask` functions.
+
+    The mask surface is stubbed as a submodule (mask.pyi) rather than a class
+    in __init__.pyi, so `import hotcoco.mask` — the pycocotools migration
+    form — type-checks. Both directions, same reasoning as
+    test_members_covered.
+    """
+    stub_names = _stub_function_names("mask.pyi")
+    runtime_members = _public_names(hotcoco.mask)
+
+    missing = runtime_members - stub_names
+    assert not missing, f"mask members missing from mask.pyi: {sorted(missing)}"
+
+    phantom = {m for m in stub_names if not m.startswith("_")} - runtime_members
+    assert not phantom, f"mask members stubbed but not defined: {sorted(phantom)}"
 
 
 # ---------------------------------------------------------------------------

@@ -7,9 +7,7 @@ identical output (same types, same values).
 import numpy as np
 import pycocotools.mask as pm
 import pytest
-
 from hotcoco import mask as hm
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

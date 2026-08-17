@@ -39,13 +39,22 @@
 /// | `None` | `None` | nothing happened | ignored |
 ///
 /// Returns a flat row-major matrix of side `num_classes + 1`, rows indexed by
-/// ground truth and columns by prediction. Labels at or beyond `num_classes` are
-/// skipped rather than panicking, so an out-of-range class can't take down an
-/// evaluation run.
+/// ground truth and columns by prediction.
+///
+/// A label at or beyond `num_classes` names a class the matrix has no lane for,
+/// so **that side is treated as `None`** and the table above applies to the
+/// result. The record's in-range partner still counts: a valid ground truth
+/// matched by an out-of-range prediction stays a miss (`[g][num_classes]`)
+/// rather than vanishing from FN accounting, and vice versa. Both sides
+/// out-of-range degrades to `(None, None)` — ignored.
 ///
 /// Counts are `u64` addition, so accumulating per-image and summing gives the same
 /// answer as one whole-dataset call — which is what lets callers parallelize over
 /// images and reduce afterwards.
+///
+/// # Panics
+///
+/// If `gt_labels` and `dt_labels` have different lengths.
 pub fn confusion_matrix(
     gt_labels: &[Option<usize>],
     dt_labels: &[Option<usize>],
@@ -64,7 +73,14 @@ pub fn confusion_matrix(
 /// records — on Objects365 (80k images, 365 classes) that is ~86 GB of memory
 /// traffic for ~1.1M records, and it scales with `num_classes²`, not with the data.
 ///
-/// `matrix` must be `(num_classes + 1)²` elements; shorter input is left untouched.
+/// Label semantics — including the out-of-range-label fallback to background —
+/// are documented on [`confusion_matrix`].
+///
+/// # Panics
+///
+/// If `matrix` is not exactly `(num_classes + 1)²` elements, or if `gt_labels`
+/// and `dt_labels` have different lengths. (An undersized matrix used to be a
+/// silent no-op — an all-zero confusion matrix with no error.)
 pub fn accumulate_confusion(
     matrix: &mut [u64],
     gt_labels: &[Option<usize>],
@@ -72,25 +88,37 @@ pub fn accumulate_confusion(
     num_classes: usize,
 ) {
     let k = num_classes + 1;
-    if matrix.len() < k * k {
-        return;
-    }
+    assert_eq!(
+        matrix.len(),
+        k * k,
+        "accumulate_confusion: matrix must be (num_classes + 1)² = {} elements \
+         for num_classes = {num_classes} (got {})",
+        k * k,
+        matrix.len()
+    );
+    assert_eq!(
+        gt_labels.len(),
+        dt_labels.len(),
+        "accumulate_confusion: gt_labels and dt_labels must be parallel arrays \
+         (got {} vs {})",
+        gt_labels.len(),
+        dt_labels.len()
+    );
 
-    let n = gt_labels.len().min(dt_labels.len());
-    for i in 0..n {
-        // Background index is `num_classes`; an out-of-range label is dropped.
-        let row = match gt_labels[i] {
-            Some(g) if g < num_classes => g,
-            Some(_) => continue,
+    for (gl, dl) in gt_labels.iter().zip(dt_labels) {
+        // Background index is `num_classes`. An out-of-range label has no lane,
+        // so that *side* degrades to `None` — the in-range partner still counts
+        // (see the table on `confusion_matrix`).
+        let row = match gl.filter(|&g| g < num_classes) {
+            Some(g) => g,
             None => num_classes,
         };
-        let col = match dt_labels[i] {
-            Some(d) if d < num_classes => d,
-            Some(_) => continue,
+        let col = match dl.filter(|&d| d < num_classes) {
+            Some(d) => d,
             None => num_classes,
         };
         if row == num_classes && col == num_classes {
-            continue; // neither a prediction nor a ground truth
+            continue; // neither a countable prediction nor a countable ground truth
         }
         matrix[row * k + col] += 1;
     }
@@ -228,20 +256,23 @@ mod tests {
             let ctx = format!("case {case}: num_classes={num_classes} n={n}");
             assert_eq!(m.len(), side * side, "{ctx}");
 
-            let in_range = |l: &Option<usize>| l.is_none_or(|v| v < num_classes);
+            // An out-of-range label is documented to degrade to `None`
+            // (background), so marginals are stated over the *effective* labels.
+            let eff = |l: &Option<usize>| l.filter(|&v| v < num_classes);
             let counted = gt
                 .iter()
                 .zip(&dt)
                 .filter(|(g, d)| {
-                    // `(None, None)` is documented as "nothing happened".
-                    !(g.is_none() && d.is_none()) && in_range(g) && in_range(d)
+                    // `(None, None)` — original or by degradation — is
+                    // documented as "nothing happened".
+                    !(eff(g).is_none() && eff(d).is_none())
                 })
                 .count() as u64;
 
             assert_eq!(
                 m.iter().sum::<u64>(),
                 counted,
-                "{ctx}: grand total disagrees with the number of in-range records"
+                "{ctx}: grand total disagrees with the number of countable records"
             );
 
             for g in 0..side {
@@ -249,14 +280,10 @@ mod tests {
                 let want = gt
                     .iter()
                     .zip(&dt)
-                    .filter(|(gl, dl)| {
-                        in_range(gl)
-                            && in_range(dl)
-                            && match gl {
-                                Some(v) => *v == g,
-                                // Unmatched predictions land in the background row.
-                                None => g == num_classes && dl.is_some(),
-                            }
+                    .filter(|(gl, dl)| match eff(gl) {
+                        Some(v) => v == g,
+                        // Unmatched predictions land in the background row.
+                        None => g == num_classes && eff(dl).is_some(),
                     })
                     .count() as u64;
                 assert_eq!(row, want, "{ctx}: row {g} sum {row} != {want}");
@@ -267,14 +294,10 @@ mod tests {
                 let want = gt
                     .iter()
                     .zip(&dt)
-                    .filter(|(gl, dl)| {
-                        in_range(gl)
-                            && in_range(dl)
-                            && match dl {
-                                Some(v) => *v == d,
-                                // Undetected ground truths land in the background column.
-                                None => d == num_classes && gl.is_some(),
-                            }
+                    .filter(|(gl, dl)| match eff(dl) {
+                        Some(v) => v == d,
+                        // Undetected ground truths land in the background column.
+                        None => d == num_classes && eff(gl).is_some(),
                     })
                     .count() as u64;
                 assert_eq!(col, want, "{ctx}: column {d} sum {col} != {want}");
@@ -320,9 +343,23 @@ mod tests {
         assert_eq!(m.iter().sum::<u64>(), 0);
     }
 
+    /// An out-of-range label degrades to background instead of deleting the
+    /// whole record — the in-range partner must stay in FN/FP accounting.
     #[test]
-    fn out_of_range_labels_are_dropped_not_panicking() {
+    fn out_of_range_partner_does_not_delete_the_record() {
         let m = confusion_matrix(&[Some(99), Some(0)], &[Some(0), Some(99)], 3);
+        let at = |gt_class: usize, dt_class: usize| m[gt_class * 4 + dt_class];
+        // Out-of-range GT, valid DT: the prediction counts as spurious.
+        assert_eq!(at(3, 0), 1, "valid DT must survive an invalid GT label");
+        // Valid GT, out-of-range DT: the ground truth counts as missed.
+        assert_eq!(at(0, 3), 1, "valid GT must survive an invalid DT label");
+        assert_eq!(m.iter().sum::<u64>(), 2);
+
+        // Both sides out-of-range degrades to (None, None): nothing counted.
+        let m = confusion_matrix(&[Some(99)], &[Some(42)], 3);
+        assert_eq!(m.iter().sum::<u64>(), 0);
+        // Out-of-range paired with None likewise counts nothing.
+        let m = confusion_matrix(&[Some(99), None], &[None, Some(42)], 3);
         assert_eq!(m.iter().sum::<u64>(), 0);
     }
 
@@ -352,8 +389,24 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_lengths_truncate_to_the_shorter() {
-        let m = confusion_matrix(&[Some(0), Some(1), Some(2)], &[Some(0)], 3);
-        assert_eq!(m.iter().sum::<u64>(), 1);
+    #[should_panic(expected = "parallel arrays")]
+    fn mismatched_lengths_panic_instead_of_truncating() {
+        confusion_matrix(&[Some(0), Some(1), Some(2)], &[Some(0)], 3);
+    }
+
+    /// An undersized matrix used to be a silent no-op (all-zero output, no
+    /// error). It is now a descriptive assert, like its sibling `row_normalize`.
+    #[test]
+    #[should_panic(expected = "(num_classes + 1)²")]
+    fn undersized_matrix_panics_instead_of_no_op() {
+        let mut too_small = vec![0u64; 4]; // needs (3+1)² = 16
+        accumulate_confusion(&mut too_small, &[Some(0)], &[Some(0)], 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "(num_classes + 1)²")]
+    fn oversized_matrix_panics_too() {
+        let mut too_big = vec![0u64; 25]; // needs (3+1)² = 16
+        accumulate_confusion(&mut too_big, &[Some(0)], &[Some(0)], 3);
     }
 }

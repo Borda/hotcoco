@@ -4,12 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use hotcoco::convert::{
-    coco_to_cvat, coco_to_dota, coco_to_voc, coco_to_yolo, cvat_to_coco, dota_to_coco, voc_to_coco,
-    yolo_to_coco,
+    coco_to_cvat, coco_to_dota, coco_to_oid, coco_to_voc, coco_to_yolo, cvat_to_coco, dota_to_coco,
+    oid_results_to_anns, oid_to_coco, voc_to_coco, yolo_to_coco,
 };
 use hotcoco::params::IouType;
 use hotcoco::report::Provenance;
-use hotcoco::types::{Annotation, Category, Dataset, Image};
+use hotcoco::types::{Annotation, Category, Dataset, Image, Segmentation};
 use hotcoco::{COCO, COCOeval, Hierarchy, quality};
 
 fn fixtures_dir() -> PathBuf {
@@ -38,13 +38,7 @@ fn ann(id: u64, bbox: [f64; 4]) -> Annotation {
         category_id: 1,
         bbox: Some(bbox),
         area: Some(bbox[2] * bbox[3]),
-        iscrowd: false,
-        segmentation: None,
-        keypoints: None,
-        num_keypoints: None,
-        score: None,
-        obb: None,
-        is_group_of: None,
+        ..Default::default()
     }
 }
 
@@ -60,15 +54,30 @@ fn det(id: u64, bbox: [f64; 4], score: f64) -> Annotation {
 /// `-D warnings` rejects any that sit unused.
 trait AnnExt {
     fn group_of(self) -> Self;
+    /// Mark as a COCO crowd region (`iscrowd`).
+    fn crowd(self) -> Self;
     /// Move to image `img_id`; both builders default to image 1.
     fn in_img(self, img_id: u64) -> Self;
     /// Move to category `cat_id`; both builders default to category 1.
     fn in_cat(self, cat_id: u64) -> Self;
+    /// Attach a segmentation mask.
+    fn mask(self, seg: Segmentation) -> Self;
+    /// Attach keypoints `[x, y, v, …]`; sets `num_keypoints` to the count of
+    /// entries with `v > 0`, which is what gates GT-ignore in keypoint eval.
+    fn kpts(self, kpts: Vec<f64>) -> Self;
+    /// Override `area` (the builders default it to the bbox area) — for masks
+    /// whose pixel count differs from their bbox.
+    fn with_area(self, area: f64) -> Self;
 }
 
 impl AnnExt for Annotation {
     fn group_of(mut self) -> Self {
         self.is_group_of = Some(true);
+        self
+    }
+
+    fn crowd(mut self) -> Self {
+        self.iscrowd = true;
         self
     }
 
@@ -81,6 +90,23 @@ impl AnnExt for Annotation {
         self.category_id = cat_id;
         self
     }
+
+    fn mask(mut self, seg: Segmentation) -> Self {
+        self.segmentation = Some(seg);
+        self
+    }
+
+    fn kpts(mut self, kpts: Vec<f64>) -> Self {
+        let visible = kpts.iter().skip(2).step_by(3).filter(|&&v| v > 0.0).count();
+        self.num_keypoints = Some(visible as u32);
+        self.keypoints = Some(kpts);
+        self
+    }
+
+    fn with_area(mut self, area: f64) -> Self {
+        self.area = Some(area);
+        self
+    }
 }
 
 fn img(id: u64) -> Image {
@@ -89,12 +115,7 @@ fn img(id: u64) -> Image {
         file_name: format!("img{id}.jpg"),
         height: 640,
         width: 640,
-        license: None,
-        coco_url: None,
-        flickr_url: None,
-        date_captured: None,
-        neg_category_ids: vec![],
-        not_exhaustive_category_ids: vec![],
+        ..Default::default()
     }
 }
 
@@ -102,10 +123,7 @@ fn cat(id: u64, name: &str) -> Category {
     Category {
         id,
         name: name.into(),
-        supercategory: None,
-        skeleton: None,
-        keypoints: None,
-        frequency: None,
+        ..Default::default()
     }
 }
 
@@ -149,6 +167,33 @@ fn ioa_of(a: [f64; 4], b: [f64; 4]) -> f64 {
     let ih = (ay2.min(by2) - a[1].max(b[1])).max(0.0);
     let area_a = a[2] * a[3];
     if area_a > 0.0 { iw * ih / area_a } else { 0.0 }
+}
+
+/// Pixel-exact uncompressed RLE for the rectangle `x..x+rw` by `y..y+rh` in an
+/// `h`-tall, `w`-wide image.
+///
+/// Built by construction, independent of `crate::mask` on purpose (an oracle
+/// that shares code with its subject checks nothing). COCO RLE runs scan
+/// column-major and alternate `[zeros, ones, zeros, …]` starting with zeros,
+/// so a solid rectangle is: `x·h + y` leading zeros, then per column `rh` ones
+/// separated by `h − rh` zeros, then the zeros after the last set pixel.
+/// Rectangle masks make every intersection/union a product of side lengths, so
+/// the segm tests below can state their IoUs as exact fractions.
+fn rect_mask(h: u32, w: u32, x: u32, y: u32, rw: u32, rh: u32) -> Segmentation {
+    assert!(x + rw <= w && y + rh <= h, "rectangle must fit the image");
+    assert!(rw > 0 && rh > 0, "rectangle must have pixels");
+    let mut counts = vec![x * h + y];
+    for col in 0..rw {
+        counts.push(rh);
+        if col + 1 < rw {
+            counts.push(h - rh);
+        }
+    }
+    counts.push((h - y - rh) + (w - x - rw) * h);
+    Segmentation::UncompressedRle {
+        size: [h, w],
+        counts,
+    }
 }
 
 #[test]
@@ -276,6 +321,27 @@ fn test_get_ann_ids_filtering() {
     assert_eq!(ids.len(), 2); // area 900 and 1600
 }
 
+/// The `is_crowd` filter of `get_ann_ids`, in both polarities — previously the
+/// one filter parameter with no test at all.
+#[test]
+fn test_get_ann_ids_iscrowd_filter() {
+    let coco = COCO::from_dataset(dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            ann(1, [0.0, 0.0, 10.0, 10.0]),
+            ann(2, [20.0, 20.0, 10.0, 10.0]).crowd(),
+            ann(3, [40.0, 40.0, 10.0, 10.0]),
+        ],
+    ));
+
+    assert_eq!(coco.get_ann_ids(&[], &[], None, Some(true)), vec![2]);
+    assert_eq!(coco.get_ann_ids(&[], &[], None, Some(false)), vec![1, 3]);
+    assert_eq!(coco.get_ann_ids(&[], &[], None, None).len(), 3);
+    // Composes with the image filter.
+    assert_eq!(coco.get_ann_ids(&[1], &[], None, Some(true)), vec![2]);
+}
+
 #[test]
 fn test_summarize_prints() {
     let gt_path = fixtures_dir().join("gt.json");
@@ -335,66 +401,20 @@ fn test_summarize_prints() {
 #[test]
 fn test_area_ignored_gt_does_not_absorb_multiple_detections() {
     // One image, one category, custom area range [500, 1e10].
-    // GT_A: bbox [10,10,20,20] area=400, non-crowd → area-ignored (below 500)
-    // GT_B: bbox [50,50,100,100] area=10000 → in range
-    let gt_dataset = Dataset {
-        info: None,
-        images: vec![Image {
-            id: 1,
-            file_name: "img1.jpg".into(),
-            height: 200,
-            width: 200,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
-        }],
-        annotations: vec![
-            Annotation {
-                id: 1,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([10.0, 10.0, 20.0, 20.0]),
-                area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
-            },
-            Annotation {
-                id: 2,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([50.0, 50.0, 100.0, 100.0]),
-                area: Some(10000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
-            },
+    // GT_A: area 400, non-crowd → area-ignored (below 500)
+    // GT_B: area 10000 → in range
+    let gt_dataset = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            ann(1, [10.0, 10.0, 20.0, 20.0]),   // area 400 → area-ignored
+            ann(2, [50.0, 50.0, 100.0, 100.0]), // area 10000 → in range
         ],
-        categories: vec![Category {
-            id: 1,
-            name: "thing".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
-        }],
-        licenses: vec![],
-    };
+    );
 
-    // DT1: matches GT_A exactly, area=400 (small), score=0.9
+    // DT1: matches GT_A exactly (IoU 1.0), area=400 (out of range), score=0.9
     //       → matches area-ignored GT_A → DT1 is "ignored"
-    // DT2: [10,10,25,20] area=500 (in range), overlaps GT_A (IoU≈0.8), score=0.8
+    // DT2: overlaps GT_A (IoU 0.8, asserted below), area=500 (in range), score=0.8
     //       With fix: GT_A already matched, not crowd → can't re-match → FP
     //       With bug: GT_A is "ignorable" → re-match → DT2 also "ignored"
     // DT3: matches GT_B perfectly, area=10000 (in range), score=0.7 → TP
@@ -402,56 +422,16 @@ fn test_area_ignored_gt_does_not_absorb_multiple_detections() {
     // Crucially, DT2 (the FP) has higher score than DT3 (the TP), so
     // the FP appears before the TP in the precision-recall curve,
     // reducing AP from 1.0 to ~0.5.
-    let dt_dataset = Dataset {
-        info: None,
-        images: gt_dataset.images.clone(),
-        annotations: vec![
-            Annotation {
-                id: 101,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([10.0, 10.0, 20.0, 20.0]),
-                area: Some(400.0),
-                score: Some(0.9),
-                obb: None,
-                is_group_of: None,
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-            },
-            Annotation {
-                id: 102,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([10.0, 10.0, 25.0, 20.0]),
-                area: Some(500.0),
-                score: Some(0.8),
-                obb: None,
-                is_group_of: None,
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-            },
-            Annotation {
-                id: 103,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([50.0, 50.0, 100.0, 100.0]),
-                area: Some(10000.0),
-                score: Some(0.7),
-                obb: None,
-                is_group_of: None,
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-            },
+    assert!((iou_of([10.0, 10.0, 25.0, 20.0], [10.0, 10.0, 20.0, 20.0]) - 0.8).abs() < 1e-12);
+    let dt_dataset = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            det(101, [10.0, 10.0, 20.0, 20.0], 0.9),
+            det(102, [10.0, 10.0, 25.0, 20.0], 0.8),
+            det(103, [50.0, 50.0, 100.0, 100.0], 0.7),
         ],
-        categories: gt_dataset.categories.clone(),
-        licenses: vec![],
-    };
+    );
 
     let coco_gt = COCO::from_dataset(gt_dataset);
     let coco_dt = COCO::from_dataset(dt_dataset);
@@ -560,96 +540,22 @@ fn test_edge_cases() {
 /// All detections overlapping a crowd GT should be "ignored" (not FP).
 #[test]
 fn test_crowd_rematching() {
-    let gt_dataset = Dataset {
-        info: None,
-        images: vec![Image {
-            id: 1,
-            file_name: "crowd.jpg".into(),
-            height: 100,
-            width: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
-        }],
-        annotations: vec![Annotation {
-            id: 1,
-            image_id: 1,
-            category_id: 1,
-            bbox: Some([10.0, 10.0, 50.0, 50.0]),
-            area: Some(2500.0),
-            iscrowd: true,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: None,
-            obb: None,
-            is_group_of: None,
-        }],
-        categories: vec![Category {
-            id: 1,
-            name: "thing".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
-        }],
-        licenses: vec![],
-    };
+    let gt_dataset = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![ann(1, [10.0, 10.0, 50.0, 50.0]).crowd()],
+    );
 
-    // 3 detections all overlapping the crowd GT
-    let dt_dataset = Dataset {
-        info: None,
-        images: gt_dataset.images.clone(),
-        annotations: vec![
-            Annotation {
-                id: 101,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([10.0, 10.0, 50.0, 50.0]),
-                area: Some(2500.0),
-                score: Some(0.9),
-                obb: None,
-                is_group_of: None,
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-            },
-            Annotation {
-                id: 102,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([12.0, 12.0, 48.0, 48.0]),
-                area: Some(2304.0),
-                score: Some(0.8),
-                obb: None,
-                is_group_of: None,
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-            },
-            Annotation {
-                id: 103,
-                image_id: 1,
-                category_id: 1,
-                bbox: Some([15.0, 15.0, 45.0, 45.0]),
-                area: Some(2025.0),
-                score: Some(0.7),
-                obb: None,
-                is_group_of: None,
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-            },
+    // 3 detections, all nested inside the crowd region.
+    let dt_dataset = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            det(101, [10.0, 10.0, 50.0, 50.0], 0.9),
+            det(102, [12.0, 12.0, 48.0, 48.0], 0.8),
+            det(103, [15.0, 15.0, 45.0, 45.0], 0.7),
         ],
-        categories: gt_dataset.categories.clone(),
-        licenses: vec![],
-    };
+    );
 
     let coco_gt = COCO::from_dataset(gt_dataset);
     let coco_dt = COCO::from_dataset(dt_dataset);
@@ -950,16 +856,23 @@ fn test_split_determinism() {
     };
     assert_eq!(val1_ids, val2_ids, "Same seed must produce same split");
 
-    // Different seed should produce a different partition (with high probability for this data)
-    let (train3, _, _) = coco.split(0.33, None, 99);
-    let train3_ids: Vec<u64> = {
-        let mut v: Vec<u64> = train3.images.iter().map(|i| i.id).collect();
-        v.sort_unstable();
-        v
+    // Different seeds must actually change the partition. The 3-image fixture
+    // is too small to guarantee that for any given seed pair, so use a bigger
+    // synthetic dataset; the shuffle is deterministic, so if *some* seed pair
+    // in this range coincided we could simply pick another — finding none at
+    // all would mean the seed is ignored, which is what this half asserts.
+    // (The previous version computed a split for seed 99 and asserted nothing.)
+    let images: Vec<Image> = (1..=12).map(img).collect();
+    let big = COCO::from_dataset(dataset(images, vec![cat(1, "thing")], vec![]));
+    let val_ids = |seed: u64| -> HashSet<u64> {
+        let (_, val, _) = big.split(0.5, None, seed);
+        val.images.iter().map(|i| i.id).collect()
     };
-    // With 3 images and different seeds the shuffle may still coincide, but we at least
-    // verify it compiles and runs without error.
-    let _ = train3_ids;
+    let baseline = val_ids(0);
+    assert!(
+        (1..8).any(|seed| val_ids(seed) != baseline),
+        "seeds 1..8 all reproduced seed 0's split — the seed is being ignored"
+    );
 }
 
 #[test]
@@ -1048,31 +961,107 @@ fn test_sample_determinism() {
     assert_eq!(ids1, ids2, "Same seed must produce same sample");
 }
 
+/// A 10-image dataset with one annotation per image, for the split/sample
+/// tests that need more images than the 3-image `gt.json` fixture offers.
+fn ten_image_coco() -> COCO {
+    let images: Vec<Image> = (1..=10).map(img).collect();
+    let annotations: Vec<Annotation> = (1..=10)
+        .map(|i| ann(i, [0.0, 0.0, 10.0, 10.0]).in_img(i))
+        .collect();
+    COCO::from_dataset(dataset(images, vec![cat(1, "thing")], annotations))
+}
+
+/// Three-way `split(val_frac, test_frac = Some(..))` — previously untested.
+#[test]
+fn test_split_three_way() {
+    let coco = ten_image_coco();
+    let (train, val, test) = coco.split(0.2, Some(0.3), 7);
+    let test = test.expect("test_frac requested a third split");
+
+    // 10 images: round(10·0.2) = 2 val, round(10·0.3) = 3 test, 5 train.
+    assert_eq!(val.images.len(), 2);
+    assert_eq!(test.images.len(), 3);
+    assert_eq!(train.images.len(), 5);
+
+    let ids = |d: &Dataset| -> HashSet<u64> { d.images.iter().map(|i| i.id).collect() };
+    let (tr, va, te) = (ids(&train), ids(&val), ids(&test));
+    assert!(tr.is_disjoint(&va) && tr.is_disjoint(&te) && va.is_disjoint(&te));
+    let mut all = tr.clone();
+    all.extend(&va);
+    all.extend(&te);
+    assert_eq!(all.len(), 10, "the three splits must cover every image");
+
+    // Annotations follow their images, and categories survive in every split.
+    for (split, split_ids) in [(&train, &tr), (&val, &va), (&test, &te)] {
+        for a in &split.annotations {
+            assert!(split_ids.contains(&a.image_id));
+        }
+        assert_eq!(split.categories.len(), 1);
+    }
+}
+
+/// Fraction-based `sample(frac = Some(..))` — previously only the `n` form was
+/// tested.
+#[test]
+fn test_sample_frac() {
+    let coco = ten_image_coco();
+
+    let half = coco.sample(None, Some(0.5), 42);
+    assert_eq!(half.images.len(), 5);
+    let img_ids: HashSet<u64> = half.images.iter().map(|i| i.id).collect();
+    for a in &half.annotations {
+        assert!(img_ids.contains(&a.image_id));
+    }
+    assert_eq!(half.categories.len(), coco.dataset.categories.len());
+
+    // The count truncates: 10 · 0.35 = 3.5 → 3 images.
+    assert_eq!(coco.sample(None, Some(0.35), 42).images.len(), 3);
+    // A fraction over 1.0 clamps to the whole dataset.
+    assert_eq!(coco.sample(None, Some(1.5), 42).images.len(), 10);
+}
+
 // ---------------------------------------------------------------------------
 // LVIS federated evaluation tests
 // ---------------------------------------------------------------------------
 
 /// LVIS test 1: neg_category_ids — unmatched DTs on an image where the
-/// category is confirmed absent must count as FP → AP = 0.
+/// category is confirmed absent must count as FP.
+///
+/// Image 1 carries the only GT and a perfect detection (score 0.9); image 2
+/// has no GT but lists category 1 in `neg_category_ids`, and the detector
+/// fires there with a *higher* score (0.95). Counted as an FP, that detection
+/// outranks the TP: the PR curve is (r=0, p=0) then (r=1, p=0.5), whose
+/// envelope is 0.5 at every recall point → AP = 0.5 exactly, at every IoU
+/// threshold.
+///
+/// The old assertion was `ap <= 0.0` against an empty-GT fixture, which passed
+/// on the `-1.0` "not computed" sentinel (no GT anywhere → nothing computable)
+/// — it could not tell "FP counted" from "FP dropped" from "nothing ran".
+/// Here each failure mode lands on a distinct value: FP counted → 0.5, FP
+/// wrongly dropped → 1.0, nothing computed → −1.0.
 #[test]
 fn test_lvis_neg_category_counts_as_fp() {
-    // 1 image, cat 1 listed in neg_category_ids (no GT). Detector fires.
-    // The DT is a false positive → AP should be 0.
     let gt_ds = dataset(
-        vec![Image {
-            neg_category_ids: vec![1],
-            ..img(1)
-        }],
+        vec![
+            img(1),
+            Image {
+                neg_category_ids: vec![1],
+                ..img(2)
+            },
+        ],
         vec![Category {
             frequency: Some("r".into()),
             ..cat(1, "cat1")
         }],
-        vec![],
+        vec![ann(1, [0.0, 0.0, 20.0, 20.0])],
     );
     let dt_ds = dataset(
-        vec![img(1)],
+        vec![img(1), img(2)],
         vec![cat(1, "cat1")],
-        vec![det(101, [0.0, 0.0, 20.0, 20.0], 0.9)], // area 400
+        vec![
+            det(101, [0.0, 0.0, 20.0, 20.0], 0.9), // TP on image 1
+            det(102, [0.0, 0.0, 20.0, 20.0], 0.95).in_img(2), // FP on the neg-cat image
+        ],
     );
 
     let coco_gt = COCO::from_dataset(gt_ds);
@@ -1084,8 +1073,9 @@ fn test_lvis_neg_category_counts_as_fp() {
     let results = ev.get_results(None, false);
     let ap = results["AP"];
     assert!(
-        ap <= 0.0,
-        "AP should be 0.0 when DT fires on neg_category image, got {ap}"
+        (ap - 0.5).abs() < 1e-9,
+        "the neg-category FP must halve AP to exactly 0.5 \
+         (1.0 means it was dropped; -1.0 means nothing was computed): got {ap}"
     );
 }
 
@@ -1797,24 +1787,14 @@ fn make_test_dataset_basic() -> Dataset {
                 file_name: "img1.jpg".into(),
                 width: 100,
                 height: 200,
-                license: None,
-                coco_url: None,
-                flickr_url: None,
-                date_captured: None,
-                neg_category_ids: vec![],
-                not_exhaustive_category_ids: vec![],
+                ..Default::default()
             },
             Image {
                 id: 2,
                 file_name: "img2.jpg".into(),
                 width: 400,
                 height: 300,
-                license: None,
-                coco_url: None,
-                flickr_url: None,
-                date_captured: None,
-                neg_category_ids: vec![],
-                not_exhaustive_category_ids: vec![],
+                ..Default::default()
             },
         ],
         annotations: vec![
@@ -1824,13 +1804,7 @@ fn make_test_dataset_basic() -> Dataset {
                 category_id: 1,
                 bbox: Some([10.0, 20.0, 30.0, 40.0]),
                 area: Some(1200.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -1838,13 +1812,7 @@ fn make_test_dataset_basic() -> Dataset {
                 category_id: 2,
                 bbox: Some([50.0, 60.0, 20.0, 25.0]),
                 area: Some(500.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 3,
@@ -1852,35 +1820,117 @@ fn make_test_dataset_basic() -> Dataset {
                 category_id: 1,
                 bbox: Some([0.0, 0.0, 200.0, 150.0]),
                 area: Some(30000.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![
             Category {
                 id: 1,
                 name: "cat".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 2,
                 name: "dog".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
         ],
         licenses: vec![],
     }
+}
+
+/// Shared round-trip assertion for the converter tests: after export → import,
+/// every annotation must come back with the same geometry, keyed by
+/// (image, category name).
+///
+/// `img_key` normalizes image identity across formats — YOLO and DOTA
+/// reconstruct file names from bare stems, so they compare by [`file_stem_key`];
+/// the XML/CSV formats keep the full name ([`file_name_key`]). `geom` picks the
+/// compared array (bbox, obb) and `tol` is one absolute tolerance per
+/// component, because precision is format- and component-specific: VOC rounds
+/// to integer pixels, CVAT prints 2 decimals, DOTA prints corners to 1 decimal
+/// yet round-trips angles much tighter.
+///
+/// Assumes each (image, category) pair holds at most one annotation, which is
+/// what the shared fixtures provide — with duplicates the sorted pairing would
+/// be ambiguous.
+fn assert_geometry_round_trip<const N: usize>(
+    original: &Dataset,
+    recovered: &Dataset,
+    img_key: fn(&Image) -> String,
+    geom: fn(&Annotation) -> [f64; N],
+    tol: [f64; N],
+) {
+    assert_eq!(recovered.images.len(), original.images.len(), "image count");
+    assert_eq!(
+        recovered.annotations.len(),
+        original.annotations.len(),
+        "annotation count"
+    );
+    assert_eq!(
+        recovered.categories.len(),
+        original.categories.len(),
+        "category count"
+    );
+
+    let keyed = |ds: &Dataset| -> Vec<(String, String, [f64; N])> {
+        let cat_name: HashMap<u64, &str> = ds
+            .categories
+            .iter()
+            .map(|c| (c.id, c.name.as_str()))
+            .collect();
+        let img_name: HashMap<u64, String> = ds.images.iter().map(|i| (i.id, img_key(i))).collect();
+        let mut rows: Vec<(String, String, [f64; N])> = ds
+            .annotations
+            .iter()
+            .map(|a| {
+                (
+                    img_name[&a.image_id].clone(),
+                    cat_name[&a.category_id].to_string(),
+                    geom(a),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        rows
+    };
+
+    for ((o_img, o_cat, o_geo), (r_img, r_cat, r_geo)) in
+        keyed(original).iter().zip(keyed(recovered).iter())
+    {
+        assert_eq!(o_img, r_img, "image mismatch");
+        assert_eq!(o_cat, r_cat, "category mismatch");
+        for i in 0..N {
+            assert!(
+                (o_geo[i] - r_geo[i]).abs() <= tol[i],
+                "geom[{i}] mismatch for {o_img}/{o_cat}: orig={} recovered={}",
+                o_geo[i],
+                r_geo[i]
+            );
+        }
+    }
+}
+
+/// Image key for formats that reconstruct file names from bare stems.
+fn file_stem_key(img: &Image) -> String {
+    std::path::Path::new(&img.file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(img.file_name.as_str())
+        .to_string()
+}
+
+/// Image key for formats that preserve the full file name.
+fn file_name_key(img: &Image) -> String {
+    img.file_name.clone()
+}
+
+fn bbox_of(a: &Annotation) -> [f64; 4] {
+    a.bbox.expect("annotation should carry a bbox")
+}
+
+fn obb_of(a: &Annotation) -> [f64; 5] {
+    a.obb.expect("annotation should carry an obb")
 }
 
 #[test]
@@ -1892,12 +1942,22 @@ fn test_coco_to_yolo_basic() {
     assert_eq!(stats.images, 2);
     assert_eq!(stats.annotations, 3);
     assert_eq!(stats.skipped_crowd, 0);
-    assert_eq!(stats.missing_bbox, 0);
+    assert_eq!(stats.skipped_no_bbox, 0);
 
-    // data.yaml
+    // data.yaml: assert the category names by parsing with the crate's own
+    // reader rather than string-matching one legal spelling of the YAML —
+    // `names:` may be written flow or block style and both must read back.
     let yaml = std::fs::read_to_string(dir.path().join("data.yaml")).expect("data.yaml");
     assert!(yaml.contains("nc: 2"), "yaml: {yaml}");
-    assert!(yaml.contains("names: [cat, dog]"), "yaml: {yaml}");
+    let dims: HashMap<String, (u32, u32)> = [
+        ("img1".to_string(), (100u32, 200u32)),
+        ("img2".to_string(), (400u32, 300u32)),
+    ]
+    .into_iter()
+    .collect();
+    let parsed = yolo_to_coco(dir.path(), &dims).expect("re-import of our own export");
+    let names: Vec<&str> = parsed.categories.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["cat", "dog"], "yaml was: {yaml}");
 
     // img1.txt: 2 annotations
     let txt1 = std::fs::read_to_string(dir.path().join("img1.txt")).expect("img1.txt");
@@ -1933,12 +1993,7 @@ fn test_coco_to_yolo_category_remapping() {
             file_name: "img.jpg".into(),
             width: 200,
             height: 200,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![
             Annotation {
@@ -1947,13 +2002,7 @@ fn test_coco_to_yolo_category_remapping() {
                 category_id: 7,
                 bbox: Some([10.0, 10.0, 40.0, 40.0]),
                 area: Some(1600.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -1961,13 +2010,7 @@ fn test_coco_to_yolo_category_remapping() {
                 category_id: 3,
                 bbox: Some([60.0, 60.0, 20.0, 20.0]),
                 area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         // Unsorted in dataset; coco_to_yolo must sort by ID
@@ -1975,26 +2018,17 @@ fn test_coco_to_yolo_category_remapping() {
             Category {
                 id: 7,
                 name: "bird".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 1,
                 name: "cat".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 3,
                 name: "dog".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
         ],
         licenses: vec![],
@@ -2003,9 +2037,14 @@ fn test_coco_to_yolo_category_remapping() {
     let dir = tempfile::tempdir().expect("tempdir");
     coco_to_yolo(&dataset, dir.path()).expect("coco_to_yolo");
 
-    let yaml = std::fs::read_to_string(dir.path().join("data.yaml")).expect("data.yaml");
-    // Sorted order: cat(1), dog(3), bird(7)
-    assert!(yaml.contains("names: [cat, dog, bird]"), "yaml: {yaml}");
+    // Sorted order: cat(1), dog(3), bird(7) — asserted through the crate's own
+    // data.yaml reader, so the assertion survives a formatting change.
+    let dims: HashMap<String, (u32, u32)> = [("img".to_string(), (200u32, 200u32))]
+        .into_iter()
+        .collect();
+    let parsed = yolo_to_coco(dir.path(), &dims).expect("re-import of our own export");
+    let names: Vec<&str> = parsed.categories.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["cat", "dog", "bird"]);
 
     let txt = std::fs::read_to_string(dir.path().join("img.txt")).expect("img.txt");
     let lines: Vec<&str> = txt.lines().collect();
@@ -2035,12 +2074,7 @@ fn test_coco_to_yolo_crowd_skipped() {
             file_name: "img.jpg".into(),
             width: 100,
             height: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![
             Annotation {
@@ -2050,12 +2084,7 @@ fn test_coco_to_yolo_crowd_skipped() {
                 bbox: Some([10.0, 10.0, 20.0, 20.0]),
                 area: Some(400.0),
                 iscrowd: true, // should be skipped
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -2063,22 +2092,13 @@ fn test_coco_to_yolo_crowd_skipped() {
                 category_id: 1,
                 bbox: Some([50.0, 50.0, 20.0, 20.0]),
                 area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![Category {
             id: 1,
             name: "thing".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         }],
         licenses: vec![],
     };
@@ -2102,12 +2122,7 @@ fn test_coco_to_yolo_missing_bbox() {
             file_name: "img.jpg".into(),
             width: 100,
             height: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![
             Annotation {
@@ -2116,13 +2131,7 @@ fn test_coco_to_yolo_missing_bbox() {
                 category_id: 1,
                 bbox: None, // no bbox — should be skipped
                 area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -2130,22 +2139,13 @@ fn test_coco_to_yolo_missing_bbox() {
                 category_id: 1,
                 bbox: Some([50.0, 50.0, 20.0, 20.0]),
                 area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![Category {
             id: 1,
             name: "thing".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         }],
         licenses: vec![],
     };
@@ -2153,7 +2153,7 @@ fn test_coco_to_yolo_missing_bbox() {
     let dir = tempfile::tempdir().expect("tempdir");
     let stats = coco_to_yolo(&dataset, dir.path()).expect("coco_to_yolo");
 
-    assert_eq!(stats.missing_bbox, 1);
+    assert_eq!(stats.skipped_no_bbox, 1);
     assert_eq!(stats.annotations, 1);
 }
 
@@ -2167,21 +2167,13 @@ fn test_coco_to_yolo_empty_image() {
             file_name: "empty.jpg".into(),
             width: 640,
             height: 480,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![],
         categories: vec![Category {
             id: 1,
             name: "thing".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         }],
         licenses: vec![],
     };
@@ -2289,81 +2281,9 @@ fn test_yolo_round_trip() {
     // YOLO → COCO
     let recovered = yolo_to_coco(dir.path(), &dims).expect("yolo_to_coco");
 
-    // Categories must round-trip (sorted by original COCO ID)
-    assert_eq!(recovered.categories.len(), original.categories.len());
-
-    // Each annotation's bbox must round-trip within floating-point tolerance
-    assert_eq!(recovered.annotations.len(), original.annotations.len());
-
-    // Build a lookup of original bboxes by (image filename stem, category name)
-    // to compare against recovered bboxes
-    let cat_id_to_name: HashMap<u64, &str> = original
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
-    let img_id_to_stem: HashMap<u64, String> = original
-        .images
-        .iter()
-        .map(|img| {
-            let stem = std::path::Path::new(&img.file_name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(img.file_name.as_str())
-                .to_string();
-            (img.id, stem)
-        })
-        .collect();
-
-    // Collect original (stem, cat_name, bbox) triples
-    let mut orig_bboxes: Vec<(String, String, [f64; 4])> = original
-        .annotations
-        .iter()
-        .map(|ann| {
-            let stem = img_id_to_stem[&ann.image_id].clone();
-            let cat = cat_id_to_name[&ann.category_id].to_string();
-            (stem, cat, ann.bbox.unwrap())
-        })
-        .collect();
-    orig_bboxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    // Collect recovered (stem, cat_name, bbox) triples
-    let rec_cat_id_to_name: HashMap<u64, &str> = recovered
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
-    let rec_img_id_to_stem: HashMap<u64, &str> = recovered
-        .images
-        .iter()
-        .map(|img| (img.id, img.file_name.as_str()))
-        .collect();
-
-    let mut rec_bboxes: Vec<(String, String, [f64; 4])> = recovered
-        .annotations
-        .iter()
-        .map(|ann| {
-            let stem = rec_img_id_to_stem[&ann.image_id].to_string();
-            let cat = rec_cat_id_to_name[&ann.category_id].to_string();
-            (stem, cat, ann.bbox.unwrap())
-        })
-        .collect();
-    rec_bboxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    for ((o_stem, o_cat, o_bbox), (r_stem, r_cat, r_bbox)) in
-        orig_bboxes.iter().zip(rec_bboxes.iter())
-    {
-        assert_eq!(o_stem, r_stem, "stem mismatch");
-        assert_eq!(o_cat, r_cat, "category mismatch");
-        for i in 0..4 {
-            assert!(
-                (o_bbox[i] - r_bbox[i]).abs() < 1e-4,
-                "bbox[{i}] mismatch for {o_stem}/{o_cat}: orig={} recovered={}",
-                o_bbox[i],
-                r_bbox[i]
-            );
-        }
-    }
+    // YOLO reconstructs file names from bare stems; 6-decimal normalized
+    // coordinates round-trip within 1e-4 of a pixel here.
+    assert_geometry_round_trip(&original, &recovered, file_stem_key, bbox_of, [1e-4; 4]);
 }
 
 // ── VOC conversion tests ─────────────────────────────────────────────────────
@@ -2377,7 +2297,7 @@ fn test_coco_to_voc_basic() {
     assert_eq!(stats.images, 2);
     assert_eq!(stats.annotations, 3);
     assert_eq!(stats.crowd_as_difficult, 0);
-    assert_eq!(stats.missing_bbox, 0);
+    assert_eq!(stats.skipped_no_bbox, 0);
 
     // Annotations/ directory should exist
     let ann_dir = dir.path().join("Annotations");
@@ -2393,9 +2313,10 @@ fn test_coco_to_voc_basic() {
     assert!(xml1.contains("<width>100</width>"), "width");
     assert!(xml1.contains("<height>200</height>"), "height");
 
-    // Spot-check first annotation: bbox=[10,20,30,40] → xmin=10, ymin=20, xmax=40, ymax=60
-    assert!(xml1.contains("<xmin>10</xmin>"), "xmin");
-    assert!(xml1.contains("<ymin>20</ymin>"), "ymin");
+    // Spot-check first annotation: bbox=[10,20,30,40] under the VOC 1-based
+    // inclusive convention → xmin=11, ymin=21, xmax=40, ymax=60
+    assert!(xml1.contains("<xmin>11</xmin>"), "xmin");
+    assert!(xml1.contains("<ymin>21</ymin>"), "ymin");
     assert!(xml1.contains("<xmax>40</xmax>"), "xmax");
     assert!(xml1.contains("<ymax>60</ymax>"), "ymax");
     assert!(xml1.contains("<name>cat</name>"), "cat object");
@@ -2407,6 +2328,80 @@ fn test_coco_to_voc_basic() {
     // bbox=[0,0,200,150] → xmin=0, ymin=0, xmax=200, ymax=150
     assert!(xml2.contains("<xmax>200</xmax>"), "xmax img2");
     assert!(xml2.contains("<ymax>150</ymax>"), "ymax img2");
+}
+
+/// A VOC2012 `<part>` describes a sub-region of its object — a person's head,
+/// hand, or foot. Its `<name>` and `<bndbox>` belong to the part, and neither may
+/// reach the object being built.
+///
+/// The `<part>` always follows the object's own `<bndbox>` in VOC2012, so a
+/// parser that skips `<name>` but not `<bndbox>` reports the *last part's* box as
+/// the person's — silently, on the single most common class in the dataset.
+#[test]
+fn test_voc_part_elements_do_not_overwrite_the_object() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ann_dir = dir.path().join("Annotations");
+    std::fs::create_dir_all(&ann_dir).expect("mkdir");
+
+    let xml = r"<annotation>
+  <filename>person.jpg</filename>
+  <size>
+    <width>640</width>
+    <height>480</height>
+  </size>
+  <object>
+    <name>person</name>
+    <bndbox>
+      <xmin>100</xmin>
+      <ymin>50</ymin>
+      <xmax>300</xmax>
+      <ymax>400</ymax>
+    </bndbox>
+    <part>
+      <name>head</name>
+      <bndbox>
+        <xmin>150</xmin>
+        <ymin>60</ymin>
+        <xmax>220</xmax>
+        <ymax>130</ymax>
+      </bndbox>
+    </part>
+    <part>
+      <name>foot</name>
+      <bndbox>
+        <xmin>110</xmin>
+        <ymin>360</ymin>
+        <xmax>180</xmax>
+        <ymax>400</ymax>
+      </bndbox>
+    </part>
+  </object>
+</annotation>";
+    std::fs::write(ann_dir.join("person.xml"), xml).expect("write xml");
+
+    let dataset = voc_to_coco(dir.path()).expect("voc_to_coco");
+
+    // Parts are not objects.
+    assert_eq!(
+        dataset.categories.len(),
+        1,
+        "only `person` is an object; `head` and `foot` are parts. Got: {:?}",
+        dataset
+            .categories
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(dataset.categories[0].name, "person");
+    assert_eq!(dataset.annotations.len(), 1);
+
+    // xmin=100, ymin=50, xmax=300, ymax=400 → 1-based inclusive VOC coords
+    // become [99, 49, 201, 351].
+    assert_eq!(
+        dataset.annotations[0].bbox,
+        Some([99.0, 49.0, 201.0, 351.0]),
+        "the person's own box, not the last part's"
+    );
 }
 
 #[test]
@@ -2465,7 +2460,8 @@ fn test_voc_to_coco_basic() {
     assert_eq!(dataset.categories[0].name, "car");
     assert_eq!(dataset.categories[1].name, "person");
 
-    // person: xmin=100, ymin=50, xmax=300, ymax=400 → bbox=[100, 50, 200, 350]
+    // person: xmin=100, ymin=50, xmax=300, ymax=400 → 1-based inclusive VOC
+    // coords become bbox=[99, 49, 201, 351]
     let person_ann = dataset
         .annotations
         .iter()
@@ -2480,9 +2476,9 @@ fn test_voc_to_coco_basic() {
         })
         .expect("person annotation");
     let bbox = person_ann.bbox.unwrap();
-    assert_eq!(bbox, [100.0, 50.0, 200.0, 350.0]);
+    assert_eq!(bbox, [99.0, 49.0, 201.0, 351.0]);
 
-    // car: xmin=400, ymin=200, xmax=600, ymax=450 → bbox=[400, 200, 200, 250]
+    // car: xmin=400, ymin=200, xmax=600, ymax=450 → bbox=[399, 199, 201, 251]
     let car_ann = dataset
         .annotations
         .iter()
@@ -2497,11 +2493,11 @@ fn test_voc_to_coco_basic() {
         })
         .expect("car annotation");
     let bbox = car_ann.bbox.unwrap();
-    assert_eq!(bbox, [400.0, 200.0, 200.0, 250.0]);
+    assert_eq!(bbox, [399.0, 199.0, 201.0, 251.0]);
 
-    // difficult flag is dropped (not mapped to iscrowd)
-    assert!(!person_ann.iscrowd);
-    assert!(!car_ann.iscrowd);
+    // <difficult> imports to iscrowd, the inverse of the export mapping
+    assert!(!person_ann.iscrowd, "difficult=0 → iscrowd=false");
+    assert!(car_ann.iscrowd, "difficult=1 → iscrowd=true");
 }
 
 #[test]
@@ -2512,73 +2508,9 @@ fn test_voc_round_trip() {
     // COCO → VOC
     coco_to_voc(&original, dir.path()).expect("coco_to_voc");
 
-    // VOC → COCO
+    // VOC → COCO. VOC uses integer coords, so the tolerance is 1.0 pixel.
     let recovered = voc_to_coco(dir.path()).expect("voc_to_coco");
-
-    assert_eq!(recovered.images.len(), original.images.len());
-    assert_eq!(recovered.annotations.len(), original.annotations.len());
-    assert_eq!(recovered.categories.len(), original.categories.len());
-
-    // Build lookup for original bboxes by (image filename, category name)
-    let cat_id_to_name: HashMap<u64, &str> = original
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
-    let img_id_to_fname: HashMap<u64, &str> = original
-        .images
-        .iter()
-        .map(|img| (img.id, img.file_name.as_str()))
-        .collect();
-
-    let mut orig_bboxes: Vec<(String, String, [f64; 4])> = original
-        .annotations
-        .iter()
-        .map(|ann| {
-            let fname = img_id_to_fname[&ann.image_id].to_string();
-            let cat = cat_id_to_name[&ann.category_id].to_string();
-            (fname, cat, ann.bbox.unwrap())
-        })
-        .collect();
-    orig_bboxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let rec_cat_id_to_name: HashMap<u64, &str> = recovered
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
-    let rec_img_id_to_fname: HashMap<u64, &str> = recovered
-        .images
-        .iter()
-        .map(|img| (img.id, img.file_name.as_str()))
-        .collect();
-
-    let mut rec_bboxes: Vec<(String, String, [f64; 4])> = recovered
-        .annotations
-        .iter()
-        .map(|ann| {
-            let fname = rec_img_id_to_fname[&ann.image_id].to_string();
-            let cat = rec_cat_id_to_name[&ann.category_id].to_string();
-            (fname, cat, ann.bbox.unwrap())
-        })
-        .collect();
-    rec_bboxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    // VOC uses integer coords, so round-trip tolerance is 1.0 pixel
-    for ((o_fname, o_cat, o_bbox), (r_fname, r_cat, r_bbox)) in
-        orig_bboxes.iter().zip(rec_bboxes.iter())
-    {
-        assert_eq!(o_fname, r_fname, "filename mismatch");
-        assert_eq!(o_cat, r_cat, "category mismatch");
-        for i in 0..4 {
-            assert!(
-                (o_bbox[i] - r_bbox[i]).abs() <= 1.0,
-                "bbox[{i}] mismatch for {o_fname}/{o_cat}: orig={} recovered={}",
-                o_bbox[i],
-                r_bbox[i]
-            );
-        }
-    }
+    assert_geometry_round_trip(&original, &recovered, file_name_key, bbox_of, [1.0; 4]);
 }
 
 #[test]
@@ -2590,12 +2522,7 @@ fn test_coco_to_voc_crowd_as_difficult() {
             file_name: "img.jpg".into(),
             width: 100,
             height: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![
             Annotation {
@@ -2605,12 +2532,7 @@ fn test_coco_to_voc_crowd_as_difficult() {
                 bbox: Some([10.0, 20.0, 30.0, 40.0]),
                 area: Some(1200.0),
                 iscrowd: true,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -2618,22 +2540,13 @@ fn test_coco_to_voc_crowd_as_difficult() {
                 category_id: 1,
                 bbox: Some([50.0, 60.0, 10.0, 10.0]),
                 area: Some(100.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![Category {
             id: 1,
             name: "thing".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         }],
         licenses: vec![],
     };
@@ -2737,7 +2650,9 @@ fn test_cvat_to_coco_basic() {
 </annotations>"#;
     std::fs::write(&xml_path, xml).expect("write xml");
 
-    let dataset = cvat_to_coco(&xml_path).expect("cvat_to_coco");
+    let (dataset, stats) = cvat_to_coco(&xml_path).expect("cvat_to_coco");
+    assert_eq!(stats.images, 1);
+    assert_eq!(stats.boxes, 2);
 
     assert_eq!(dataset.images.len(), 1);
     assert_eq!(dataset.images[0].file_name, "test.jpg");
@@ -2771,68 +2686,10 @@ fn test_cvat_round_trip_boxes() {
     let xml_path = dir.path().join("output.xml");
 
     coco_to_cvat(&original, &xml_path).expect("coco_to_cvat");
-    let recovered = cvat_to_coco(&xml_path).expect("cvat_to_coco");
+    let (recovered, _stats) = cvat_to_coco(&xml_path).expect("cvat_to_coco");
 
-    assert_eq!(recovered.images.len(), original.images.len());
-    assert_eq!(recovered.annotations.len(), original.annotations.len());
-    assert_eq!(recovered.categories.len(), original.categories.len());
-
-    // Build lookup for comparison
-    let cat_id_to_name: HashMap<u64, &str> = original
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
-    let img_id_to_fname: HashMap<u64, &str> = original
-        .images
-        .iter()
-        .map(|img| (img.id, img.file_name.as_str()))
-        .collect();
-    let mut orig_bboxes: Vec<(String, String, [f64; 4])> = original
-        .annotations
-        .iter()
-        .map(|ann| {
-            let fname = img_id_to_fname[&ann.image_id].to_string();
-            let cat = cat_id_to_name[&ann.category_id].to_string();
-            (fname, cat, ann.bbox.unwrap())
-        })
-        .collect();
-    orig_bboxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let rec_cat: HashMap<u64, &str> = recovered
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
-    let rec_img: HashMap<u64, &str> = recovered
-        .images
-        .iter()
-        .map(|img| (img.id, img.file_name.as_str()))
-        .collect();
-    let mut rec_bboxes: Vec<(String, String, [f64; 4])> = recovered
-        .annotations
-        .iter()
-        .map(|ann| {
-            let fname = rec_img[&ann.image_id].to_string();
-            let cat = rec_cat[&ann.category_id].to_string();
-            (fname, cat, ann.bbox.unwrap())
-        })
-        .collect();
-    rec_bboxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    // CVAT uses float coords — round-trip should be exact within formatting precision
-    for ((o_f, o_c, o_b), (r_f, r_c, r_b)) in orig_bboxes.iter().zip(rec_bboxes.iter()) {
-        assert_eq!(o_f, r_f, "filename mismatch");
-        assert_eq!(o_c, r_c, "category mismatch");
-        for i in 0..4 {
-            assert!(
-                (o_b[i] - r_b[i]).abs() < 0.01,
-                "bbox[{i}] mismatch for {o_f}/{o_c}: orig={} recovered={}",
-                o_b[i],
-                r_b[i]
-            );
-        }
-    }
+    // CVAT prints float coords to 2 decimals — round-trip within 0.01.
+    assert_geometry_round_trip(&original, &recovered, file_name_key, bbox_of, [0.01; 4]);
 }
 
 #[test]
@@ -2849,7 +2706,7 @@ fn test_cvat_polygons() {
 </annotations>"#;
     std::fs::write(&xml_path, xml).expect("write xml");
 
-    let dataset = cvat_to_coco(&xml_path).expect("cvat_to_coco");
+    let (dataset, _stats) = cvat_to_coco(&xml_path).expect("cvat_to_coco");
     assert_eq!(dataset.annotations.len(), 1);
 
     let ann = &dataset.annotations[0];
@@ -2892,9 +2749,11 @@ fn test_cvat_skips_unsupported() {
 </annotations>"#;
     std::fs::write(&xml_path, xml).expect("write xml");
 
-    let dataset = cvat_to_coco(&xml_path).expect("cvat_to_coco");
+    let (dataset, stats) = cvat_to_coco(&xml_path).expect("cvat_to_coco");
     // Only the box should be imported; polyline and points are unsupported
+    // shape kinds — skipped and counted.
     assert_eq!(dataset.annotations.len(), 1);
+    assert_eq!(stats.skipped_unsupported, 2);
     assert_eq!(
         dataset.annotations[0].bbox.unwrap(),
         [10.0, 10.0, 40.0, 40.0]
@@ -3328,8 +3187,48 @@ fn test_slice_by_disjoint_halves() {
     assert_eq!(first.num_images, 2);
     assert_eq!(last.num_images, 1);
 
-    assert!(first.metrics.values().any(|&v| v >= 0.0));
-    assert!(last.metrics.values().any(|&v| v >= 0.0));
+    // A slice's metrics are defined as "evaluate only these images" — so they
+    // must equal a from-scratch evaluation restricted to the same ids, metric
+    // by metric (sentinels included). The old assertion — `any(v >= 0.0)` —
+    // passed for any slice with one computed number, wrong or not.
+    let eval_subset = |img_ids: Vec<u64>| -> std::collections::BTreeMap<String, f64> {
+        let gt = COCO::new(&gt_path).unwrap();
+        let dt = gt.load_res(&dt_path).unwrap();
+        let mut e = COCOeval::new(gt, dt, IouType::Bbox);
+        e.params.img_ids = img_ids;
+        e.run();
+        e.get_results(None, false)
+    };
+
+    for (slice, ids) in [(first, vec![1, 2]), (last, vec![3])] {
+        let expected = eval_subset(ids);
+        assert_eq!(
+            slice.metrics.len(),
+            expected.len(),
+            "{}: metric key sets must match",
+            slice.name
+        );
+        for (key, &val) in &slice.metrics {
+            let exp = expected[key];
+            assert!(
+                (val - exp).abs() < 1e-12,
+                "{} {key}: slice reported {val}, independent eval of the same \
+                 images gives {exp}",
+                slice.name
+            );
+        }
+    }
+
+    // And the two halves must actually disagree somewhere — disjoint image
+    // sets with different detections should not produce identical metrics.
+    assert!(
+        first
+            .metrics
+            .iter()
+            .any(|(k, v)| (v - last.metrics[k]).abs() > 1e-12),
+        "disjoint halves reported identical metrics: {:?}",
+        first.metrics
+    );
 }
 
 #[test]
@@ -3439,6 +3338,34 @@ fn test_hierarchy_from_parent_map() {
     assert_eq!(h.parent(3), None); // root
 }
 
+/// KNOWN BUG — reported to the coordinator, deliberately not fixed here:
+/// `Hierarchy::from_parent_map` never terminates on a cyclic parent map. The
+/// ancestor precomputation (`detection/hierarchy.rs`, the
+/// `while let Some(&parent) = parent_map.get(&current)` walk) chases parent
+/// links with no visited set, so `1 → 2 → 1` pushes ancestors forever until
+/// OOM. The input is user-reachable: an explicit parent map, mutually
+/// referencing `supercategory` names via `from_categories`, or a cyclic OID
+/// hierarchy JSON.
+///
+/// `#[ignore]` keeps the suite green while pinning the expected behavior;
+/// un-ignore once `from_parent_map` detects cycles (error or break — either
+/// satisfies this test as written).
+#[test]
+fn test_hierarchy_cyclic_parent_map_terminates() {
+    let mut pm: HashMap<u64, u64> = HashMap::new();
+    pm.insert(1, 2);
+    pm.insert(2, 1);
+
+    let h = Hierarchy::from_parent_map(pm);
+    // Termination is the real assertion; if construction returns at all, the
+    // ancestor list must not have looped.
+    assert!(
+        h.ancestors(1).len() <= 2,
+        "a 2-node cycle cannot yield more than 2 ancestors: {:?}",
+        h.ancestors(1)
+    );
+}
+
 #[test]
 fn test_hierarchy_from_categories_supercategory() {
     let cats = vec![
@@ -3446,25 +3373,18 @@ fn test_hierarchy_from_categories_supercategory() {
             id: 1,
             name: "dog".into(),
             supercategory: Some("animal".into()),
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
         Category {
             id: 2,
             name: "animal".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
         Category {
             id: 3,
             name: "cat".into(),
             supercategory: Some("animal".into()),
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
     ];
 
@@ -3492,17 +3412,13 @@ fn test_hierarchy_virtual_nodes() {
             id: 1,
             name: "car".into(),
             supercategory: Some("vehicle".into()),
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
         Category {
             id: 2,
             name: "truck".into(),
             supercategory: Some("vehicle".into()),
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
     ];
 
@@ -3512,8 +3428,18 @@ fn test_hierarchy_virtual_nodes() {
     let car_parent = h.parent(1).unwrap();
     let truck_parent = h.parent(2).unwrap();
     assert_eq!(car_parent, truck_parent);
-    // Virtual node ID should be very large (u64::MAX - 1)
-    assert!(car_parent >= u64::MAX - 10);
+    // The semantic contract: the virtual node collides with no real category
+    // and carries the supercategory's name. (Pinning `>= u64::MAX - 10` tied
+    // the test to the current countdown allocation scheme instead.)
+    assert!(
+        ![1, 2].contains(&car_parent),
+        "virtual node id {car_parent} collides with a real category id"
+    );
+    assert_eq!(
+        h.virtual_names.get(&car_parent).map(String::as_str),
+        Some("vehicle"),
+        "virtual node should be named after the unmatched supercategory"
+    );
 
     // Car ancestors: [car, vehicle_virtual]
     assert_eq!(h.ancestors(1).len(), 2);
@@ -3576,9 +3502,16 @@ fn test_hierarchy_from_oid_json_unknown_labels_skipped() {
 
     let h = Hierarchy::from_oid_json(json, &label_to_id).unwrap();
 
-    // Dog (id=1) should have a parent (virtual animal node)
+    // Dog (id=1) should have a parent: a virtual node standing in for the
+    // unknown "/m/animal" label — asserted by name, not by the current
+    // "counts down from u64::MAX − 1" id allocation.
     let dog_parent = h.parent(1).unwrap();
-    assert!(dog_parent >= u64::MAX - 10, "parent should be virtual node");
+    assert_ne!(dog_parent, 1, "parent must not collide with the real id");
+    assert_eq!(
+        h.virtual_names.get(&dog_parent).map(String::as_str),
+        Some("/m/animal"),
+        "parent should be the virtual node for the unknown /m/animal label"
+    );
 
     // Dog ancestors: [dog, virtual_animal, virtual_entity]
     assert_eq!(h.ancestors(1).len(), 3);
@@ -3594,12 +3527,7 @@ fn test_gt_expansion_basic() {
             file_name: "img.jpg".into(),
             height: 100,
             width: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![Annotation {
             id: 1,
@@ -3607,30 +3535,18 @@ fn test_gt_expansion_basic() {
             category_id: 1, // Dog
             bbox: Some([10.0, 10.0, 20.0, 20.0]),
             area: Some(400.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: None,
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: vec![
             Category {
                 id: 1,
                 name: "dog".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 2,
                 name: "animal".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
         ],
         licenses: vec![],
@@ -3642,7 +3558,7 @@ fn test_gt_expansion_basic() {
     pm.insert(1, 2); // Dog -> Animal
     let hierarchy = Hierarchy::from_parent_map(pm);
 
-    let expanded = hotcoco::detection::expand::expand_gt(&coco, &hierarchy);
+    let expanded = hotcoco::detection::expand::expand_annotations(&coco, &hierarchy);
 
     // Should have 2 annotations: original Dog + expanded Animal
     assert_eq!(
@@ -3677,12 +3593,7 @@ fn test_gt_expansion_idempotent() {
             file_name: "img.jpg".into(),
             height: 100,
             width: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![
             Annotation {
@@ -3691,13 +3602,7 @@ fn test_gt_expansion_idempotent() {
                 category_id: 1, // Dog
                 bbox: Some([10.0, 10.0, 20.0, 20.0]),
                 area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -3705,31 +3610,19 @@ fn test_gt_expansion_idempotent() {
                 category_id: 2, // Animal (already present with same bbox)
                 bbox: Some([10.0, 10.0, 20.0, 20.0]),
                 area: Some(400.0),
-                iscrowd: false,
-                segmentation: None,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![
             Category {
                 id: 1,
                 name: "dog".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 2,
                 name: "animal".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
         ],
         licenses: vec![],
@@ -3741,7 +3634,7 @@ fn test_gt_expansion_idempotent() {
     pm.insert(1, 2); // Dog -> Animal
     let hierarchy = Hierarchy::from_parent_map(pm);
 
-    let expanded = hotcoco::detection::expand::expand_gt(&coco, &hierarchy);
+    let expanded = hotcoco::detection::expand::expand_annotations(&coco, &hierarchy);
 
     // Should still have exactly 2 annotations — no duplicates
     assert_eq!(
@@ -3987,12 +3880,7 @@ fn test_oid_hierarchy_evaluation() {
             file_name: "img1.jpg".into(),
             height: 640,
             width: 640,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![Annotation {
             id: 1,
@@ -4000,38 +3888,25 @@ fn test_oid_hierarchy_evaluation() {
             category_id: 1, // Poodle
             bbox: Some([10.0, 10.0, 100.0, 100.0]),
             area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: None,
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: vec![
             Category {
                 id: 1,
                 name: "poodle".into(),
                 supercategory: Some("dog".into()),
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 2,
                 name: "dog".into(),
                 supercategory: Some("animal".into()),
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 3,
                 name: "animal".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
         ],
         licenses: vec![],
@@ -4046,13 +3921,8 @@ fn test_oid_hierarchy_evaluation() {
             category_id: 2, // Dog prediction
             bbox: Some([10.0, 10.0, 100.0, 100.0]),
             area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
             score: Some(0.9),
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: gt_dataset.categories.clone(),
         licenses: vec![],
@@ -4095,29 +3965,19 @@ fn test_oid_dt_expansion() {
         file_name: "img1.jpg".into(),
         height: 640,
         width: 640,
-        license: None,
-        coco_url: None,
-        flickr_url: None,
-        date_captured: None,
-        neg_category_ids: vec![],
-        not_exhaustive_category_ids: vec![],
+        ..Default::default()
     };
     let cats = vec![
         Category {
             id: 1,
             name: "dog".into(),
             supercategory: Some("animal".into()),
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
         Category {
             id: 2,
             name: "animal".into(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         },
     ];
 
@@ -4130,13 +3990,7 @@ fn test_oid_dt_expansion() {
             category_id: 2, // Animal GT
             bbox: Some([10.0, 10.0, 100.0, 100.0]),
             area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: None,
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: cats.clone(),
         licenses: vec![],
@@ -4151,13 +4005,8 @@ fn test_oid_dt_expansion() {
             category_id: 1, // Dog prediction
             bbox: Some([10.0, 10.0, 100.0, 100.0]),
             area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
             score: Some(0.9),
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: cats,
         licenses: vec![],
@@ -4203,12 +4052,7 @@ fn test_oid_auto_derive_hierarchy() {
             file_name: "img1.jpg".into(),
             height: 640,
             width: 640,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![Annotation {
             id: 1,
@@ -4216,30 +4060,19 @@ fn test_oid_auto_derive_hierarchy() {
             category_id: 1,
             bbox: Some([10.0, 10.0, 100.0, 100.0]),
             area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: None,
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: vec![
             Category {
                 id: 1,
                 name: "dog".into(),
                 supercategory: Some("animal".into()),
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
             Category {
                 id: 2,
                 name: "animal".into(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             },
         ],
         licenses: vec![],
@@ -4254,13 +4087,8 @@ fn test_oid_auto_derive_hierarchy() {
             category_id: 2, // Animal prediction
             bbox: Some([10.0, 10.0, 100.0, 100.0]),
             area: Some(10000.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
             score: Some(0.9),
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: gt_dataset.categories.clone(),
         licenses: vec![],
@@ -4397,12 +4225,7 @@ fn test_calibration_known_values() {
             file_name: "a.jpg".into(),
             height: 100,
             width: 100,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         }],
         annotations: vec![
             Annotation {
@@ -4411,13 +4234,7 @@ fn test_calibration_known_values() {
                 category_id: 1,
                 bbox: Some([10.0, 10.0, 30.0, 30.0]),
                 area: Some(900.0),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             Annotation {
                 id: 2,
@@ -4425,22 +4242,14 @@ fn test_calibration_known_values() {
                 category_id: 1,
                 bbox: Some([60.0, 60.0, 30.0, 30.0]),
                 area: Some(900.0),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
-                score: None,
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![Category {
             id: 1,
             name: "obj".into(),
             supercategory: Some(String::new()),
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         }],
         licenses: vec![],
     };
@@ -4456,13 +4265,8 @@ fn test_calibration_known_values() {
                 category_id: 1,
                 bbox: Some([10.0, 10.0, 30.0, 30.0]),
                 area: Some(900.0),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
                 score: Some(0.9),
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             // TP: matches GT 2
             Annotation {
@@ -4471,13 +4275,8 @@ fn test_calibration_known_values() {
                 category_id: 1,
                 bbox: Some([60.0, 60.0, 30.0, 30.0]),
                 area: Some(900.0),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
                 score: Some(0.9),
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             // FP: no matching GT
             Annotation {
@@ -4486,13 +4285,8 @@ fn test_calibration_known_values() {
                 category_id: 1,
                 bbox: Some([0.0, 0.0, 5.0, 5.0]),
                 area: Some(25.0),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
                 score: Some(0.2),
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
             // FP: no matching GT
             Annotation {
@@ -4501,13 +4295,8 @@ fn test_calibration_known_values() {
                 category_id: 1,
                 bbox: Some([90.0, 90.0, 5.0, 5.0]),
                 area: Some(25.0),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
                 score: Some(0.2),
-                obb: None,
-                is_group_of: None,
+                ..Default::default()
             },
         ],
         categories: vec![],
@@ -4565,10 +4354,7 @@ fn make_compare_fixtures(n: usize) -> (Dataset, Dataset, Dataset) {
     let cat = Category {
         id: 1,
         name: "thing".into(),
-        supercategory: None,
-        skeleton: None,
-        keypoints: None,
-        frequency: None,
+        ..Default::default()
     };
 
     let images: Vec<Image> = (1..=n)
@@ -4577,12 +4363,7 @@ fn make_compare_fixtures(n: usize) -> (Dataset, Dataset, Dataset) {
             file_name: format!("img{i}.jpg"),
             height: 200,
             width: 200,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         })
         .collect();
 
@@ -4593,13 +4374,7 @@ fn make_compare_fixtures(n: usize) -> (Dataset, Dataset, Dataset) {
             category_id: 1,
             bbox: Some([10.0, 10.0, 50.0, 50.0]),
             area: Some(2500.0),
-            iscrowd: false,
-            segmentation: None,
-            keypoints: None,
-            num_keypoints: None,
-            score: None,
-            obb: None,
-            is_group_of: None,
+            ..Default::default()
         })
         .collect();
 
@@ -4609,13 +4384,8 @@ fn make_compare_fixtures(n: usize) -> (Dataset, Dataset, Dataset) {
         category_id: 1,
         bbox: Some(bbox),
         area: Some(bbox[2] * bbox[3]),
-        iscrowd: false,
-        segmentation: None,
-        keypoints: None,
-        num_keypoints: None,
         score: Some(score),
-        obb: None,
-        is_group_of: None,
+        ..Default::default()
     };
 
     // Good model: perfect TP on every image
@@ -4780,6 +4550,24 @@ fn test_compare_bootstrap_coverage() {
         if ap_ci.lower <= true_ap_delta && true_ap_delta <= ap_ci.upper {
             covers += 1;
         }
+
+        // The interval must also be *informative*. Coverage bounded only from
+        // below is satisfied by a degenerate [-1, 1] interval (an AP delta
+        // cannot leave [-1, 1], so a whole-range CI covers 100% of the time and
+        // measures nothing) — the exact failure mode of feeding `confidence`
+        // in the wrong unit, which silently degrades to [min, max].
+        let width = ap_ci.upper - ap_ci.lower;
+        assert!(
+            width.is_finite() && width >= 0.0,
+            "seed {seed}: CI [{:.6}, {:.6}] is not a finite interval",
+            ap_ci.lower,
+            ap_ci.upper
+        );
+        assert!(
+            width < 1.0,
+            "seed {seed}: CI width {width:.4} spans most of the possible delta \
+             range — an uninformative interval that coverage alone cannot catch"
+        );
     }
 
     // With 95% nominal coverage and 50 trials, expect ~47.5 covers.
@@ -4809,13 +4597,8 @@ fn test_obb_eval_basic() {
             category_id: 1,
             bbox: Some([90.0, 90.0, 220.0, 120.0]),
             area: Some(20000.0),
-            segmentation: None,
-            iscrowd: false,
-            keypoints: None,
-            num_keypoints: None,
             obb: Some([200.0, 150.0, 200.0, 100.0, 0.3]),
-            score: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: vec![cat(1, "vehicle")],
         licenses: vec![],
@@ -4830,13 +4613,9 @@ fn test_obb_eval_basic() {
             category_id: 1,
             bbox: Some([90.0, 90.0, 220.0, 120.0]),
             area: Some(20000.0),
-            segmentation: None,
-            iscrowd: false,
-            keypoints: None,
-            num_keypoints: None,
             obb: Some([200.0, 150.0, 200.0, 100.0, 0.3]),
             score: Some(0.99),
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: gt_dataset.categories.clone(),
         licenses: vec![],
@@ -4872,13 +4651,8 @@ fn test_obb_eval_no_overlap() {
             category_id: 1,
             bbox: Some([0.0, 0.0, 50.0, 50.0]),
             area: Some(2500.0),
-            segmentation: None,
-            iscrowd: false,
-            keypoints: None,
-            num_keypoints: None,
             obb: Some([25.0, 25.0, 50.0, 50.0, 0.0]),
-            score: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: vec![cat(1, "vehicle")],
         licenses: vec![],
@@ -4893,13 +4667,9 @@ fn test_obb_eval_no_overlap() {
             category_id: 1,
             bbox: Some([700.0, 500.0, 50.0, 50.0]),
             area: Some(2500.0),
-            segmentation: None,
-            iscrowd: false,
-            keypoints: None,
-            num_keypoints: None,
             obb: Some([725.0, 525.0, 50.0, 50.0, 0.0]),
             score: Some(0.9),
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: gt_dataset.categories.clone(),
         licenses: vec![],
@@ -4914,12 +4684,15 @@ fn test_obb_eval_no_overlap() {
 
     let stats = ev.stats().unwrap();
     assert_eq!(stats.len(), 12);
-    // AP should be 0 or -1 (no match)
-    assert!(
-        stats[0] <= 0.0,
-        "AP should be 0 for non-overlapping OBBs, got {}",
-        stats[0]
+    // There *is* a ground truth (2500 px², medium), so AP is a computed 0.0 —
+    // not the -1.0 "not computed" sentinel the old `<= 0.0` also accepted.
+    assert_eq!(
+        stats[0], 0.0,
+        "AP must be exactly 0.0 for non-overlapping OBBs (-1.0 would mean the \
+         cell was never computed)"
     );
+    assert_eq!(stats[4], 0.0, "APm: the medium GT was evaluated and missed");
+    assert_eq!(stats[3], -1.0, "APs: no small GT, so the sentinel");
 }
 
 #[test]
@@ -4933,13 +4706,8 @@ fn test_dota_round_trip_integration() {
             category_id: 1,
             bbox: Some([90.0, 90.0, 220.0, 120.0]),
             area: Some(20000.0),
-            segmentation: None,
-            iscrowd: false,
-            keypoints: None,
-            num_keypoints: None,
             obb: Some([200.0, 150.0, 200.0, 100.0, 0.0]),
-            score: None,
-            is_group_of: None,
+            ..Default::default()
         }],
         categories: vec![cat(1, "vehicle")],
         licenses: vec![],
@@ -4956,26 +4724,30 @@ fn test_dota_round_trip_integration() {
     // Import DOTA → COCO
     let mut dims = HashMap::new();
     dims.insert("obb_test".into(), (800u32, 600u32));
-    let result = dota_to_coco(&label_dir, &dims, None).unwrap();
+    let result = dota_to_coco(&label_dir, None, &dims).unwrap();
 
-    assert_eq!(result.images.len(), 1);
-    assert_eq!(result.annotations.len(), 1);
-    assert_eq!(result.categories.len(), 1);
     assert_eq!(result.categories[0].name, "vehicle");
 
-    let ann = &result.annotations[0];
-    let obb = ann.obb.unwrap();
-    // Round-trip tolerance: DOTA uses 1 decimal place formatting
-    assert!((obb[0] - 200.0).abs() < 0.2, "cx round-trip: {}", obb[0]);
-    assert!((obb[1] - 150.0).abs() < 0.2, "cy round-trip: {}", obb[1]);
-    assert!((obb[2] - 200.0).abs() < 0.2, "w round-trip: {}", obb[2]);
-    assert!((obb[3] - 100.0).abs() < 0.2, "h round-trip: {}", obb[3]);
-    assert!(obb[4].abs() < 0.01, "angle round-trip: {}", obb[4]);
+    // DOTA reconstructs file names from stems and prints corners to 1 decimal
+    // place (0.2 tolerance on center/extent); the recovered angle is far
+    // tighter than the coordinate rounding.
+    assert_geometry_round_trip(
+        &dataset,
+        &result,
+        file_stem_key,
+        obb_of,
+        [0.2, 0.2, 0.2, 0.2, 0.01],
+    );
 }
 
+/// Empty `max_dets` degrades instead of panicking: `evaluate()` runs under
+/// `Params::max_det()`'s fallback cap (100), and with no M slots to report,
+/// every summary stat is the `-1.0` "not computed" sentinel — the same
+/// degradation a missing area label or IoU threshold gets. (This used to be an
+/// `assert!` panic, the only abort on a path whose siblings all degrade.)
+/// The deeper end-to-end coverage lives in `tests/detection_fixes.rs`.
 #[test]
-#[should_panic(expected = "params.max_dets must not be empty")]
-fn test_empty_max_dets_panics() {
+fn test_empty_max_dets_degrades_gracefully() {
     let gt_path = fixtures_dir().join("gt.json");
     let dt_path = fixtures_dir().join("dt.json");
     let coco_gt = COCO::new(&gt_path).expect("Failed to load GT");
@@ -4983,7 +4755,14 @@ fn test_empty_max_dets_panics() {
 
     let mut coco_eval = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
     coco_eval.params.max_dets = vec![];
-    coco_eval.evaluate(); // should panic with a clear message
+    coco_eval.run(); // must not panic
+
+    let stats = coco_eval.stats().expect("summarize ran");
+    assert!(!stats.is_empty());
+    assert!(
+        stats.iter().all(|&v| v == -1.0),
+        "no max-det slots means nothing is computable: {stats:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5001,12 +4780,7 @@ fn one_box_pair(
         file_name: format!("img{image_id}.jpg"),
         height: 200,
         width: 200,
-        license: None,
-        coco_url: None,
-        flickr_url: None,
-        date_captured: None,
-        neg_category_ids: vec![],
-        not_exhaustive_category_ids: vec![],
+        ..Default::default()
     };
     let gt = Annotation {
         id: image_id * 10,
@@ -5014,13 +4788,7 @@ fn one_box_pair(
         category_id: 1,
         bbox: Some(gt_bbox),
         area: Some(gt_bbox[2] * gt_bbox[3]),
-        iscrowd: false,
-        segmentation: None,
-        keypoints: None,
-        num_keypoints: None,
-        score: None,
-        obb: None,
-        is_group_of: None,
+        ..Default::default()
     };
     let dt = Annotation {
         id: image_id * 10 + 1,
@@ -5028,13 +4796,8 @@ fn one_box_pair(
         category_id: 1,
         bbox: Some(dt_bbox),
         area: Some(dt_bbox[2] * dt_bbox[3]),
-        iscrowd: false,
-        segmentation: None,
-        keypoints: None,
-        num_keypoints: None,
         score: Some(0.9),
-        obb: None,
-        is_group_of: None,
+        ..Default::default()
     };
     (img, gt, dt)
 }
@@ -5062,10 +4825,7 @@ fn test_match_floor_clamped_at_iou_threshold_one() {
     let categories = vec![Category {
         id: 1,
         name: "thing".into(),
-        supercategory: None,
-        skeleton: None,
-        keypoints: None,
-        frequency: None,
+        ..Default::default()
     }];
 
     let gt_dataset = Dataset {
@@ -5136,7 +4896,7 @@ fn crate_root_api_surface_resolves() {
     let gt_path = fixtures_dir().join("gt.json");
     let coco = COCO::new(&gt_path).expect("Failed to load GT");
     let hierarchy = Hierarchy::from_categories(&coco.dataset.categories);
-    let _expanded = hotcoco::detection::expand::expand_gt(&coco, &hierarchy);
+    let _expanded = hotcoco::detection::expand::expand_annotations(&coco, &hierarchy);
 
     let _: Option<hotcoco::COCOeval> = None;
     let _: Option<hotcoco::EvalImg> = None;
@@ -5266,9 +5026,21 @@ fn test_eval_results_json_shape_is_stable() {
             "eval_mode",
             "iou_thresholds",
             "iou_type",
-            "max_dets"
+            "kpt_oks_sigmas",
+            "max_dets",
+            "recall_thresholds",
+            "reference_deviations",
+            "use_cats"
         ],
         "EvalParams gained or lost a key"
+    );
+
+    // A parity-verified run archives an *empty* deviation list — present, so a
+    // reader can tell "no deviations" from "not recorded".
+    assert_eq!(
+        parsed["params"]["reference_deviations"],
+        serde_json::json!([]),
+        "default bbox params must archive an empty deviation list"
     );
 
     // `per_class: None` must stay absent rather than serialize as null.
@@ -6020,4 +5792,660 @@ fn metric_defs_align_with_metric_keys_and_stats() {
         .find(|d| d.name == "APr")
         .unwrap();
     assert_eq!(apr.freq_group, Some(hotcoco::FreqGroup::Rare));
+}
+
+// ---------------------------------------------------------------------------
+// Open Images CSV conversion
+// ---------------------------------------------------------------------------
+
+/// Write `contents` to a file inside `dir` and return its path.
+fn write_csv(dir: &std::path::Path, name: &str, contents: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, contents).expect("write csv");
+    path
+}
+
+/// Image dimensions keyed by Open Images image ID.
+fn oid_dims(entries: &[(&str, (u32, u32))]) -> HashMap<String, (u32, u32)> {
+    entries
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), *v))
+        .collect()
+}
+
+#[test]
+fn test_oid_to_coco_column_order() {
+    // Open Images orders columns XMin,XMax,YMin,YMax — XMax before YMin. Every
+    // number below is distinct so a transposed read cannot coincidentally pass.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "boxes.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf\n\
+         abc123,/m/01,0.1,0.5,0.3,0.4,0\n",
+    );
+
+    let dims = oid_dims(&[("abc123", (1000, 500))]);
+    let ds = oid_to_coco(&csv, None, &dims).expect("oid_to_coco");
+
+    assert_eq!(ds.images.len(), 1);
+    assert_eq!(ds.annotations.len(), 1);
+    let bbox = ds.annotations[0].bbox.expect("bbox");
+    // x = 0.1*1000, y = 0.3*500, w = (0.5-0.1)*1000, h = (0.4-0.3)*500
+    assert!((bbox[0] - 100.0).abs() < 1e-6, "x: {}", bbox[0]);
+    assert!((bbox[1] - 150.0).abs() < 1e-6, "y: {}", bbox[1]);
+    assert!((bbox[2] - 400.0).abs() < 1e-6, "w: {}", bbox[2]);
+    assert!((bbox[3] - 50.0).abs() < 1e-6, "h: {}", bbox[3]);
+}
+
+#[test]
+fn test_oid_header_drives_parsing_not_position() {
+    // The same row under the full V6 layout and under a deliberately shuffled
+    // header must produce identical boxes. This is the guard that makes the
+    // XMin,XMax,YMin,YMax ordering trap unreachable.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dims = oid_dims(&[("abc123", (1000, 500))]);
+
+    let v6 = write_csv(
+        tmp.path(),
+        "v6.csv",
+        "ImageID,Source,LabelName,Confidence,XMin,XMax,YMin,YMax,\
+         IsOccluded,IsTruncated,IsGroupOf,IsDepiction,IsInside\n\
+         abc123,xclick,/m/01,1,0.1,0.5,0.3,0.4,0,0,0,0,0\n",
+    );
+    let shuffled = write_csv(
+        tmp.path(),
+        "shuffled.csv",
+        "IsGroupOf,YMax,LabelName,XMin,ImageID,YMin,XMax\n\
+         0,0.4,/m/01,0.1,abc123,0.3,0.5\n",
+    );
+
+    let a = oid_to_coco(&v6, None, &dims).expect("v6");
+    let b = oid_to_coco(&shuffled, None, &dims).expect("shuffled");
+    assert_eq!(a.annotations[0].bbox, b.annotations[0].bbox);
+
+    // The V6 `Confidence` column is ground-truth provenance, always 1 — it must
+    // not be mistaken for a detection score.
+    assert_eq!(a.annotations[0].score, None);
+}
+
+#[test]
+fn test_oid_missing_required_column_errors() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "bad.csv",
+        "ImageID,LabelName,XMin,YMin,YMax\nabc,/m/01,0.1,0.3,0.4\n",
+    );
+    let err = oid_to_coco(&csv, None, &HashMap::new()).expect_err("must reject missing XMax");
+    assert!(err.to_string().contains("xmax"), "error was: {err}");
+}
+
+#[test]
+fn test_oid_group_of_becomes_is_group_of() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "boxes.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf\n\
+         img1,/m/01,0.0,0.5,0.0,0.5,1\n\
+         img1,/m/01,0.5,1.0,0.5,1.0,0\n",
+    );
+
+    let ds = oid_to_coco(&csv, None, &HashMap::new()).expect("oid_to_coco");
+    assert_eq!(ds.annotations[0].is_group_of, Some(true));
+    assert_eq!(ds.annotations[1].is_group_of, Some(false));
+    // group-of is Open Images' own flag, distinct from COCO's iscrowd.
+    assert!(!ds.annotations[0].iscrowd);
+}
+
+#[test]
+fn test_oid_class_descriptions_resolve_mids() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "boxes.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax\nimg1,/m/0cmf2,0.1,0.2,0.1,0.2\n",
+    );
+    // Headerless, and one name carries a comma inside quotes.
+    let desc = write_csv(
+        tmp.path(),
+        "class-descriptions-boxable.csv",
+        "/m/0cmf2,Beer\n/m/0dv5r,\"Camera, still\"\n",
+    );
+
+    let ds = oid_to_coco(&csv, Some(&desc), &HashMap::new()).expect("oid_to_coco");
+    assert_eq!(ds.categories.len(), 1);
+    assert_eq!(ds.categories[0].name, "Beer");
+
+    // Without the map, the MID stands in as the name.
+    let plain = oid_to_coco(&csv, None, &HashMap::new()).expect("oid_to_coco");
+    assert_eq!(plain.categories[0].name, "/m/0cmf2");
+}
+
+#[test]
+fn test_oid_without_dims_keeps_normalized_coords() {
+    // No image sizes available: boxes stay in [0,1] against a 1x1 image. IoU and
+    // IoA are ratios of areas scaled identically on both axes, so Open Images AP
+    // is unchanged — only absolute areas lose meaning.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "boxes.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax\nimg1,/m/01,0.25,0.75,0.25,0.75\n",
+    );
+
+    let ds = oid_to_coco(&csv, None, &HashMap::new()).expect("oid_to_coco");
+    assert_eq!(ds.images[0].width, 1);
+    assert_eq!(ds.images[0].height, 1);
+    let bbox = ds.annotations[0].bbox.expect("bbox");
+    assert!((bbox[2] - 0.5).abs() < 1e-9, "w: {}", bbox[2]);
+    assert!((bbox[3] - 0.5).abs() < 1e-9, "h: {}", bbox[3]);
+}
+
+#[test]
+fn test_oid_ids_are_deterministic() {
+    // IDs come from sorted distinct values, not file order, so two orderings of
+    // the same rows produce the same dataset.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let header = "ImageID,LabelName,XMin,XMax,YMin,YMax\n";
+    let row_a = "aaa,/m/02,0.1,0.2,0.1,0.2\n";
+    let row_b = "bbb,/m/01,0.3,0.4,0.3,0.4\n";
+
+    let fwd = write_csv(tmp.path(), "fwd.csv", &format!("{header}{row_a}{row_b}"));
+    let rev = write_csv(tmp.path(), "rev.csv", &format!("{header}{row_b}{row_a}"));
+
+    let a = oid_to_coco(&fwd, None, &HashMap::new()).expect("fwd");
+    let b = oid_to_coco(&rev, None, &HashMap::new()).expect("rev");
+
+    let names = |ds: &hotcoco::Dataset| -> Vec<(u64, String)> {
+        ds.categories
+            .iter()
+            .map(|c| (c.id, c.name.clone()))
+            .collect()
+    };
+    assert_eq!(names(&a), names(&b));
+    let files = |ds: &hotcoco::Dataset| -> Vec<(u64, String)> {
+        ds.images
+            .iter()
+            .map(|i| (i.id, i.file_name.clone()))
+            .collect()
+    };
+    assert_eq!(files(&a), files(&b));
+}
+
+#[test]
+fn test_oid_round_trip() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "boxes.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf\n\
+         img1,/m/01,0.100000,0.500000,0.300000,0.400000,1\n\
+         img2,/m/02,0.200000,0.600000,0.100000,0.900000,0\n",
+    );
+    let dims = oid_dims(&[("img1", (1000, 500)), ("img2", (640, 480))]);
+
+    let ds = oid_to_coco(&csv, None, &dims).expect("oid_to_coco");
+    let out = tmp.path().join("out.csv");
+    let stats = coco_to_oid(&ds, &out).expect("coco_to_oid");
+
+    assert_eq!(stats.images, 2);
+    assert_eq!(stats.annotations, 2);
+    assert_eq!(stats.group_of, 1);
+    assert_eq!(stats.skipped_no_bbox, 0);
+
+    let back = oid_to_coco(&out, None, &dims).expect("re-import");
+    // 6-decimal normalized CSV coords land within 1e-3 of a pixel here.
+    assert_geometry_round_trip(&ds, &back, file_name_key, bbox_of, [1e-3; 4]);
+    // The group-of flag is OID's own semantics on top of the geometry.
+    for (before, after) in ds.annotations.iter().zip(&back.annotations) {
+        assert_eq!(before.is_group_of, after.is_group_of);
+    }
+}
+
+#[test]
+fn test_oid_round_trips_category_names_containing_commas() {
+    // Open Images' own descriptions include names like "Camera, still". Written
+    // bare, that name adds a field to the row and re-imports as "Camera" — a
+    // corruption that looks like a plausible category rather than an error.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv = write_csv(
+        tmp.path(),
+        "boxes.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax\nimg1,/m/0dv5r,0.1,0.5,0.3,0.4\n",
+    );
+    let desc = write_csv(tmp.path(), "desc.csv", "/m/0dv5r,\"Camera, still\"\n");
+
+    let ds = oid_to_coco(&csv, Some(&desc), &HashMap::new()).expect("oid_to_coco");
+    assert_eq!(ds.categories[0].name, "Camera, still");
+
+    let out = tmp.path().join("out.csv");
+    coco_to_oid(&ds, &out).expect("coco_to_oid");
+
+    let back = oid_to_coco(&out, None, &HashMap::new()).expect("re-import");
+    assert_eq!(back.categories.len(), 1);
+    assert_eq!(back.categories[0].name, "Camera, still");
+    assert_eq!(back.annotations.len(), 1);
+    let bbox = back.annotations[0].bbox.expect("bbox");
+    assert!(
+        (bbox[2] - 0.4).abs() < 1e-5,
+        "w survived quoting: {}",
+        bbox[2]
+    );
+}
+
+#[test]
+fn test_oid_results_align_with_ground_truth_ids() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gt_csv = write_csv(
+        tmp.path(),
+        "gt.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf\n\
+         zzz,/m/01,0.1,0.5,0.3,0.4,0\n\
+         aaa,/m/02,0.1,0.5,0.3,0.4,0\n",
+    );
+    let dims = oid_dims(&[("zzz", (1000, 500)), ("aaa", (1000, 500))]);
+    let gt = oid_to_coco(&gt_csv, None, &dims).expect("gt");
+
+    let dt_csv = write_csv(
+        tmp.path(),
+        "dt.csv",
+        "ImageID,LabelName,Score,XMin,XMax,YMin,YMax\nzzz,/m/01,0.9,0.1,0.5,0.3,0.4\n",
+    );
+    let anns = oid_results_to_anns(&gt, &dt_csv, None).expect("results");
+
+    assert_eq!(anns.len(), 1);
+    // "zzz" sorts after "aaa", so a detection reader that numbered images in file
+    // order would attach this to image 1 instead of image 2.
+    let gt_img = gt
+        .images
+        .iter()
+        .find(|i| i.file_name == "zzz")
+        .expect("gt image");
+    assert_eq!(anns[0].image_id, gt_img.id);
+    assert_eq!(anns[0].score, Some(0.9));
+    let bbox = anns[0].bbox.expect("bbox");
+    assert!((bbox[0] - 100.0).abs() < 1e-6, "x: {}", bbox[0]);
+    assert!((bbox[3] - 50.0).abs() < 1e-6, "h: {}", bbox[3]);
+}
+
+#[test]
+fn test_oid_results_reject_unknown_references() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gt_csv = write_csv(
+        tmp.path(),
+        "gt.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax\nimg1,/m/01,0.1,0.5,0.3,0.4\n",
+    );
+    let gt = oid_to_coco(&gt_csv, None, &HashMap::new()).expect("gt");
+
+    let bad_img = write_csv(
+        tmp.path(),
+        "bad_img.csv",
+        "ImageID,LabelName,Score,XMin,XMax,YMin,YMax\nnope,/m/01,0.9,0.1,0.5,0.3,0.4\n",
+    );
+    let err = oid_results_to_anns(&gt, &bad_img, None).expect_err("unknown ImageID");
+    assert!(err.to_string().contains("nope"), "error was: {err}");
+
+    let bad_cat = write_csv(
+        tmp.path(),
+        "bad_cat.csv",
+        "ImageID,LabelName,Score,XMin,XMax,YMin,YMax\nimg1,/m/99,0.9,0.1,0.5,0.3,0.4\n",
+    );
+    let err = oid_results_to_anns(&gt, &bad_cat, None).expect_err("unknown LabelName");
+    assert!(err.to_string().contains("/m/99"), "error was: {err}");
+}
+
+#[test]
+fn test_oid_end_to_end_open_images_eval() {
+    // The point of the converter: CSV in, Open Images AP out, without the caller
+    // writing a parser.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gt_csv = write_csv(
+        tmp.path(),
+        "gt.csv",
+        "ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf\n\
+         img1,/m/01,0.1,0.5,0.1,0.5,0\n\
+         img2,/m/01,0.2,0.6,0.2,0.6,0\n",
+    );
+    let dims = oid_dims(&[("img1", (640, 480)), ("img2", (640, 480))]);
+    let gt = oid_to_coco(&gt_csv, None, &dims).expect("gt");
+
+    let dt_csv = write_csv(
+        tmp.path(),
+        "dt.csv",
+        "ImageID,LabelName,Score,XMin,XMax,YMin,YMax\n\
+         img1,/m/01,0.9,0.1,0.5,0.1,0.5\n\
+         img2,/m/01,0.8,0.2,0.6,0.2,0.6\n",
+    );
+    let dt_anns = oid_results_to_anns(&gt, &dt_csv, None).expect("dt");
+
+    let coco_gt = COCO::from_dataset(gt);
+    let coco_dt = coco_gt.load_res_anns(dt_anns).expect("load_res_anns");
+
+    let mut ev = COCOeval::new_oid(coco_gt, coco_dt, None);
+    ev.run();
+    let stats = ev.stats().expect("stats after run");
+    assert!(
+        stats[0] > 0.99,
+        "perfect detections should score ~1.0: {stats:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Segmentation (mask IoU) and keypoints (OKS) end-to-end evaluation
+//
+// Until these tests, `IouType::Segm` appeared zero times in this suite and
+// `Keypoints` once (a provenance check) — `cargo test` never ran mask IoU or
+// OKS through evaluate → accumulate → summarize, and real-data parity is
+// local-only, so CI stayed green through a segm/keypoints regression. The
+// fixtures are hand-computable: rectangle masks (exact pixel counts) and
+// single-keypoint OKS values derived in the comments.
+// ---------------------------------------------------------------------------
+
+/// Shared P/R arithmetic for the two-detection fixtures below.
+///
+/// Both the segm and keypoints tests stage the same shape: two GTs, DT1 a
+/// perfect match (similarity 1.0, score 0.9) and DT2 clearing only the 0.50
+/// threshold (score 0.8). Per IoU threshold on the 0.50:0.05:0.95 grid:
+///
+/// - t = 0.50: both DTs are TPs. The PR curve reaches (recall 1.0,
+///   precision 1.0) → 101-point AP = 1.0, recall = 1.0.
+/// - t ≥ 0.55 (9 thresholds): DT1 TP, DT2 FP, ranked [TP@0.9, FP@0.8].
+///   Recall stops at 0.5 with precision 1.0 there; the interpolated precision
+///   envelope is 1.0 for the 51 recall grid points ≤ 0.50 and 0 above
+///   → AP = 51/101, recall = 0.5.
+///
+/// So AP = (101 + 9·51)/1010 = 56/101 ≈ 0.554455, AP50 = 1.0,
+/// AP75 = 51/101 ≈ 0.504950, and mean recall over the sweep
+/// = (1.0 + 9·0.5)/10 = 0.55.
+const AP_FULL_SWEEP: f64 = (101.0 + 9.0 * 51.0) / 1010.0;
+const AP_AT_075: f64 = 51.0 / 101.0;
+const AR_FULL_SWEEP: f64 = 0.55;
+
+/// Assert a stats vector against hand-derived expectations, treating the
+/// `-1.0` "not computed" sentinel as exact — a sentinel that arrives as a
+/// nearby score, or vice versa, must fail even inside the tolerance.
+fn assert_stats(stats: &[f64], expected: &[f64], names: &[&str]) {
+    assert_eq!(stats.len(), expected.len(), "stats length");
+    for (i, (&got, &exp)) in stats.iter().zip(expected.iter()).enumerate() {
+        let name = names[i];
+        if exp == -1.0 {
+            assert_eq!(got, -1.0, "{name}: expected the -1.0 sentinel, got {got}");
+        } else {
+            assert!(
+                (got - exp).abs() < 1e-9,
+                "{name}: got {got:.9}, expected {exp:.9}"
+            );
+            assert_ne!(got, -1.0, "{name}: real score expected, got the sentinel");
+        }
+    }
+}
+
+const BBOX_SEGM_KEYS: [&str; 12] = [
+    "AP", "AP50", "AP75", "APs", "APm", "APl", "AR1", "AR10", "AR100", "ARs", "ARm", "ARl",
+];
+
+/// Segm end-to-end over pixel-exact rectangle masks.
+///
+/// Geometry (640×640 image, uncompressed RLEs from [`rect_mask`]):
+/// - GT1 mask `[0,0,20,20]` (400 px); DT1 mask identical, score 0.9 → IoU 1.0.
+/// - GT2 mask `[50,50,20,20]` (400 px); DT2 mask `[50,50,10,20]` (200 px),
+///   score 0.8 → inter = 10·20 = 200, union = 400 + 200 − 200 = 400,
+///   IoU = exactly 0.5 → matches at t = 0.50 only.
+///
+/// DT2's *bbox* is identical to GT2's (IoU 1.0), so a regression that silently
+/// scored segm with bbox IoU reports AP = 1.0 here and fails.
+///
+/// Expected stats follow [`AP_FULL_SWEEP`]'s derivation. All GT areas are
+/// 400 px² < 32² → "small" equals "all"; medium/large have no ground truth →
+/// the −1.0 sentinel. AR@1 keeps only DT1 (top score), a TP at every
+/// threshold over 2 GTs → 0.5.
+#[test]
+fn test_segm_eval_end_to_end() {
+    let gt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            ann(1, [0.0, 0.0, 20.0, 20.0]).mask(rect_mask(640, 640, 0, 0, 20, 20)),
+            ann(2, [50.0, 50.0, 20.0, 20.0]).mask(rect_mask(640, 640, 50, 50, 20, 20)),
+        ],
+    );
+    let dt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            det(101, [0.0, 0.0, 20.0, 20.0], 0.9).mask(rect_mask(640, 640, 0, 0, 20, 20)),
+            // bbox deliberately equals GT2's; only the mask is half-width.
+            det(102, [50.0, 50.0, 20.0, 20.0], 0.8)
+                .mask(rect_mask(640, 640, 50, 50, 10, 20))
+                .with_area(200.0),
+        ],
+    );
+
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt),
+        COCO::from_dataset(dt),
+        IouType::Segm,
+    );
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+
+    let stats = ev.stats().expect("summarize sets stats");
+    let expected = [
+        AP_FULL_SWEEP, // AP
+        1.0,           // AP50 — both DTs match at t=0.50
+        AP_AT_075,     // AP75 — DT2 (IoU 0.5) misses
+        AP_FULL_SWEEP, // APs — every GT is small, so small == all
+        -1.0,          // APm — no medium GT
+        -1.0,          // APl — no large GT
+        0.5,           // AR1 — top-1 is DT1, a TP at every t, over 2 GTs
+        AR_FULL_SWEEP, // AR10
+        AR_FULL_SWEEP, // AR100
+        AR_FULL_SWEEP, // ARs
+        -1.0,          // ARm
+        -1.0,          // ARl
+    ];
+    assert_stats(stats, &expected, &BBOX_SEGM_KEYS);
+}
+
+/// The segm crowd branch: a crowd GT's similarity column is IoA
+/// (intersection ÷ *detection* area), and detections matching it are ignored
+/// rather than FPs.
+///
+/// Geometry (640×640, pixel-exact RLEs; bbox-IoA preconditions asserted with
+/// the test-local oracle):
+/// - GT1 mask `[0,0,50,50]`, `iscrowd` (2500 px).
+/// - GT2 mask `[60,60,20,20]` (400 px).
+/// - DT1 mask `[0,0,10,10]` (100 px), score 0.9 — wholly inside the crowd:
+///   IoA = 100/100 = 1.0, while plain IoU = 100/2500 = 0.04.
+/// - DT2 mask `[60,60,20,20]`, score 0.8 → IoU 1.0 with GT2.
+///
+/// With the IoA branch working, DT1 matches the crowd at every threshold and
+/// is ignored; DT2 is the only ranked detection over the single counted GT →
+/// AP = 1.0 across the sweep. If the crowd column used plain IoU, DT1 would be
+/// an FP ranked above the TP and every AP would drop to 51/101 ≈ 0.505.
+///
+/// AR@1 pins the other side: the top-1 detection is the *ignored* DT1, so no
+/// TP survives the cut and recall is a real 0.0 — not the −1.0 sentinel.
+#[test]
+fn test_segm_eval_crowd_uses_ioa() {
+    assert!((ioa_of([0.0, 0.0, 10.0, 10.0], [0.0, 0.0, 50.0, 50.0]) - 1.0).abs() < 1e-12);
+    assert!(iou_of([0.0, 0.0, 10.0, 10.0], [0.0, 0.0, 50.0, 50.0]) < 0.05);
+
+    let gt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            ann(1, [0.0, 0.0, 50.0, 50.0])
+                .crowd()
+                .mask(rect_mask(640, 640, 0, 0, 50, 50)),
+            ann(2, [60.0, 60.0, 20.0, 20.0]).mask(rect_mask(640, 640, 60, 60, 20, 20)),
+        ],
+    );
+    let dt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            det(101, [0.0, 0.0, 10.0, 10.0], 0.9).mask(rect_mask(640, 640, 0, 0, 10, 10)),
+            det(102, [60.0, 60.0, 20.0, 20.0], 0.8).mask(rect_mask(640, 640, 60, 60, 20, 20)),
+        ],
+    );
+
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt),
+        COCO::from_dataset(dt),
+        IouType::Segm,
+    );
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+
+    let stats = ev.stats().expect("summarize sets stats");
+    let expected = [
+        1.0,  // AP — the crowd absorbs DT1; DT2 is a clean TP
+        1.0,  // AP50
+        1.0,  // AP75
+        1.0,  // APs — GT2 (400 px) is the only counted GT
+        -1.0, // APm — the 2500 px crowd is in range but ignored → nothing counted
+        -1.0, // APl
+        0.0,  // AR1 — top-1 (DT1) is ignored: zero TPs over one counted GT
+        1.0,  // AR10
+        1.0,  // AR100
+        1.0,  // ARs
+        -1.0, // ARm
+        -1.0, // ARl
+    ];
+    assert_stats(stats, &expected, &BBOX_SEGM_KEYS);
+}
+
+/// Polygon segmentations run the `fr_poly` rasterization path end-to-end.
+///
+/// Identical GT and DT polygons give IoU exactly 1.0 whatever the rasterizer
+/// does with boundary pixels, so AP pins to 1.0 without depending on fill
+/// rules. The `area` field (2000 px², from the 50×40 bbox) is what drives area
+/// slicing: medium is computed, small degrades to the −1.0 sentinel.
+#[test]
+fn test_segm_eval_polygon_end_to_end() {
+    let poly = || Segmentation::Polygon(vec![vec![10.0, 10.0, 60.0, 10.0, 60.0, 50.0, 10.0, 50.0]]);
+    let gt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![ann(1, [10.0, 10.0, 50.0, 40.0]).mask(poly())],
+    );
+    let dt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![det(101, [10.0, 10.0, 50.0, 40.0], 0.9).mask(poly())],
+    );
+
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt),
+        COCO::from_dataset(dt),
+        IouType::Segm,
+    );
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+
+    let stats = ev.stats().expect("summarize sets stats");
+    assert!(
+        (stats[0] - 1.0).abs() < 1e-9,
+        "AP for identical polygons: {}",
+        stats[0]
+    );
+    assert_eq!(stats[3], -1.0, "APs: no small GT → sentinel");
+    assert!(
+        (stats[4] - 1.0).abs() < 1e-9,
+        "APm: the 2000 px² GT is medium"
+    );
+}
+
+/// Keypoints (OKS) end-to-end: evaluate → accumulate → summarize.
+///
+/// Fixture (one image, the default 17 COCO sigmas; σ₀ = 0.026 is the nose):
+/// - GT1: 17 visible keypoints at `(100+i, 100)`, area 5000 (bbox 100×50).
+///   DT1 (score 0.9) repeats them exactly → every per-keypoint e = 0 →
+///   OKS = 1.0.
+/// - GT2: only keypoint 0 visible, at `(300, 300)`; area 5000;
+///   `num_keypoints` = 1. DT2 (score 0.8) puts keypoint 0 at `(304.2, 300)`,
+///   off by d = 4.2. Per the pycocotools definition
+///   (`vars = (2σ)²`, `e = d²/vars/(area+ε)/2`, `OKS = mean(exp(−e))`):
+///   vars = 0.052² = 0.002704;
+///   e = 4.2² / (0.002704 · 5000 · 2) = 17.64 / 27.04 ≈ 0.652367;
+///   OKS = exp(−0.652367) ≈ 0.5208 → matches at t = 0.50, misses ≥ 0.55.
+/// - Cross terms: the two poses are ~200–280 px apart, so every cross-OKS is
+///   at most e^(−40) ≈ 0 and greedy matching pairs DT1↔GT1, DT2↔GT2.
+///
+/// The P/R arithmetic is then [`AP_FULL_SWEEP`]'s. Both GT areas are 5000 px²
+/// → "medium" (32²..96²): APm/ARm equal all, large is the −1.0 sentinel.
+/// Keypoint summaries have 10 rows (no small range), all at maxDets = 20.
+#[test]
+fn test_keypoints_eval_end_to_end() {
+    // The OKS the fixture depends on, recomputed independently of the kernel
+    // (area + f64::EPSILON ≈ area at this scale).
+    let e = (4.2_f64 * 4.2) / (0.052_f64 * 0.052) / 5000.0 / 2.0;
+    let oks = (-e).exp();
+    assert!(
+        oks > 0.51 && oks < 0.54,
+        "fixture OKS must sit between the 0.50 and 0.55 thresholds: {oks}"
+    );
+
+    let mut gt1_kpts = Vec::with_capacity(51);
+    for i in 0..17 {
+        gt1_kpts.extend_from_slice(&[100.0 + i as f64, 100.0, 2.0]);
+    }
+    let mut gt2_kpts = vec![0.0; 51];
+    gt2_kpts[0] = 300.0;
+    gt2_kpts[1] = 300.0;
+    gt2_kpts[2] = 2.0;
+    let mut dt2_kpts = vec![0.0; 51];
+    dt2_kpts[0] = 304.2; // d = 4.2 from GT2's visible keypoint
+    dt2_kpts[1] = 300.0;
+
+    let gt = dataset(
+        vec![img(1)],
+        vec![cat(1, "person")],
+        vec![
+            ann(1, [80.0, 80.0, 100.0, 50.0]).kpts(gt1_kpts.clone()),
+            ann(2, [280.0, 280.0, 100.0, 50.0]).kpts(gt2_kpts),
+        ],
+    );
+    let dt = dataset(
+        vec![img(1)],
+        vec![cat(1, "person")],
+        vec![
+            det(101, [80.0, 80.0, 100.0, 50.0], 0.9).kpts(gt1_kpts),
+            det(102, [280.0, 280.0, 100.0, 50.0], 0.8).kpts(dt2_kpts),
+        ],
+    );
+
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt),
+        COCO::from_dataset(dt),
+        IouType::Keypoints,
+    );
+    ev.evaluate();
+    ev.accumulate();
+    ev.summarize();
+
+    let stats = ev.stats().expect("summarize sets stats");
+    let keys = [
+        "AP", "AP50", "AP75", "APm", "APl", "AR", "AR50", "AR75", "ARm", "ARl",
+    ];
+    let expected = [
+        AP_FULL_SWEEP, // AP
+        1.0,           // AP50 — OKS 0.52 clears 0.50
+        AP_AT_075,     // AP75 — OKS 0.52 misses 0.75
+        AP_FULL_SWEEP, // APm — both GTs are medium, so medium == all
+        -1.0,          // APl — no large GT
+        AR_FULL_SWEEP, // AR (maxDets=20)
+        1.0,           // AR50
+        0.5,           // AR75
+        AR_FULL_SWEEP, // ARm
+        -1.0,          // ARl
+    ];
+    assert_stats(stats, &expected, &keys);
 }

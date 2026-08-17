@@ -1,105 +1,13 @@
 from __future__ import annotations
 
-from .hotcoco import COCO as _RustCOCO
-from .hotcoco import COCOeval, Hierarchy, Params, compare, init_as_lvis, init_as_pycocotools, mask  # noqa: F401
+from .hotcoco import COCO, COCOeval, Hierarchy, Params, compare, init_as_lvis, init_as_pycocotools, mask  # noqa: F401
 
-
-class COCO(_RustCOCO):
-    """COCO dataset — extends the Rust core with Python-only methods."""
-
-    def __init__(self, annotation_file=None, *, image_dir=None):  # noqa: ARG002
-        # Rust __new__ handles construction and stores image_dir.
-        # This __init__ exists only to accept the same kwargs without complaint.
-        pass
-
-    def browse(
-        self,
-        image_dir: str | None = None,
-        dt=None,
-        iou_type: str = "bbox",
-        iou_thr: float = 0.5,
-        eval=None,
-        slices: dict[str, list[int]] | str | None = None,
-        batch_size: int = 12,
-        port: int = 7860,
-    ):
-        """Launch an interactive dataset browser.
-
-        Parameters
-        ----------
-        image_dir : str, optional
-            Root directory for image files. Overrides ``self.image_dir``.
-        dt : COCO or str, optional
-            Detection results to overlay. Pass a COCO object (from
-            ``self.load_res()``) or a path string (auto-loaded).
-        iou_type : str
-            Evaluation type: ``"bbox"``, ``"segm"``, or ``"keypoints"``
-            (default ``"bbox"``). Only used when ``dt`` is provided.
-        iou_thr : float
-            IoU threshold for TP/FP classification (default 0.5).
-        eval : COCOeval, optional
-            Pre-computed COCOeval (must have ``evaluate()`` called).
-            When provided, ``iou_type`` is ignored.
-        slices : dict or str, optional
-            Image subsets for sliced browsing. Pass a dict mapping slice
-            names to image ID lists, or a path to a JSON file.
-        batch_size : int
-            Number of images loaded per batch (default 12).
-        port : int
-            Local server port (default 7860).
-
-        Raises
-        ------
-        ValueError
-            If ``image_dir`` is ``None`` and ``self.image_dir`` is also ``None``.
-        ImportError
-            If browse dependencies are not installed (``pip install hotcoco[browse]``).
-        """
-        from . import browse as _browse
-        from .server import create_app, run_server, start_server_background
-
-        _browse._require_browse_deps()
-
-        dt_coco = self.load_res(dt) if isinstance(dt, str) else dt
-
-        # A caller-supplied eval is used as given — building one only made sense
-        # when `dt` was also passed, so `browse(eval=ev)` (the documented form)
-        # used to fall through with no eval at all and render no dashboard.
-        coco_eval = eval
-        if coco_eval is None and dt_coco is not None:
-            coco_eval = COCOeval(self, dt_coco, iou_type)
-            coco_eval.evaluate()
-
-        # The overlay draws boxes from `dt_coco`, which an eval already carries;
-        # without this, `browse(eval=ev)` showed a dashboard over ground truth
-        # with no detections on the images.
-        if dt_coco is None and coco_eval is not None:
-            dt_coco = getattr(coco_eval, "coco_dt", None)
-
-        # Load slices from JSON if path given
-        resolved_slices = slices
-        if isinstance(slices, str):
-            import json
-
-            with open(slices) as f:
-                resolved_slices = json.load(f)
-
-        app = create_app(
-            self,
-            image_dir=image_dir,
-            batch_size=batch_size,
-            dt_coco=dt_coco,
-            coco_eval=coco_eval,
-            slices=resolved_slices,
-        )
-
-        if _browse._is_jupyter():
-            actual_port = start_server_background(app, port=port)
-            from IPython.display import IFrame, display
-
-            display(IFrame(f"http://127.0.0.1:{actual_port}", width="100%", height=700))
-        else:
-            run_server(app, port=port, open_browser=True)
+# `COCO` is the Rust class itself, including `browse()` (a Rust method that
+# forwards to `hotcoco.browse.browse_coco`). It used to be a Python subclass
+# adding `browse`, but every dataset the Rust core returns — `split()`,
+# `filter()`, `load_res()`, `sample()`, `merge()` — is constructed by Rust as
+# the base class, so the subclass's methods silently vanished from derived
+# datasets (`coco.split()[0].browse()` raised `AttributeError`).
 
 
 class LVISeval:

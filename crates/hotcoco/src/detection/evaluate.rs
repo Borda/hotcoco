@@ -79,17 +79,32 @@ impl COCOeval {
     }
 
     /// Run per-image evaluation.
+    ///
+    /// # Open Images replaces `coco_gt` (and possibly `coco_dt`)
+    ///
+    /// In [`EvalMode::OpenImages`], this method **overwrites the public
+    /// `coco_gt` field** — and, when `params.expand_dt` is set, `coco_dt` —
+    /// with hierarchy-expanded copies: every annotation is duplicated at each
+    /// ancestor category and virtual categories are added for hierarchy-only
+    /// nodes (see [`super::expand::expand_annotations`]). Any read of those
+    /// fields after `evaluate()` sees the expanded datasets, not the ones the
+    /// evaluator was constructed with. The expansion deduplicates, so calling
+    /// `evaluate()` again does not expand further. The eval paths must see the
+    /// expanded data through the same fields the analysis surfaces read (TIDE,
+    /// diagnostics, category names), which is why the originals are replaced
+    /// rather than shadowed by private copies.
     pub fn evaluate(&mut self) {
-        // OID: expand GT (and optionally DT) using hierarchy
+        // OID: expand GT (and optionally DT) using hierarchy — this replaces
+        // the public `coco_gt`/`coco_dt` fields; see the method docs above.
         if self.eval_mode == EvalMode::OpenImages {
             let hierarchy = self.hierarchy.clone().unwrap_or_else(|| {
                 crate::detection::hierarchy::Hierarchy::from_categories(
                     &self.coco_gt.dataset.categories,
                 )
             });
-            self.coco_gt = super::expand::expand_gt(&self.coco_gt, &hierarchy);
+            self.coco_gt = super::expand::expand_annotations(&self.coco_gt, &hierarchy);
             if self.params.expand_dt {
-                self.coco_dt = super::expand::expand_dt(&self.coco_dt, &hierarchy);
+                self.coco_dt = super::expand::expand_annotations(&self.coco_dt, &hierarchy);
             }
             self.hierarchy = Some(hierarchy);
         }
@@ -181,10 +196,12 @@ impl COCOeval {
 
         // Evaluate each (image, category, area_range) combination in parallel.
         // sparse_pairs × area_ranges replaces the old cat_ids × area_ranges × img_ids product.
-        assert!(
-            !self.params.max_dets.is_empty(),
-            "params.max_dets must not be empty"
-        );
+        //
+        // Empty `max_dets` is degraded, not panicked on: `Params::max_det()`
+        // owns the fallback cap (100), matching how every other degenerate
+        // configuration on this path (missing area label, absent threshold)
+        // degrades to the `-1.0` sentinel downstream instead of aborting —
+        // `evaluate()` has no `Result` channel, and its siblings do not panic.
         let max_det = self.params.max_det();
 
         // pycocotools searches from `min(t, 1-1e-10)`, not from `t`. Inert below
@@ -208,23 +225,13 @@ impl COCOeval {
             match_floors: &match_floors,
         };
 
-        // Fan out over pairs, not over (pair, area range) cells: everything the
-        // area ranges share — annotation lookup, the score sort, the IoU-matrix
-        // lookup — is resolved once per pair by `gather_pair`, and each range
-        // then only recomputes the flags that actually depend on it.
-        //
-        // Cells are written in place, one `area_ranges.len()` chunk per pair.
-        // Collecting a small `Vec` per pair and flattening it produces the same
-        // layout and is the obvious spelling, but `EvalImg` is ~360 bytes and
-        // there are 2.3M of them on Objects365, so the flatten is a
-        // single-threaded move of ~800 MB — enough to make the whole restructure
-        // a net loss (measured 2.0 s against 1.5 s for the per-cell form).
-        //
-        // Every pair gets its full chunk, including pairs that gather to nothing,
-        // so `eval_imgs` keeps exactly the length, order and `None` positions it
-        // had when the driver walked a pre-built (pair × range) tuple list.
-        // `accumulate`'s grouping walk and the public `eval_imgs()` accessor both
-        // read that order.
+        // Fan out over pairs, not (pair, area range) cells: `gather_pair` resolves
+        // everything the ranges share once per pair. Cells are written in place,
+        // one `area_ranges.len()` chunk per pair — collect-then-flatten would move
+        // ~800 MB of `EvalImg`s single-threaded on Objects365 (measured 2.0 s vs
+        // 1.5 s). Every pair gets its full chunk, including empty gathers, so
+        // `eval_imgs` keeps exactly the length, order, and `None` positions that
+        // `accumulate`'s grouping walk and the public `eval_imgs()` accessor read.
         let is_lvis = self.eval_mode == EvalMode::Lvis;
         let area_ranges = &ctx.params.area_ranges;
 

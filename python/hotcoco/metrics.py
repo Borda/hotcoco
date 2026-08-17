@@ -35,5 +35,15 @@ precision_recall_curve = _metrics.precision_recall_curve
 calibration_curve = _metrics.calibration_curve
 calibration_error = _metrics.calibration_error
 confusion_matrix = _metrics.confusion_matrix
+is_computed = _metrics.is_computed
+is_missing = _metrics.is_missing
 
-__all__ = ["average_precision", "calibration_curve", "calibration_error", "confusion_matrix", "precision_recall_curve"]
+__all__ = [
+    "average_precision",
+    "calibration_curve",
+    "calibration_error",
+    "confusion_matrix",
+    "is_computed",
+    "is_missing",
+    "precision_recall_curve",
+]

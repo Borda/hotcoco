@@ -65,8 +65,6 @@ impl<'a> EvalGrouping<'a> {
             .collect();
 
         // Group eval_imgs by (k_idx, a_idx) — O(eval_imgs) once.
-        // Replaces the old dense index formula k_actual * (a * N) + a_idx * N + img_idx,
-        // which assumed a specific dense layout that no longer applies after the sparse refactor.
         let mut grouped: Vec<Vec<(&EvalImg, u32)>> = vec![Vec::new(); k * a];
         let mut img_slots: HashMap<u64, u32> = HashMap::new();
         for eval in ev.eval_imgs.iter().flatten() {
@@ -171,16 +169,12 @@ pub(super) fn accumulate_impl(
     /// Each field is a list of (flat_index, value) pairs to write into the output arrays.
     #[derive(Default)]
     struct AccResult {
-        /// M slots that had ground truth, and therefore need the 0.0 zero-fill
-        /// applied in the merge.
-        ///
-        /// The zero-fill used to be `2 × t × r` constant `(idx, 0.0)` pairs pushed
-        /// per work item — ~2M pairs and 32 MB of `(usize, f64)` per `accumulate`
-        /// on COCO, carrying no information beyond "this cell has data". The merge
-        /// writes the same zeros to the same indices in the same order, and the
-        /// real writes below still overwrite them afterwards, so the arrays come
-        /// out identical.
-        filled: Vec<usize>,
+        /// Whether this work item had ground truth, and therefore needs the 0.0
+        /// zero-fill applied across every M slot in the merge. The merge writes
+        /// the zeros before the real writes, which overwrite them — same
+        /// indices, same order. (Per-item, not per-slot: `num_gt` does not
+        /// depend on the max-det cap, so all M slots fill together.)
+        filled: bool,
         precision_writes: Vec<(usize, f64)>,
         /// `(flat_index, max_recall, all_points_ap)`. The AP rides along with the
         /// recall it was computed from rather than in a parallel vector, so the two
@@ -211,7 +205,7 @@ pub(super) fn accumulate_impl(
             }
 
             let mut out = AccResult {
-                filled: (0..m).collect(),
+                filled: true,
                 precision_writes: Vec::with_capacity(m * t * r),
                 recall_writes: Vec::with_capacity(m * t),
                 scores_writes: Vec::with_capacity(m * t * r),
@@ -275,8 +269,7 @@ pub(super) fn accumulate_impl(
 
                 for t_idx in 0..t {
                     // `metrics::counts` owns the TP/FP classification and its
-                    // running sums — the same three-way branch used to be written
-                    // out here as well.
+                    // running sums.
                     crate::metrics::counts::cumulative_tp_fp(
                         inds.iter().copied(),
                         &all_dt_matched[t_idx],
@@ -335,12 +328,14 @@ pub(super) fn accumulate_impl(
         // "no data"). This ensures categories with GT but no matches show 0 AP,
         // not "missing". Only recall thresholds reached by actual detections get
         // overwritten below — unreachable thresholds stay at 0.0.
-        for &m_idx in &result.filled {
-            for t_idx in 0..t {
-                for r_idx in 0..r {
-                    let p_idx = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
-                    precision[p_idx] = 0.0;
-                    scores[p_idx] = 0.0;
+        if result.filled {
+            for m_idx in 0..m {
+                for t_idx in 0..t {
+                    for r_idx in 0..r {
+                        let p_idx = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
+                        precision[p_idx] = 0.0;
+                        scores[p_idx] = 0.0;
+                    }
                 }
             }
         }
@@ -410,9 +405,6 @@ impl EvalShape {
 /// Recall is a flat 4-D array with shape `[T x K x A x M]`. Values of -1.0 indicate
 /// that no data was available for that combination (e.g. a category with no GT instances).
 #[derive(Debug, Clone)]
-/// `#[non_exhaustive]` for the same reason as [`EvalImg`]: `ap_all_points` was
-/// added here after 0.5.0, and the families still to come will want more. Added
-/// while pre-1.0, when it is free.
 #[non_exhaustive]
 pub struct AccumulatedEval {
     /// Interpolated precision at each (iou_thr, recall_thr, category, area_range, max_det).

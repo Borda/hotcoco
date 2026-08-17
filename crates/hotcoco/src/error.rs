@@ -9,9 +9,15 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    /// JSON serialization or deserialization error.
+    /// JSON serialization or deserialization error (serde_json paths: saving,
+    /// report emission).
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+
+    /// JSON parse error from the simd-json loader — the main dataset-loading
+    /// path (`COCO::new`, `COCO::load_res`).
+    #[error("invalid JSON: {0}")]
+    JsonParse(#[from] simd_json::Error),
 
     /// Format conversion error (COCO ↔ YOLO).
     #[error(transparent)]

@@ -10,17 +10,34 @@ use super::EvalMode;
 
 /// Serializable summary of evaluation parameters.
 ///
-/// A lightweight projection of [`Params`] containing only the fields
-/// relevant for understanding what configuration produced the metrics.
+/// A projection of [`Params`] carrying every field that decides what the
+/// metrics *mean* — the archive has to be self-explaining, because a saved
+/// results file whose configuration must be reconstructed from memory is the
+/// situation it exists to prevent. That is also why
+/// [`reference_deviations`](Self::reference_deviations) rides along: a file
+/// marked `Extension` should say *why* on its own.
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalParams {
     pub iou_type: IouType,
     pub iou_thresholds: Vec<f64>,
+    /// The recall grid AP is interpolated over — the x-axis that defines what
+    /// AP means (101 points for the reference configuration).
+    pub recall_thresholds: Vec<f64>,
     /// Area ranges as a map from label to `[min, max]`.
     pub area_ranges: BTreeMap<String, [f64; 2]>,
     pub max_dets: Vec<usize>,
+    /// Whether evaluation was per-category (`true`) or pooled (`false`).
+    pub use_cats: bool,
+    /// Per-keypoint OKS sigmas. Only consulted by keypoint evaluation, but
+    /// archived unconditionally so the file's shape does not depend on the run.
+    pub kpt_oks_sigmas: Vec<f64>,
     /// Evaluation mode: "coco", "lvis", or "openimages".
     pub eval_mode: String,
+    /// Ways this run departed from the reference configuration — the same
+    /// strings [`COCOeval::reference_deviations`](super::COCOeval::reference_deviations)
+    /// returns, and the reason whenever `provenance` says `extension`. Empty
+    /// for a parity-verified run.
+    pub reference_deviations: Vec<String>,
 }
 
 /// Serializable evaluation results.
@@ -28,11 +45,9 @@ pub struct EvalParams {
 /// Returned by [`super::COCOeval::results`]. Contains summary metrics,
 /// evaluation parameters, and optional per-class breakdown.
 ///
-/// Every map here is a `BTreeMap` so serialization is byte-stable: this is the
-/// struct users archive, diff in CI, and check into git, and a `HashMap` gave a
-/// different key order on every run. Three identical `coco-eval` invocations
-/// produced three different file hashes with identical numbers. `report::EvalReport`
-/// made the same choice for the same reason.
+/// Every map here is a `BTreeMap` so serialization is byte-stable — this is the
+/// struct users archive, diff in CI, and check into git, so identical runs must
+/// produce identical bytes. `report::EvalReport` makes the same choice.
 ///
 /// Use [`save`](EvalResults::save) to write JSON to a file, or
 /// [`to_json`](EvalResults::to_json) to get a JSON string.
@@ -79,15 +94,22 @@ impl EvalResults {
 }
 
 impl EvalParams {
-    /// Create from a [`Params`] struct and evaluation mode.
-    pub(in crate::detection) fn from_params(params: &Params, eval_mode: EvalMode) -> Self {
+    /// Archive an evaluator's configuration.
+    ///
+    /// Takes the whole evaluator rather than a bare [`Params`] because the
+    /// deviation strings come from
+    /// [`reference_deviations`](super::COCOeval::reference_deviations) — the
+    /// single comparability predicate — and re-deriving them here would be a
+    /// second copy free to drift from the one that drives `Provenance`.
+    pub(in crate::detection) fn from_eval(ev: &super::COCOeval) -> Self {
+        let params: &Params = &ev.params;
         let area_ranges: BTreeMap<String, [f64; 2]> = params
             .area_ranges
             .iter()
             .map(|ar| (ar.label.clone(), ar.range))
             .collect();
 
-        let mode_str = match eval_mode {
+        let mode_str = match ev.eval_mode {
             EvalMode::Coco => "coco",
             EvalMode::Lvis => "lvis",
             EvalMode::OpenImages => "openimages",
@@ -96,9 +118,13 @@ impl EvalParams {
         EvalParams {
             iou_type: params.iou_type,
             iou_thresholds: params.iou_thrs.clone(),
+            recall_thresholds: params.rec_thrs.clone(),
             area_ranges,
             max_dets: params.max_dets.clone(),
+            use_cats: params.use_cats,
+            kpt_oks_sigmas: params.kpt_oks_sigmas.clone(),
             eval_mode: mode_str.to_string(),
+            reference_deviations: ev.reference_deviations(),
         }
     }
 }

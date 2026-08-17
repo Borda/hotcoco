@@ -99,6 +99,12 @@ pub struct BootstrapCI {
 ///
 /// `statistic` is called from multiple threads, hence the `Sync` bound. Returns an
 /// empty vector when `n_samples` is 0 or `units` is empty.
+///
+/// # Panics
+///
+/// If `confidence` is not strictly inside `(0, 1)`. A `confidence` of `95`
+/// (percent instead of fraction) used to silently produce the `[min, max]` of
+/// the samples — a plausible-looking interval computed at the wrong level.
 pub fn bootstrap_ci<T, F>(
     units: &[T],
     n_samples: usize,
@@ -110,6 +116,12 @@ where
     T: Copy + Eq + std::hash::Hash + Sync,
     F: Fn(&HashSet<T>) -> Vec<f64> + Sync,
 {
+    assert!(
+        confidence > 0.0 && confidence < 1.0,
+        "bootstrap_ci: confidence must be in (0, 1), got {confidence} — \
+         pass a fraction such as 0.95, not a percentage"
+    );
+
     let n_units = units.len();
     if n_samples == 0 || n_units == 0 {
         return Vec::new();
@@ -134,7 +146,10 @@ where
     (0..num_stats)
         .map(|m| {
             let mut samples: Vec<f64> = all_samples.iter().map(|s| s[m]).collect();
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // Total order: a NaN-producing statistic sorts deterministically
+            // (positive NaN last) instead of handing std's sort a non-total
+            // order, which may panic (Rust ≥ 1.81) or scramble the percentiles.
+            samples.sort_by(f64::total_cmp);
 
             let lo_idx = ((alpha / 2.0) * nb as f64).floor() as usize;
             let hi_idx = ((1.0 - alpha / 2.0) * nb as f64).ceil() as usize;
@@ -258,5 +273,32 @@ mod tests {
     fn degenerate_inputs_return_empty_not_a_panic() {
         assert!(bootstrap_ci(&units(0), 10, 1, 0.95, |_| vec![1.0]).is_empty());
         assert!(bootstrap_ci(&units(10), 0, 1, 0.95, |_| vec![1.0]).is_empty());
+    }
+
+    /// `confidence = 95` (wrong unit) used to silently yield `[min, max]`.
+    #[test]
+    #[should_panic(expected = "confidence must be in (0, 1)")]
+    fn percentage_confidence_panics_instead_of_min_max() {
+        bootstrap_ci(&units(10), 10, 1, 95.0, |_| vec![1.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "confidence must be in (0, 1)")]
+    fn confidence_bounds_are_exclusive() {
+        bootstrap_ci(&units(10), 10, 1, 1.0, |_| vec![1.0]);
+    }
+
+    /// A statistic that produces NaN must not panic the percentile sort
+    /// (std's sort panics on a non-total order since Rust 1.81).
+    #[test]
+    fn nan_statistic_does_not_panic_the_percentile_sort() {
+        let cis = bootstrap_ci(&units(50), 40, 9, 0.95, |sample| {
+            // NaN for some draws, finite for others.
+            let n = sample.len() as f64;
+            vec![if sample.len() % 3 == 0 { f64::NAN } else { n }]
+        });
+        assert_eq!(cis.len(), 1);
+        // total_cmp puts positive NaN last, so the lower bound stays finite.
+        assert!(cis[0].lower.is_finite());
     }
 }

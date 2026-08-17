@@ -37,8 +37,11 @@ impl COCOeval {
     /// them re-flattening a D·G buffer of their own.
     ///
     /// The length is exactly `d * g` regardless of what the underlying kernel
-    /// returned, which is why callers need no shape checks. Falls back to bbox
-    /// IoU for segm mode when RLEs cannot be produced for all annotations.
+    /// returned, which is why callers need no shape checks. The `iou.rs`
+    /// builders now guarantee the full `d × g` shape themselves (geometry-less
+    /// annotations occupy zero rows/columns), so the short-matrix guards below
+    /// are belt-and-braces against a future builder regression, and the segm
+    /// bbox fallback fires only if that guarantee is ever broken.
     ///
     /// Dispatch is on [`SimKind`] — the sanctioned projection from an `IouType`
     /// to a geometry kernel — and the three arms are the same marshaling helpers
@@ -82,9 +85,10 @@ impl COCOeval {
             )
         };
 
-        // A kernel skips any annotation whose geometry it cannot read, so a short
-        // matrix means some row or column would land under the wrong index once
-        // flattened. Zeros are the honest answer for a matrix we cannot align.
+        // A short matrix would mean some row or column lands under the wrong
+        // index once flattened. The builders guarantee full shape today; if a
+        // regression ever reintroduces a short matrix, zeros are the honest
+        // answer for a matrix we cannot align.
         let full = |nested: &[Vec<f64>]| nested.len() == d && nested[0].len() == g;
         let zero_if_short = |nested: Vec<Vec<f64>>| {
             if full(&nested) {
@@ -123,45 +127,25 @@ impl COCOeval {
     }
 
     /// Collect one image's ground truths and detections across **all**
-    /// categories, tagged with the category slot each came from.
-    ///
-    /// The input to [`cross_category_iou`](Self::cross_category_iou), and the
-    /// same collection for both of its callers: the confusion matrix and TIDE's
-    /// cross-category pass each want every non-crowd ground truth in the image
-    /// paired with its `cat_ids` index. Crowd ground truths are dropped because a
+    /// categories, tagged with the category slot each came from — the input to
+    /// [`cross_category_iou`](Self::cross_category_iou) for both the confusion
+    /// matrix and TIDE's cross-category pass. Crowd ground truths are dropped: a
     /// crowd column would let one region absorb several detections and
     /// double-count.
     ///
-    /// `dt_rank` is what differs between them. `Some` — the confusion matrix —
-    /// drops detections below `min_score`, orders the rest score-descending, and
-    /// caps them at `max_det`, which is what lets the caller feed the result
-    /// straight to `greedy_match`. `None` — TIDE — keeps every detection in index
-    /// order, because it scores each one against its own `eval_imgs` entry and
-    /// applies no cap of its own.
+    /// `dt_rank` is what differs between the callers. `Some` — the confusion
+    /// matrix — drops detections below `min_score`, orders the rest
+    /// score-descending, and caps them at `max_det`, ready for `greedy_match`.
+    /// `None` — TIDE — keeps every detection in index order.
     ///
-    /// # Why it walks the image, not the category list
+    /// Walks `get_ann_ids_for_img` rather than sweeping `cat_ids`, keeping the
+    /// cost `O(annotations in this image)` instead of `O(categories)` hash probes
+    /// per image.
     ///
-    /// `cat_slots` maps a category id to its slot in the caller's `cat_ids`, and
-    /// the caller builds it **once** rather than per image. The obvious spelling —
-    /// sweep `cat_ids` and probe `get_ann_ids_for_img_cat` for each — is
-    /// `O(images × categories)` hash lookups regardless of how many annotations
-    /// exist, and with three such sweeps it was ~430 ms of a 528 ms
-    /// `confusion_matrix()` on COCO val. Walking `get_ann_ids_for_img` instead
-    /// makes the cost `O(annotations in this image)`.
-    ///
-    /// # Order is contract, and a stable sort reproduces it
-    ///
-    /// Both callers are tie-order sensitive: the confusion matrix feeds these
-    /// straight to `greedy_match`, and its score sort is stable, so whatever order
-    /// equal-scoring detections arrive in is the order they claim ground truths
-    /// in. The old sweep produced **category-major** order, annotations within a
-    /// category in JSON order.
-    ///
-    /// That is recovered exactly: `img_to_anns` and `img_cat_to_anns` are filled
-    /// in the *same single pass* over `dataset.annotations` (see
-    /// `COCO::create_index`), so within any one category the image-wide list holds
-    /// the same relative order as the per-category list. A **stable** sort by slot
-    /// therefore reproduces category-major order verbatim.
+    /// Order is contract — both callers are tie-order sensitive. `img_to_anns`
+    /// and `img_cat_to_anns` are filled in one pass over `dataset.annotations`
+    /// (`COCO::create_index`), so a **stable** sort by slot yields category-major
+    /// order with JSON order within each category.
     pub(super) fn cross_category_pairs(
         coco_gt: &COCO,
         coco_dt: &COCO,
@@ -209,8 +193,8 @@ impl COCOeval {
             })
             .collect();
 
-        // Category-major first, then a stable sort by score descending — so equal
-        // scores keep category-major order, exactly as the old two-step did.
+        // Category-major first, then a stable sort by score descending — equal
+        // scores keep category-major order.
         scored.sort_by_key(|&(cat_idx, _, _)| cat_idx);
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(rank.max_det);
@@ -222,11 +206,8 @@ impl COCOeval {
         (gt_pairs, dt_pairs)
     }
 
-    /// `cat_id -> slot` for a category list, built once per analysis call.
-    ///
-    /// The input [`cross_category_pairs`](Self::cross_category_pairs) needs, and
-    /// the reason it is cheap: hoisted out of the per-image loop, the mapping is
-    /// built `O(K)` once instead of probed `O(K)` per image.
+    /// `cat_id -> slot` for a category list, built once per analysis call and
+    /// hoisted out of the per-image loop.
     pub(super) fn cat_slots(cat_ids: &[u64]) -> HashMap<u64, usize> {
         cat_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect()
     }
@@ -278,17 +259,10 @@ impl COCOeval {
         let segm_rles = self.segm_rles.as_ref();
 
         // Per-worker accumulation is **sparse**: an image touches at most `d + g`
-        // cells, so each split collects that many `(row, col)` pairs and one dense
-        // matrix is filled at the end.
-        //
-        // The dense-per-split form this replaces allocated and memset a `(K+1)²`
-        // accumulator per rayon split and reduced them pairwise — 52 KB at COCO's
-        // K = 80, but 11.6 MB at LVIS's K = 1203, where ~920 categories are empty
-        // in any given image and the reduce is pure memset traffic. Measured 59×
-        // faster at K = 1000.
-        //
-        // Counts are integer addition and every pair lands in exactly one cell, so
-        // the order pairs are appended and summed in cannot change the result.
+        // of the `(K+1)²` cells, so each split collects that many `(row, col)`
+        // pairs and one dense matrix is filled at the end. Counts are integer
+        // addition and every pair lands in exactly one cell, so the order pairs
+        // are appended and summed in cannot change the result.
         let (gt_labels, dt_labels) = img_ids
             .par_iter()
             .fold(LabelPairs::default, |mut acc: LabelPairs, &img_id| {
@@ -321,21 +295,12 @@ impl COCOeval {
 
                 // --- Greedy matching at iou_thr (DTs already in score-sorted order) ---
                 //
-                // The shared matcher, at its simplest setting: one threshold, every
-                // GT non-ignored (so phase 2 never runs), nothing rematchable (no
-                // crowd — this is a cross-category matrix, where a crowd GT would
-                // double-count). Both policy masks are `None`, which is exactly
-                // those defaults and costs no allocation per image.
-                // `iou_thr` is passed through **unclamped**: the
-                // confusion matrix is hotcoco-native analysis over a user-chosen
-                // threshold, so it does not inherit pycocotools' `min(t, 1-1e-10)`
-                // match floor. See the policy table in `primitives::greedy`.
-                //
-                // The degenerate shapes need no special-casing: `cross_category_iou`
-                // returns an empty matrix exactly when `d == 0 || g == 0`, and
-                // `greedy_match` never indexes the matrix in either case — it yields
-                // one `None` per detection, so every DT falls through to the
-                // background row and every GT to the background column.
+                // The shared matcher at its simplest setting: one threshold, every
+                // GT non-ignored (phase 2 never runs), no crowd (a crowd GT would
+                // double-count in a cross-category matrix). `iou_thr` is passed
+                // through **unclamped** — hotcoco-native analysis does not inherit
+                // pycocotools' `min(t, 1-1e-10)` match floor; see the policy table
+                // in `primitives::greedy`.
                 let matches = primitives::greedy::greedy_match(
                     &iou_flat,
                     d,

@@ -51,19 +51,13 @@
 //!
 //! # Where the math lives
 //!
-//! This module **defines** every similarity formula. [`crate::mask`] and
-//! [`crate::geometry`] own only the *mechanics* the formulas are built from (the
-//! RLE codec and `intersection_area`; polygon clipping and
-//! `obb_intersection_area`) and re-export these kernels back under their historic
-//! paths. Those re-exports are one-way path sugar — never the definition — so
-//! `hotcoco::mask::iou` keeps resolving for the pycocotools drop-in surface while
-//! an auditor asking "where is IoU computed?" bounces exactly once, to here.
-//!
-//! Because those historic paths are Tier-1 drop-in surface mirroring
-//! `pycocotools.mask`, **the signatures of [`mask_iou`], [`bbox_iou`], and
-//! [`obb_iou`] are effectively frozen**: buffer-reusing or batched variants must
-//! be added under new names, never by changing these. This paragraph is the
-//! canonical statement of that rule; other modules link here rather than restate it.
+//! This module **defines** every similarity formula; [`crate::mask`] and
+//! [`crate::geometry`] own only the mechanics (RLE codec, polygon clipping) and
+//! re-export these kernels under their historic paths as one-way path sugar.
+//! Those historic paths are Tier-1 drop-in surface mirroring `pycocotools.mask`,
+//! so **the signatures of [`mask_iou`], [`bbox_iou`], and [`obb_iou`] are
+//! effectively frozen** — buffer-reusing or batched variants must be added under
+//! new names, never by changing these.
 
 use std::fmt;
 use std::str::FromStr;
@@ -327,68 +321,93 @@ pub fn oks_matrix(dt_keypoints: &[&[f64]], gt: &[GtPose<'_>], sigmas: &[f64]) ->
 
     let d = dt_keypoints.len();
     let g = gt.len();
-    let mut result = vec![vec![0.0f64; g]; d];
-
-    for (j, gt_pose) in gt.iter().enumerate() {
-        let gt_kpts = gt_pose.keypoints;
-        if gt_kpts.is_empty() {
-            continue;
-        }
-        let gt_area = gt_pose.area + f64::EPSILON;
-        let bb = gt_pose.bbox;
-
-        // Count visible GT keypoints.
-        let k1: usize = (0..num_kpts)
-            .filter(|&ki| gt_kpts.get(ki * 3 + 2).copied().unwrap_or(0.0) > 0.0)
-            .count();
-
-        // Ignore-region bounds (double the GT bbox), used only when k1 == 0.
-        let x0 = bb[0] - bb[2];
-        let x1 = bb[0] + bb[2] * 2.0;
-        let y0 = bb[1] - bb[3];
-        let y1 = bb[1] + bb[3] * 2.0;
-
-        for (i, &dt_kpts) in dt_keypoints.iter().enumerate() {
-            if dt_kpts.is_empty() {
-                continue;
-            }
-
-            let mut oks_sum = 0.0_f64;
-            let mut oks_count = 0_usize;
-
-            for (ki, &var_k) in vars.iter().enumerate() {
-                // When k1 > 0, only include visible GT keypoints.
-                let visible = gt_kpts.get(ki * 3 + 2).copied().unwrap_or(0.0) > 0.0;
-                if k1 > 0 && !visible {
-                    continue;
-                }
-
-                let gx = gt_kpts.get(ki * 3).copied().unwrap_or(0.0);
-                let gy = gt_kpts.get(ki * 3 + 1).copied().unwrap_or(0.0);
-                let xd = dt_kpts.get(ki * 3).copied().unwrap_or(0.0);
-                let yd = dt_kpts.get(ki * 3 + 1).copied().unwrap_or(0.0);
-
-                let (dx, dy) = if k1 > 0 {
-                    (xd - gx, yd - gy)
-                } else {
-                    // No visible GT keypoints: measure distance to bbox boundary.
-                    let dx = 0.0_f64.max(x0 - xd) + 0.0_f64.max(xd - x1);
-                    let dy = 0.0_f64.max(y0 - yd) + 0.0_f64.max(yd - y1);
-                    (dx, dy)
-                };
-
-                let e = (dx * dx + dy * dy) / var_k / gt_area / 2.0;
-                oks_sum += (-e).exp();
-                oks_count += 1;
-            }
-
-            if oks_count > 0 {
-                result[i][j] = oks_sum / oks_count as f64;
-            }
-        }
+    if d == 0 || g == 0 {
+        return vec![vec![]; d];
     }
 
-    result
+    /// Per-GT quantities that are loop-invariant over detection rows, hoisted
+    /// so the detection-major dispatch below does not recompute them `d` times.
+    struct GtPrep<'a> {
+        kpts: &'a [f64],
+        /// `area + ε`, the OKS scale denominator.
+        area: f64,
+        /// Number of visible GT keypoints; 0 selects the bbox-distance branch.
+        k1: usize,
+        /// Ignore-region bounds (double the GT bbox), used only when `k1 == 0`.
+        x0: f64,
+        x1: f64,
+        y0: f64,
+        y1: f64,
+    }
+
+    let prep: Vec<GtPrep<'_>> = gt
+        .iter()
+        .map(|gt_pose| {
+            let gt_kpts = gt_pose.keypoints;
+            let bb = gt_pose.bbox;
+            let k1 = (0..num_kpts)
+                .filter(|&ki| gt_kpts.get(ki * 3 + 2).copied().unwrap_or(0.0) > 0.0)
+                .count();
+            GtPrep {
+                kpts: gt_kpts,
+                area: gt_pose.area + f64::EPSILON,
+                k1,
+                x0: bb[0] - bb[2],
+                x1: bb[0] + bb[2] * 2.0,
+                y0: bb[1] - bb[3],
+                y1: bb[1] + bb[3] * 2.0,
+            }
+        })
+        .collect();
+
+    // Detection-major through the shared parallel dispatcher, like every
+    // sibling kernel. The per-cell arithmetic is order-independent, so this
+    // matches the historic GT-major loop bit for bit.
+    rows(d, g, |i| {
+        let dt_kpts = dt_keypoints[i];
+        prep.iter()
+            .map(|p| {
+                if dt_kpts.is_empty() || p.kpts.is_empty() {
+                    return 0.0;
+                }
+
+                let mut oks_sum = 0.0_f64;
+                let mut oks_count = 0_usize;
+
+                for (ki, &var_k) in vars.iter().enumerate() {
+                    // When k1 > 0, only include visible GT keypoints.
+                    let visible = p.kpts.get(ki * 3 + 2).copied().unwrap_or(0.0) > 0.0;
+                    if p.k1 > 0 && !visible {
+                        continue;
+                    }
+
+                    let gx = p.kpts.get(ki * 3).copied().unwrap_or(0.0);
+                    let gy = p.kpts.get(ki * 3 + 1).copied().unwrap_or(0.0);
+                    let xd = dt_kpts.get(ki * 3).copied().unwrap_or(0.0);
+                    let yd = dt_kpts.get(ki * 3 + 1).copied().unwrap_or(0.0);
+
+                    let (dx, dy) = if p.k1 > 0 {
+                        (xd - gx, yd - gy)
+                    } else {
+                        // No visible GT keypoints: distance to bbox boundary.
+                        let dx = 0.0_f64.max(p.x0 - xd) + 0.0_f64.max(xd - p.x1);
+                        let dy = 0.0_f64.max(p.y0 - yd) + 0.0_f64.max(yd - p.y1);
+                        (dx, dy)
+                    };
+
+                    let e = (dx * dx + dy * dy) / var_k / p.area / 2.0;
+                    oks_sum += (-e).exp();
+                    oks_count += 1;
+                }
+
+                if oks_count > 0 {
+                    oks_sum / oks_count as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -506,13 +525,9 @@ mod tests {
     /// solved problem, and Shapely is an independent implementation of it. So the
     /// AP cannot be validated while the kernel it rests on can.
     ///
-    /// Values, not threshold sides. `scripts/fuzz_obb_parity.py` previously
-    /// asserted only which side of 0.5 the resulting AP@50 landed on, skipping a
-    /// ±0.02 dead band — a systematic IoU error of 0.02 passed 200 examples — and
-    /// it computed corners with a Python reimplementation of `crate::geometry`,
-    /// so a shared corner-math bug was invisible to both sides. The oracle here
-    /// derives corners from the OBB definition independently, and is frozen so no
-    /// Python runs at test time.
+    /// Asserts IoU *values*, not threshold sides, against an oracle that derives
+    /// corners from the OBB definition independently of `crate::geometry` —
+    /// frozen so no Python runs at test time.
     ///
     /// Regenerate with `uv run python scripts/gen_obb_fixtures.py`.
     #[test]
@@ -691,6 +706,62 @@ mod tests {
         // present DT, empty GT column
         let m2 = oks_matrix(&[&kpts[..]], &[gt(empty, 1000.0)], &sigmas);
         assert_eq!(m2[0][0], 0.0);
+    }
+
+    /// `oks_matrix` now runs through the same `rows()` dispatcher as its
+    /// siblings; straddle the parallel threshold and check every cell against a
+    /// 1×1 call, so neither branch nor the hoisted per-GT prep can drift from
+    /// the pairwise arithmetic.
+    #[test]
+    fn oks_parallel_and_sequential_agree_with_pairwise() {
+        let mut rng = StdRng::seed_from_u64(0x0C50C5);
+        let sigmas = [0.05, 0.07, 0.09];
+
+        let n = (MIN_PARALLEL_WORK as f64).sqrt().ceil() as usize;
+        for &(d, g) in &[(2, 3), (n, n - 1), (n, n + 1)] {
+            let mut kpt_store: Vec<Vec<f64>> = Vec::new();
+            for _ in 0..d + g {
+                // Occasionally empty, sometimes with invisible keypoints.
+                if rng.random_bool(0.05) {
+                    kpt_store.push(Vec::new());
+                } else {
+                    kpt_store.push(
+                        (0..3)
+                            .flat_map(|_| {
+                                [
+                                    rng.random_range(0.0..100.0),
+                                    rng.random_range(0.0..100.0),
+                                    if rng.random_bool(0.7) { 2.0 } else { 0.0 },
+                                ]
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            let (dt_kpts, gt_kpts) = kpt_store.split_at(d);
+            let dt: Vec<&[f64]> = dt_kpts.iter().map(Vec::as_slice).collect();
+            let gts: Vec<GtPose<'_>> = gt_kpts
+                .iter()
+                .map(|k| GtPose {
+                    keypoints: k,
+                    area: rng.random_range(100.0..2000.0),
+                    bbox: [10.0, 10.0, 30.0, 40.0],
+                })
+                .collect();
+
+            let matrix = oks_matrix(&dt, &gts, &sigmas);
+            assert_eq!(matrix.len(), d);
+            for (di, row) in matrix.iter().enumerate() {
+                assert_eq!(row.len(), g);
+                for (gi, &got) in row.iter().enumerate() {
+                    let want = oks_matrix(&[dt[di]], &[gts[gi]], &sigmas)[0][0];
+                    assert_eq!(
+                        got, want,
+                        "d={d} g={g} cell [{di}][{gi}] disagrees with the 1x1 call"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

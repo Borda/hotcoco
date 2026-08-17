@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Any, overload
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -11,8 +11,11 @@ import numpy.typing as npt
 # Submodule namespaces. Re-exported explicitly (`as` form) so `from hotcoco
 # import metrics` type-checks, not only `import hotcoco.metrics` — a stub
 # package shadows the runtime `__init__.py`, so a checker sees only what this
-# file declares.
+# file declares. `mask` gets the same treatment: its signatures live in
+# mask.pyi, which also makes `import hotcoco.mask` (the pycocotools migration
+# form) resolve for the type checker.
 from . import detection as detection
+from . import mask as mask
 from . import metrics as metrics
 from . import primitives as primitives
 
@@ -49,14 +52,22 @@ class COCO:
     def load_res(self, res: str | list[dict[str, Any]] | npt.NDArray[Any]) -> COCO: ...
 
     # --- Masks ---
-    def ann_to_rle(self, ann: dict[str, Any]) -> dict[str, Any]: ...
+    def ann_to_rle(self, ann: dict[str, Any]) -> dict[str, Any]:
+        """RLE in pycocotools format: ``{"size": [h, w], "counts": bytes}``."""
+        ...
     def ann_to_mask(self, ann: dict[str, Any]) -> npt.NDArray[np.uint8]: ...
 
     # --- Properties ---
     @property
-    def dataset(self) -> dict[str, Any]: ...
+    def dataset(self) -> dict[str, Any]:
+        """A fresh copy on every access — in-place mutation is a no-op; assign back to apply."""
+        ...
     @dataset.setter
     def dataset(self, value: dict[str, Any]) -> None: ...
+    @property
+    def load_warnings(self) -> list[str]:
+        """Warnings collected while loading/indexing; empty for a clean load."""
+        ...
     @property
     def imgs(self) -> dict[int, dict[str, Any]]: ...
     @property
@@ -85,14 +96,21 @@ class COCO:
     def to_yolo(self, output_dir: str) -> dict[str, int]: ...
     def to_voc(self, output_dir: str) -> dict[str, int]: ...
     def to_cvat(self, output_path: str) -> dict[str, int]: ...
-    @staticmethod
-    def merge(datasets: list[COCO]) -> COCO: ...
-    @staticmethod
-    def from_yolo(yolo_dir: str, images_dir: str | None = None) -> COCO: ...
-    @staticmethod
-    def from_voc(voc_dir: str) -> COCO: ...
-    @staticmethod
-    def from_cvat(cvat_path: str) -> COCO: ...
+    def to_dota(self, output_dir: str) -> dict[str, int]: ...
+    def to_oid(self, output_csv: str) -> dict[str, int]: ...
+    def load_res_oid(self, csv_path: str, class_descriptions: str | None = None) -> COCO: ...
+    @classmethod
+    def merge(cls, datasets: list[COCO]) -> COCO: ...
+    @classmethod
+    def from_yolo(cls, yolo_dir: str, images_dir: str | None = None) -> COCO: ...
+    @classmethod
+    def from_voc(cls, voc_dir: str) -> COCO: ...
+    @classmethod
+    def from_cvat(cls, cvat_path: str) -> COCO: ...
+    @classmethod
+    def from_dota(cls, label_dir: str, images_dir: str | None = None, categories: list[str] | None = None) -> COCO: ...
+    @classmethod
+    def from_oid(cls, csv_path: str, class_descriptions: str | None = None, images_dir: str | None = None) -> COCO: ...
 
     # --- Browse (Python-only) ---
     def browse(
@@ -126,15 +144,8 @@ class COCO:
     def loadRes(self, res: str | list[dict[str, Any]] | npt.NDArray[Any]) -> COCO: ...
     def annToRLE(self, ann: dict[str, Any]) -> dict[str, Any]: ...
     def annToMask(self, ann: dict[str, Any]) -> npt.NDArray[np.uint8]: ...
-    def toYolo(self, output_dir: str) -> dict[str, int]: ...
-    def toVoc(self, output_dir: str) -> dict[str, int]: ...
-    def toCvat(self, output_path: str) -> dict[str, int]: ...
-    @staticmethod
-    def fromYolo(yolo_dir: str, images_dir: str | None = None) -> COCO: ...
-    @staticmethod
-    def fromVoc(voc_dir: str) -> COCO: ...
-    @staticmethod
-    def fromCvat(cvat_path: str) -> COCO: ...
+    # No camelCase converter aliases: an alias exists only where pycocotools has
+    # that exact method name, and pycocotools has no converters.
 
 # ---------------------------------------------------------------------------
 # COCOeval
@@ -188,15 +199,25 @@ class COCOeval:
 
     # --- Properties ---
     @property
-    def params(self) -> Params: ...
+    def params(self) -> Params:
+        """The same live Params object every access; attribute *reads* on it return copies."""
+        ...
     @params.setter
-    def params(self, value: Params) -> None: ...
+    def params(self, value: Params) -> None:
+        """Stores a copy of ``value`` — mutate before assigning, or mutate ``ev.params`` after."""
+        ...
     @property
-    def stats(self) -> list[float] | None: ...
+    def stats(self) -> npt.NDArray[np.float64] | list[float]:
+        """``[]`` before ``summarize()``; numpy float64 array after (pycocotools semantics)."""
+        ...
     @property
-    def coco_gt(self) -> COCO: ...
+    def coco_gt(self) -> COCO:
+        """A fresh copy on every access — mutations never reach the evaluator."""
+        ...
     @property
-    def coco_dt(self) -> COCO: ...
+    def coco_dt(self) -> COCO:
+        """A fresh copy on every access — mutations never reach the evaluator."""
+        ...
     @property
     def eval_imgs(self) -> list[dict[str, Any] | None]: ...
     @property
@@ -217,7 +238,12 @@ class COCOeval:
 # ---------------------------------------------------------------------------
 
 class Params:
-    """Evaluation parameters controlling IoU thresholds, area ranges, etc."""
+    """Evaluation parameters controlling IoU thresholds, area ranges, etc.
+
+    Attribute reads return **copies**: ``p.max_dets.append(200)`` mutates a
+    temporary and is a silent no-op. Assign whole values instead:
+    ``p.max_dets = [1, 10, 100, 200]``.
+    """
 
     def __init__(self, iou_type: str = "bbox") -> None: ...
 
@@ -243,7 +269,8 @@ class Params:
     areaRng: list[list[float]]
     areaRngLbl: list[str]
     useCats: bool
-    expandDt: bool
+    # `expand_dt` has no alias here: it is hotcoco's Open Images extension, and
+    # pycocotools has no field of that name to be compatible with.
 
 # ---------------------------------------------------------------------------
 # Hierarchy
@@ -273,97 +300,62 @@ def init_as_pycocotools() -> None: ...
 def init_as_lvis() -> None: ...
 
 # ---------------------------------------------------------------------------
-# mask submodule
+# LVIS drop-in surface (lvis-api spellings)
 # ---------------------------------------------------------------------------
 
-class mask:
-    """RLE mask operations matching the pycocotools.mask API."""
+class LVISeval:
+    """Drop-in for lvis-api ``LVISEval`` — constructs a ``COCOeval`` with ``lvis_style=True``."""
 
-    @staticmethod
-    @overload
-    def encode(mask: npt.NDArray[np.uint8]) -> dict[str, Any]: ...
-    @staticmethod
-    @overload
-    def encode(mask: npt.NDArray[np.uint8]) -> list[dict[str, Any]]: ...
-    @staticmethod
-    def encode(mask: npt.NDArray[np.uint8]) -> dict[str, Any] | list[dict[str, Any]]:
-        """Encode a binary mask to RLE. 2D → single dict, 3D → list."""
-        ...
-    @staticmethod
-    @overload
-    def decode(rle: dict[str, Any]) -> npt.NDArray[np.uint8]: ...
-    @staticmethod
-    @overload
-    def decode(rle: list[dict[str, Any]]) -> npt.NDArray[np.uint8]: ...
-    @staticmethod
-    def decode(rle: dict[str, Any] | list[dict[str, Any]]) -> npt.NDArray[np.uint8]:
-        """Decode RLE to binary mask. Single dict → 2D, list → 3D."""
-        ...
-    @staticmethod
-    @overload
-    def area(rle: dict[str, Any]) -> int: ...
-    @staticmethod
-    @overload
-    def area(rle: list[dict[str, Any]]) -> npt.NDArray[np.uint64]: ...
-    @staticmethod
-    def area(rle: dict[str, Any] | list[dict[str, Any]]) -> int | npt.NDArray[np.uint64]:
-        """Compute mask area. Single dict → int, list → array."""
-        ...
-    @staticmethod
-    def to_bbox(rle: dict[str, Any] | list[dict[str, Any]]) -> npt.NDArray[np.float64]:
-        """Convert RLE to bounding box [x, y, w, h]."""
-        ...
-    @staticmethod
-    def toBbox(rle: dict[str, Any] | list[dict[str, Any]]) -> npt.NDArray[np.float64]: ...
-    @staticmethod
-    def merge(rles: dict[str, Any] | list[dict[str, Any]], intersect: bool = False) -> dict[str, Any]:
-        """Merge RLE masks via union (default) or intersection."""
-        ...
-    @staticmethod
-    def iou(
-        dt: dict[str, Any] | list[dict[str, Any]],
-        gt: dict[str, Any] | list[dict[str, Any]],
-        iscrowd: Sequence[bool | int] | npt.NDArray[Any],
-    ) -> npt.NDArray[np.float64]:
-        """Compute IoU between dt and gt RLE masks. Shape: (D, G)."""
-        ...
-    @staticmethod
-    def bbox_iou(
-        dt: list[list[float]], gt: list[list[float]], iscrowd: Sequence[bool | int] | npt.NDArray[Any]
-    ) -> npt.NDArray[np.float64]:
-        """Compute IoU between dt and gt bounding boxes. Shape: (D, G)."""
-        ...
-    @staticmethod
-    def fr_poly(xy: list[float], h: int, w: int) -> dict[str, Any]:
-        """Convert polygon to RLE."""
-        ...
-    @staticmethod
-    def frPoly(xy: list[float], h: int, w: int) -> dict[str, Any]: ...
-    @staticmethod
-    def fr_bbox(bb: list[float], h: int, w: int) -> dict[str, Any]:
-        """Convert bounding box to RLE."""
-        ...
-    @staticmethod
-    def frBbox(bb: list[float], h: int, w: int) -> dict[str, Any]: ...
-    @staticmethod
-    def frPyObjects(
-        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]], h: int, w: int
-    ) -> list[dict[str, Any]]:
-        """Convert segmentation objects to RLE (pycocotools compat)."""
-        ...
-    @staticmethod
-    def fr_py_objects(
-        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]], h: int, w: int
-    ) -> list[dict[str, Any]]: ...
-    @staticmethod
-    def fr_py_objects_snake(
-        seg: list[list[float]] | dict[str, Any] | list[dict[str, Any]], h: int, w: int
-    ) -> list[dict[str, Any]]: ...
-    @staticmethod
-    def rle_to_string(rle: dict[str, Any]) -> str:
-        """Encode RLE to compact string format."""
-        ...
-    @staticmethod
-    def rle_from_string(s: str, h: int, w: int) -> dict[str, Any]:
-        """Decode compact string to RLE."""
-        ...
+    def __new__(cls, gt: COCO, dt: COCO, iou_type: str = "segm") -> COCOeval: ...
+
+# lvis-api spells it `LVISEval` (capital E); Detectron2 and MMDetection import
+# that spelling. `LVIS` is lvis-api's dataset class name.
+LVISEval = LVISeval
+LVIS = COCO
+
+class LVISResults:
+    """Drop-in for lvis-api ``LVISResults`` — returns ``lvis_gt.load_res(results)``."""
+
+    def __new__(
+        cls, lvis_gt: COCO, results: str | list[dict[str, Any]] | npt.NDArray[Any], max_dets: int = 300
+    ) -> COCO: ...
+
+# ---------------------------------------------------------------------------
+# torchvision drop-in surface
+# ---------------------------------------------------------------------------
+
+class CocoDetection:
+    """Drop-in for ``torchvision.datasets.CocoDetection`` backed by hotcoco."""
+
+    root: str
+    coco: COCO
+    ids: list[int]
+    transform: Callable[[Any], Any] | None
+    target_transform: Callable[[Any], Any] | None
+    transforms: Callable[[Any, Any], tuple[Any, Any]] | None
+
+    def __init__(
+        self,
+        root: str,
+        ann_file: str,
+        transform: Callable[[Any], Any] | None = None,
+        target_transform: Callable[[Any], Any] | None = None,
+        transforms: Callable[[Any, Any], tuple[Any, Any]] | None = None,
+    ) -> None: ...
+    def __getitem__(self, index: int) -> tuple[Any, Any]: ...
+    def __len__(self) -> int: ...
+
+class CocoEvaluator:
+    """Drop-in for the ``CocoEvaluator`` in torchvision's detection reference scripts."""
+
+    coco_gt: COCO
+    iou_types: list[str]
+    coco_eval: dict[str, COCOeval | None]
+    results: dict[str, list[dict[str, Any]]]
+
+    def __init__(self, coco_gt: COCO, iou_types: str | list[str]) -> None: ...
+    def update(self, predictions: dict[int, dict[str, Any]]) -> None: ...
+    def synchronize_between_processes(self) -> None: ...
+    def accumulate(self) -> None: ...
+    def summarize(self) -> None: ...
+    def get_results(self) -> dict[str, dict[str, float]]: ...

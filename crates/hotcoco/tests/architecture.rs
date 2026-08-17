@@ -157,6 +157,96 @@ fn iou_formula_only_in_primitives_sim() {
     );
 }
 
+/// Whether a line contains the `x / (a + b - x)` shape — an IoU denominator
+/// with the intersection subtracted back out, spotted structurally.
+///
+/// Whitespace is stripped first, then every `ident / ( … )` division is
+/// checked: the parenthesized body must be exactly `term + term - numerator`,
+/// with the subtracted term equal to the identifier being divided. Names do
+/// not matter, which is the point — the sibling `union` scan requires the
+/// conventional variable name, and the historic copy-paste sometimes inlined
+/// the denominator without ever naming it.
+fn iou_shape(line: &str) -> bool {
+    // Identifier characters, dots included, so `self.inter / (…)` matches too.
+    fn is_ident(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_' || c == '.'
+    }
+
+    let flat: Vec<char> = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let n = flat.len();
+    for i in 0..n {
+        if flat[i] != '/' || i + 1 >= n || flat[i + 1] != '(' {
+            continue;
+        }
+        // The divided identifier, read backwards from the `/`.
+        let num_start = (0..i).rev().take_while(|&j| is_ident(flat[j])).last();
+        let Some(num_start) = num_start else { continue };
+        let numerator: String = flat[num_start..i].iter().collect();
+
+        // The paren-balanced denominator body.
+        let mut depth = 0usize;
+        let mut close = None;
+        for (j, &c) in flat.iter().enumerate().skip(i + 1) {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        let body: String = flat[i + 2..close].iter().collect();
+
+        // Exactly `a + b - numerator`, with simple (operator-free) a and b.
+        if let Some((sum, subtracted)) = body.rsplit_once('-') {
+            if let Some((a, b)) = sum.split_once('+') {
+                if subtracted == numerator
+                    && !a.is_empty()
+                    && !b.is_empty()
+                    && a.chars().all(is_ident)
+                    && b.chars().all(is_ident)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Structural companion to [`iou_formula_only_in_primitives_sim`]: the same
+/// rule, matched on shape rather than on the identifier `union`.
+///
+/// The identifier scan misses `inter / (a + b - inter)` written without a
+/// named union — which is how a hurried copy inlines it. This scan misses the
+/// two-line spelling (`let u = a + b - i; i / u`), but naming that variable
+/// anything like `union` walks into the sibling check; evading *both* takes a
+/// deliberately obfuscated name, which is no longer the accidental
+/// reintroduction this file guards against.
+#[test]
+fn iou_formula_shape_only_in_primitives_sim() {
+    /// Keep in lockstep with [`iou_formula_only_in_primitives_sim`]'s list —
+    /// the two checks cover one rule.
+    const FORMULA_HOMES: &[&str] = &["crates/hotcoco/src/primitives/sim.rs"];
+
+    let violations = scan(|path| FORMULA_HOMES.contains(&path), iou_shape);
+
+    assert!(
+        violations.is_empty(),
+        "a similarity denominator may only be defined in: {}.\n\
+         Found the `x / (a + b - x)` shape at:\n  {}\n\n\
+         Call `primitives::sim` instead — it exposes matrix kernels (`bbox_iou`, \
+         `mask_iou`, `obb_iou`) and the scalar `bbox_iou_pair`.",
+        FORMULA_HOMES.join(", "),
+        violations.join("\n  ")
+    );
+}
+
 /// One parallelism threshold for every kernel.
 ///
 /// Two of these drifted apart (1024 vs 1000) while a comment insisted they
@@ -363,6 +453,103 @@ fn foreign_imports(dir: &str, allowed: &[&str]) -> Vec<String> {
 /// structurally, because whether they escape the layer depends on the file.
 const NEUTRAL: &[&str] = &["std::", "core::", "serde", "rand", "rayon", "self::"];
 
+/// What `metrics/` may reach: sibling metric functions, the crate's Result
+/// type, and the cross-family output contract. Shared by the `use`-statement
+/// check and the inline-path check so the two can never disagree about what
+/// the layer means.
+fn metrics_allowed() -> Vec<&'static str> {
+    [
+        NEUTRAL,
+        &[
+            "crate::metrics", // sibling metric functions
+            "crate::error",   // the crate's Result type
+            "crate::report",  // the cross-family output contract
+        ],
+    ]
+    .concat()
+}
+
+/// What `primitives/` may reach. The sibling kernels are listed one by one
+/// rather than as `crate::primitives`, so that adding a fourth kernel is a
+/// deliberate edit here. Nothing from `metrics` is permitted at all — the
+/// dependency runs one way.
+fn primitives_allowed() -> Vec<&'static str> {
+    [
+        NEUTRAL,
+        &[
+            "crate::primitives::sim",
+            "crate::primitives::greedy",
+            "crate::primitives::assign",
+            "crate::geometry",
+            "crate::mask",
+            "crate::types",
+        ],
+    ]
+    .concat()
+}
+
+/// Every maximal `crate::`-rooted path spelled inline in a line of code.
+///
+/// A path is `crate::` followed by identifier characters and `::` separators;
+/// the scan requires a non-identifier character (or line start) before the
+/// keyword so `my_crate::x` is not a match.
+fn inline_crate_paths(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = line[start..].find("crate::") {
+        let begin = start + pos;
+        let ok_prefix = line[..begin]
+            .chars()
+            .next_back()
+            .is_none_or(|prev| !(prev.is_alphanumeric() || prev == '_'));
+        let end = line[begin..]
+            .char_indices()
+            .find(|&(i, c)| i >= "crate::".len() && !(c.is_alphanumeric() || c == '_' || c == ':'))
+            .map_or(line.len(), |(i, _)| begin + i);
+        if ok_prefix {
+            out.push(&line[begin..end]);
+        }
+        start = end.max(begin + "crate::".len());
+    }
+    out
+}
+
+/// Every inline `crate::…` path in `dir`'s shipped code whose prefix is not on
+/// `allowed` — the qualified-path twin of [`foreign_imports`].
+///
+/// The `use`-statement check alone was bypassable by construction: writing
+/// `crate::detection::EvalMode::Coco` (or `crate::COCOeval`, through the root
+/// re-exports) directly in a function body imports nothing and passed clean.
+/// Same allowlist discipline as the import check — a path is a violation
+/// unless its prefix is sanctioned, so the ~25 crate-root re-exports are
+/// violations by default rather than needing enumeration.
+///
+/// The scan stops at the first `#[cfg(test)]` line: unit-test modules sit at
+/// the bottom of every file in this crate, are not shipped, and legitimately
+/// reach across layers (e.g. `metrics` tests build fixtures on
+/// `crate::params::default_rec_thrs`). What it deliberately does not cover:
+/// relative spellings (`super::` chains written inline without a `use`) and
+/// paths split across lines by rustfmt — both possible, neither the accidental
+/// reintroduction this file exists to catch.
+fn inline_foreign_paths(dir: &str, allowed: &[&str]) -> Vec<String> {
+    sources()
+        .iter()
+        .filter(|f| f.path.contains(dir))
+        .flat_map(|f| {
+            f.lines
+                .iter()
+                .take_while(|(_, l)| !l.trim_start().starts_with("#[cfg(test)"))
+                .filter(|(_, l)| import_target(l).is_none())
+                .filter(|(_, line)| {
+                    inline_crate_paths(line)
+                        .iter()
+                        .any(|path| !allowed.iter().any(|p| path.starts_with(p)))
+                })
+                .map(move |(n, line)| format!("{}:{n}  {}", f.path, line.trim()))
+        })
+        .collect()
+}
+
 /// `metrics/` computes numbers from matches; it may not know which family called.
 ///
 /// The whole point of the functional layer is that
@@ -377,15 +564,7 @@ const NEUTRAL: &[&str] = &["std::", "core::", "serde", "rand", "rayon", "self::"
 /// is documentation; importing them is a dependency.
 #[test]
 fn metrics_never_depends_on_a_family_driver() {
-    let allowed = [
-        NEUTRAL,
-        &[
-            "crate::metrics", // sibling metric functions
-            "crate::error",   // the crate's Result type
-            "crate::report",  // the cross-family output contract
-        ],
-    ]
-    .concat();
+    let allowed = metrics_allowed();
     let violations = foreign_imports("/metrics/", &allowed);
 
     assert!(
@@ -401,6 +580,28 @@ fn metrics_never_depends_on_a_family_driver() {
     );
 }
 
+/// The inline-path twin of [`metrics_never_depends_on_a_family_driver`].
+///
+/// A fully qualified `crate::detection::…` (or `crate::COCOeval`, via the root
+/// re-exports) written in a function body imports nothing, so the `use` check
+/// above never sees it — and that spelling is exactly what rustfmt produces
+/// when someone reaches across layers "just once" without adding an import.
+/// Same allowlist, same meaning; only the spelling differs.
+#[test]
+fn metrics_never_names_a_family_driver_inline() {
+    let allowed = metrics_allowed();
+    let violations = inline_foreign_paths("/metrics/", &allowed);
+
+    assert!(
+        violations.is_empty(),
+        "`metrics/` may only name {allowed:?} in qualified paths.\nFound:\n  {}\n\n\
+         See `metrics_never_depends_on_a_family_driver` — the rule is the same; \
+         writing the path inline instead of importing it does not change what \
+         the layer now depends on.",
+        violations.join("\n  ")
+    );
+}
+
 /// `primitives/` produces matches; it may not depend on the layer that scores them.
 ///
 /// The dependency runs one way — `metrics` may use `primitives`, never the
@@ -410,21 +611,7 @@ fn metrics_never_depends_on_a_family_driver() {
 ///
 #[test]
 fn primitives_never_depends_on_metrics() {
-    // The sibling kernels are listed one by one rather than as `crate::primitives`,
-    // so that adding a fourth kernel is a deliberate edit here. Nothing from
-    // `metrics` is permitted at all — the dependency runs one way.
-    let allowed = [
-        NEUTRAL,
-        &[
-            "crate::primitives::sim",
-            "crate::primitives::greedy",
-            "crate::primitives::assign",
-            "crate::geometry",
-            "crate::mask",
-            "crate::types",
-        ],
-    ]
-    .concat();
+    let allowed = primitives_allowed();
     let violations = foreign_imports("/primitives/", &allowed);
 
     assert!(
@@ -432,6 +619,23 @@ fn primitives_never_depends_on_metrics() {
         "`primitives/` may only import {allowed:?}.\nFound:\n  {}\n\n\
          Kernels match; metrics score. If a primitive needs a metric, the layering \
          is inverted — the caller should compose the two instead.",
+        violations.join("\n  ")
+    );
+}
+
+/// The inline-path twin of [`primitives_never_depends_on_metrics`] — see
+/// [`metrics_never_names_a_family_driver_inline`] for why the `use` check
+/// alone is not enough.
+#[test]
+fn primitives_never_names_metrics_inline() {
+    let allowed = primitives_allowed();
+    let violations = inline_foreign_paths("/primitives/", &allowed);
+
+    assert!(
+        violations.is_empty(),
+        "`primitives/` may only name {allowed:?} in qualified paths.\nFound:\n  {}\n\n\
+         Kernels match; metrics score. Writing `crate::metrics::…` (or a crate-root \
+         re-export) inline instead of importing it does not change the dependency.",
         violations.join("\n  ")
     );
 }

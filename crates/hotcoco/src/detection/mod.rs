@@ -2,7 +2,7 @@
 //!
 //! Implements evaluate, accumulate, and summarize for bbox, segm, and keypoint evaluation.
 
-pub(super) mod accumulate;
+mod accumulate;
 mod calibration;
 mod catalog;
 mod compare;

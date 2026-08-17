@@ -12,16 +12,16 @@ use crate::types::{Annotation, Category, Dataset, Image};
 use super::ConvertError;
 
 /// Statistics returned by [`coco_to_voc`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VocStats {
-    /// Total number of images processed (one `.xml` written per image).
+    /// Images written (one `.xml` annotation file per image).
     pub images: usize,
-    /// Total number of annotations written.
+    /// Annotations written.
     pub annotations: usize,
     /// Crowd annotations written with `<difficult>1</difficult>`.
     pub crowd_as_difficult: usize,
-    /// Annotations skipped because they had no `bbox`.
-    pub missing_bbox: usize,
+    /// Annotations skipped because they have no `bbox`.
+    pub skipped_no_bbox: usize,
 }
 
 /// Convert a COCO dataset to Pascal VOC annotation format.
@@ -32,15 +32,24 @@ pub struct VocStats {
 ///
 /// # Field mapping
 ///
-/// - COCO `bbox` `[x, y, w, h]` → VOC `<xmin>/<ymin>/<xmax>/<ymax>` (rounded to integers)
-/// - COCO `iscrowd` → VOC `<difficult>1</difficult>` (approximate mapping)
+/// - COCO `bbox` `[x, y, w, h]` → VOC `<xmin>/<ymin>/<xmax>/<ymax>` using the
+///   VOC 1-based inclusive convention: `xmin = x + 1`, `xmax = x + w` (rounded
+///   to integers). See [`voc_to_coco`] for the convention's rationale — the two
+///   directions are exact inverses, so integer boxes round-trip exactly.
+/// - COCO `iscrowd` → VOC `<difficult>1</difficult>` (imported back to
+///   `iscrowd` by [`voc_to_coco`], so the mapping is bidirectional)
 /// - COCO segmentation, keypoints → not exported (bbox-only)
 ///
 /// # Errors
 ///
-/// Returns [`ConvertError::Io`] on filesystem errors or [`ConvertError::XmlError`]
-/// on XML writing failures.
+/// Returns [`ConvertError::Io`] on filesystem errors,
+/// [`ConvertError::XmlError`] on XML writing failures,
+/// [`ConvertError::StemCollision`] if two images share a filename stem (their
+/// annotation files would overwrite each other), or
+/// [`ConvertError::UnknownCategory`] if an annotation references a category id
+/// that is not in the dataset.
 pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, ConvertError> {
+    super::check_unique_stems(dataset)?;
     let ann_dir = output_dir.join("Annotations");
     fs::create_dir_all(&ann_dir)?;
 
@@ -52,9 +61,10 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
 
     let anns_by_image = super::anns_by_image(dataset);
 
-    let mut total_annotations = 0usize;
-    let mut crowd_as_difficult = 0usize;
-    let mut missing_bbox = 0usize;
+    let mut stats = VocStats {
+        images: dataset.images.len(),
+        ..Default::default()
+    };
 
     for img in &dataset.images {
         let stem = super::file_stem(&img.file_name);
@@ -82,18 +92,23 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
                 let bbox = match ann.bbox {
                     Some(b) => b,
                     None => {
-                        missing_bbox += 1;
+                        stats.skipped_no_bbox += 1;
                         continue;
                     }
                 };
-                let name = match cat_name.get(&ann.category_id) {
-                    Some(n) => *n,
-                    None => continue,
-                };
+                let name =
+                    *cat_name
+                        .get(&ann.category_id)
+                        .ok_or(ConvertError::UnknownCategory {
+                            ann_id: ann.id,
+                            category_id: ann.category_id,
+                        })?;
 
+                // Inverse of the import mapping: COCO x = xmin - 1 and
+                // w = xmax - xmin + 1, so xmin = x + 1 and xmax = x + w.
                 let [x, y, w, h] = bbox;
-                let xmin = x.round() as i64;
-                let ymin = y.round() as i64;
+                let xmin = (x + 1.0).round() as i64;
+                let ymin = (y + 1.0).round() as i64;
                 let xmax = (x + w).round() as i64;
                 let ymax = (y + h).round() as i64;
 
@@ -108,7 +123,7 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
                 )?;
 
                 if ann.iscrowd {
-                    crowd_as_difficult += 1;
+                    stats.crowd_as_difficult += 1;
                 }
 
                 writer.write_event(Event::Start(BytesStart::new("bndbox")))?;
@@ -119,7 +134,7 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
                 writer.write_event(Event::End(BytesEnd::new("bndbox")))?;
 
                 writer.write_event(Event::End(BytesEnd::new("object")))?;
-                total_annotations += 1;
+                stats.annotations += 1;
             }
         }
 
@@ -132,12 +147,7 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
     let labels: Vec<&str> = sorted_cats.iter().map(|c| c.name.as_str()).collect();
     fs::write(output_dir.join("labels.txt"), labels.join("\n") + "\n")?;
 
-    Ok(VocStats {
-        images: dataset.images.len(),
-        annotations: total_annotations,
-        crowd_as_difficult,
-        missing_bbox,
-    })
+    Ok(stats)
 }
 
 /// Convert a Pascal VOC annotation directory to COCO format.
@@ -148,14 +158,24 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
 ///
 /// # Field mapping
 ///
-/// - VOC `<xmin>/<ymin>/<xmax>/<ymax>` → COCO `bbox` `[xmin, ymin, xmax-xmin, ymax-ymin]`
-/// - VOC `<difficult>` → dropped (not equivalent to COCO `iscrowd`)
-/// - VOC `<truncated>`, `<pose>` → dropped
+/// - VOC `<xmin>/<ymin>/<xmax>/<ymax>` → COCO `bbox`
+///   `[xmin - 1, ymin - 1, xmax - xmin + 1, ymax - ymin + 1]`. VOC coordinates
+///   are 1-based pixel indexes and the box includes both endpoints — the VOC
+///   devkit computes box area as `(xmax - xmin + 1) * (ymax - ymin + 1)`, and
+///   pycocotools-adjacent tooling (Detectron2's `pascal_voc.py`, mmdetection's
+///   VOC loader) applies the same `-1` / `+1` when converting to 0-based
+///   half-open COCO coordinates. Coordinates are parsed as floats, so files
+///   with values like `156.00` import fine.
+/// - VOC `<difficult>` → COCO `iscrowd` (the inverse of [`coco_to_voc`]'s
+///   export mapping; approximate — VOC "difficult" marks hard examples the
+///   challenge ignores in scoring, the closest VOC analogue of a crowd region)
+/// - VOC `<truncated>`, `<pose>`, `<part>` → dropped
 ///
 /// # Errors
 ///
-/// Returns [`ConvertError::XmlError`] on malformed XML or [`ConvertError::ParseError`]
-/// if required elements are missing.
+/// Returns [`ConvertError::XmlError`] on malformed XML or
+/// [`ConvertError::ParseError`] if required elements are missing or a value is
+/// unparseable. Errors name the file and the byte position where available.
 pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
     let ann_dir = {
         let sub = voc_dir.join("Annotations");
@@ -188,7 +208,7 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
 
     for xml_path in &xml_files {
         let file = fs::File::open(xml_path)?;
-        let parsed = parse_voc_xml(BufReader::new(file))?;
+        let parsed = parse_voc_xml(BufReader::new(file)).map_err(|e| e.with_path(xml_path))?;
         for obj in &parsed.objects {
             if category_seen.insert(obj.name.clone()) {
                 category_names.push(obj.name.clone());
@@ -232,10 +252,7 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
         .map(|(i, name)| Category {
             id: (i + 1) as u64,
             name: name.clone(),
-            supercategory: None,
-            skeleton: None,
-            keypoints: None,
-            frequency: None,
+            ..Default::default()
         })
         .collect();
 
@@ -253,12 +270,7 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
             file_name: parsed.filename.clone(),
             width: parsed.width,
             height: parsed.height,
-            license: None,
-            coco_url: None,
-            flickr_url: None,
-            date_captured: None,
-            neg_category_ids: vec![],
-            not_exhaustive_category_ids: vec![],
+            ..Default::default()
         });
 
         for obj in &parsed.objects {
@@ -267,10 +279,12 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
                 None => continue,
             };
 
-            let x = obj.xmin as f64;
-            let y = obj.ymin as f64;
-            let w = (obj.xmax - obj.xmin) as f64;
-            let h = (obj.ymax - obj.ymin) as f64;
+            // VOC 1-based inclusive → COCO 0-based half-open (see the
+            // field-mapping doc above).
+            let x = obj.xmin - 1.0;
+            let y = obj.ymin - 1.0;
+            let w = obj.xmax - obj.xmin + 1.0;
+            let h = obj.ymax - obj.ymin + 1.0;
 
             annotations.push(Annotation {
                 id: ann_id,
@@ -278,13 +292,8 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
                 category_id,
                 bbox: Some([x, y, w, h]),
                 area: Some(w * h),
-                segmentation: None,
-                iscrowd: false,
-                keypoints: None,
-                num_keypoints: None,
-                obb: None,
-                score: None,
-                is_group_of: None,
+                iscrowd: obj.difficult,
+                ..Default::default()
             });
             ann_id += 1;
         }
@@ -311,12 +320,62 @@ struct ParsedVocImage {
     objects: Vec<ParsedVocObject>,
 }
 
+#[derive(Default)]
 struct ParsedVocObject {
     name: String,
-    xmin: i64,
-    ymin: i64,
-    xmax: i64,
-    ymax: i64,
+    xmin: f64,
+    ymin: f64,
+    xmax: f64,
+    ymax: f64,
+    difficult: bool,
+}
+
+impl ParsedVocObject {
+    /// Assign one `<bndbox>` coordinate by its tag; an unrecognized tag is
+    /// ignored.
+    fn set_coord(&mut self, tag: &[u8], val: f64) {
+        match tag {
+            b"xmin" => self.xmin = val,
+            b"ymin" => self.ymin = val,
+            b"xmax" => self.xmax = val,
+            b"ymax" => self.ymax = val,
+            _ => {}
+        }
+    }
+}
+
+/// The image-level fields being filled, so the text router takes one target
+/// instead of three out-parameters.
+#[derive(Default)]
+struct VocFields {
+    filename: String,
+    width: u32,
+    height: u32,
+}
+
+/// Where in a VOC document the parser is, for the purpose of routing text.
+///
+/// VOC identifies a field by its *enclosing* element, not by tag name alone:
+/// `<name>` is an object's class in one place and a body part's name in another,
+/// and `<xmin>` appears inside both an object's `<bndbox>` and a part's. One
+/// value naming the position is what keeps those apart — the boolean-per-element
+/// form this replaced required the same guard to be restated at every use site,
+/// and a missing `part_depth == 0` on the coordinate branch made every VOC2012
+/// person annotation report its last part's box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    /// Directly inside `<annotation>` — `<filename>`.
+    Root,
+    /// Inside `<size>` — `<width>` and `<height>`.
+    Size,
+    /// Inside `<object>` but outside its `<bndbox>` — `<name>`, `<difficult>`.
+    Object,
+    /// Inside an object's own `<bndbox>` — the four coordinates.
+    ObjectBox,
+    /// Anywhere inside a `<part>`. Parts describe sub-regions of an object — a
+    /// person's head, hand or foot — and carry their own `<name>` and `<bndbox>`.
+    /// None of it belongs to the object, so all of it is dropped.
+    Part,
 }
 
 /// Parse a single VOC XML annotation file from a reader.
@@ -324,24 +383,16 @@ fn parse_voc_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedVocImage, Conve
     let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
 
-    let mut filename = String::new();
-    let mut width: u32 = 0;
-    let mut height: u32 = 0;
+    let mut fields = VocFields::default();
     let mut objects: Vec<ParsedVocObject> = Vec::new();
 
-    let mut current_tag: Vec<u8> = Vec::new();
-    let mut in_size = false;
-    let mut in_object = false;
-    let mut in_bndbox = false;
-    // VOC2012 person objects contain <part> sub-elements with their own <name>;
-    // track depth to skip them (parts can theoretically nest).
+    let mut section = Section::Root;
+    // `<part>` nesting depth. Parts can in principle nest, so the section returns
+    // to the enclosing object only when the outermost one closes.
     let mut part_depth: u32 = 0;
-
-    let mut obj_name = String::new();
-    let mut xmin: i64 = 0;
-    let mut ymin: i64 = 0;
-    let mut xmax: i64 = 0;
-    let mut ymax: i64 = 0;
+    let mut current_tag: Vec<u8> = Vec::new();
+    // The object currently being filled; `None` outside any `<object>`.
+    let mut object: Option<ParsedVocObject> = None;
 
     let mut buf = Vec::new();
     loop {
@@ -350,17 +401,19 @@ fn parse_voc_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedVocImage, Conve
                 let name = e.name();
                 let tag = name.as_ref();
                 match tag {
-                    b"size" => in_size = true,
-                    b"object" => {
-                        in_object = true;
-                        obj_name.clear();
-                        xmin = 0;
-                        ymin = 0;
-                        xmax = 0;
-                        ymax = 0;
+                    b"part" => {
+                        part_depth += 1;
+                        section = Section::Part;
                     }
-                    b"bndbox" => in_bndbox = true,
-                    b"part" => part_depth += 1,
+                    // Inside a part nothing else moves the section — this arm is
+                    // what stops a part's `<bndbox>` becoming the object's.
+                    _ if section == Section::Part => {}
+                    b"size" => section = Section::Size,
+                    b"object" => {
+                        section = Section::Object;
+                        object = Some(ParsedVocObject::default());
+                    }
+                    b"bndbox" => section = Section::ObjectBox,
                     _ => {}
                 }
                 current_tag = tag.to_vec();
@@ -368,21 +421,21 @@ fn parse_voc_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedVocImage, Conve
             Ok(Event::End(ref e)) => {
                 let name = e.name();
                 match name.as_ref() {
-                    b"size" => in_size = false,
-                    b"object" => {
-                        if in_object {
-                            objects.push(ParsedVocObject {
-                                name: std::mem::take(&mut obj_name),
-                                xmin,
-                                ymin,
-                                xmax,
-                                ymax,
-                            });
+                    b"part" => {
+                        part_depth = part_depth.saturating_sub(1);
+                        if part_depth == 0 {
+                            section = Section::Object;
                         }
-                        in_object = false;
                     }
-                    b"bndbox" => in_bndbox = false,
-                    b"part" => part_depth = part_depth.saturating_sub(1),
+                    _ if section == Section::Part => {}
+                    b"size" => section = Section::Root,
+                    b"object" => {
+                        // `extend` over the `Option`: a stray `</object>` with no
+                        // open object contributes nothing.
+                        objects.extend(object.take());
+                        section = Section::Root;
+                    }
+                    b"bndbox" => section = Section::Object,
                     _ => {}
                 }
                 current_tag.clear();
@@ -391,56 +444,102 @@ fn parse_voc_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedVocImage, Conve
                 let text = e
                     .decode()
                     .map_err(|err| ConvertError::XmlError(format!("invalid XML text: {err}")))?;
-                let text = text.trim();
-
-                if !in_object && !in_size && current_tag == b"filename" {
-                    filename = text.to_string();
-                } else if in_size && !in_object {
-                    match current_tag.as_slice() {
-                        b"width" => {
-                            width = text.parse().map_err(|_| {
-                                ConvertError::ParseError(format!("invalid width: {text}"))
-                            })?;
-                        }
-                        b"height" => {
-                            height = text.parse().map_err(|_| {
-                                ConvertError::ParseError(format!("invalid height: {text}"))
-                            })?;
-                        }
-                        _ => {}
-                    }
-                } else if in_object && !in_bndbox && part_depth == 0 && current_tag == b"name" {
-                    obj_name = text.to_string();
-                } else if in_bndbox {
-                    let val: i64 = text.parse().map_err(|_| {
-                        ConvertError::ParseError(format!("invalid bbox coordinate: {text}"))
-                    })?;
-                    match current_tag.as_slice() {
-                        b"xmin" => xmin = val,
-                        b"ymin" => ymin = val,
-                        b"xmax" => xmax = val,
-                        b"ymax" => ymax = val,
-                        _ => {}
-                    }
-                }
+                route_text(
+                    section,
+                    &current_tag,
+                    text.trim(),
+                    &mut fields,
+                    object.as_mut(),
+                )
+                .map_err(|err| at_byte(err, xml.buffer_position()))?;
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(ConvertError::XmlError(e.to_string())),
+            Err(e) => {
+                return Err(ConvertError::XmlError(format!(
+                    "near byte {}: {e}",
+                    xml.error_position()
+                )));
+            }
             _ => {}
         }
         buf.clear();
     }
 
-    if filename.is_empty() {
+    if fields.filename.is_empty() {
         return Err(ConvertError::ParseError(
             "VOC XML missing <filename> element".into(),
         ));
     }
 
     Ok(ParsedVocImage {
-        filename,
-        width,
-        height,
+        filename: fields.filename,
+        width: fields.width,
+        height: fields.height,
         objects,
     })
+}
+
+/// Attach the reader's byte offset to a parse error — XML carries no line
+/// numbers a streaming reader can cheaply report, but a byte position still
+/// pins the failing element.
+fn at_byte(err: ConvertError, pos: u64) -> ConvertError {
+    match err {
+        ConvertError::ParseError(msg) => {
+            ConvertError::ParseError(format!("near byte {pos}: {msg}"))
+        }
+        other => other,
+    }
+}
+
+/// Route one text node to the field its position names.
+///
+/// This is the payoff of naming the position: with [`Section`] already decided,
+/// the destination is a flat table from (where, tag), and there is no per-branch
+/// "am I somewhere that counts?" guard left to get wrong.
+fn route_text(
+    section: Section,
+    tag: &[u8],
+    text: &str,
+    fields: &mut VocFields,
+    object: Option<&mut ParsedVocObject>,
+) -> Result<(), ConvertError> {
+    match (section, tag) {
+        (Section::Root, b"filename") => fields.filename = text.to_string(),
+        (Section::Size, b"width") => {
+            fields.width = text
+                .parse()
+                .map_err(|_| ConvertError::ParseError(format!("invalid width: {text}")))?;
+        }
+        (Section::Size, b"height") => {
+            fields.height = text
+                .parse()
+                .map_err(|_| ConvertError::ParseError(format!("invalid height: {text}")))?;
+        }
+        (Section::Object, b"name") => {
+            if let Some(obj) = object {
+                obj.name = text.to_string();
+            }
+        }
+        (Section::Object, b"difficult") => {
+            let val: i64 = text
+                .parse()
+                .map_err(|_| ConvertError::ParseError(format!("invalid difficult: {text}")))?;
+            if let Some(obj) = object {
+                obj.difficult = val != 0;
+            }
+        }
+        // Every text node in a `<bndbox>` is parsed as a coordinate, named or
+        // not, so a non-numeric child is an error rather than a silent no-op.
+        // Parsed as f64: real-world VOC files carry values like `156.00`.
+        (Section::ObjectBox, coord) => {
+            let val: f64 = text.parse().map_err(|_| {
+                ConvertError::ParseError(format!("invalid bbox coordinate: {text}"))
+            })?;
+            if let Some(obj) = object {
+                obj.set_coord(coord, val);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

@@ -8,25 +8,18 @@ use std::collections::HashSet;
 use crate::types::{Annotation, Category, Dataset};
 use crate::{COCO, Hierarchy};
 
-/// Expand ground-truth annotations up the category hierarchy.
+/// Expand a dataset's annotations up the category hierarchy.
 ///
 /// For each annotation, creates additional copies at every ancestor category
 /// (excluding self). Deduplicates by `(image_id, bbox_bits, category_id)` so
 /// pre-expanded inputs are idempotent. Adds virtual categories for any
 /// hierarchy-only node IDs not already present in the dataset.
-pub fn expand_gt(coco: &COCO, hierarchy: &Hierarchy) -> COCO {
-    expand_annotations(coco, hierarchy)
-}
-
-/// Expand detection annotations up the category hierarchy.
 ///
-/// Same logic as [`expand_gt`] — both GT and DT expansion use the same
-/// ancestor-propagation strategy.
-pub fn expand_dt(coco: &COCO, hierarchy: &Hierarchy) -> COCO {
-    expand_annotations(coco, hierarchy)
-}
-
-fn expand_annotations(coco: &COCO, hierarchy: &Hierarchy) -> COCO {
+/// One function for both sides: Open Images expands ground truth always and
+/// detections when `params.expand_dt` is set, with the identical
+/// ancestor-propagation strategy — the former `expand_gt`/`expand_dt` pair
+/// were byte-identical wrappers around this.
+pub fn expand_annotations(coco: &COCO, hierarchy: &Hierarchy) -> COCO {
     let mut seen: HashSet<(u64, [u64; 4], u64)> = HashSet::new();
     let mut expanded_anns: Vec<Annotation> = Vec::new();
     let mut next_id = coco
@@ -78,10 +71,7 @@ fn expand_annotations(coco: &COCO, hierarchy: &Hierarchy) -> COCO {
             categories.push(Category {
                 id,
                 name: hierarchy.name_of(id).unwrap_or("_unknown").to_string(),
-                supercategory: None,
-                skeleton: None,
-                keypoints: None,
-                frequency: None,
+                ..Default::default()
             });
         }
     }

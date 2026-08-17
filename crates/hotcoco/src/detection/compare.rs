@@ -75,8 +75,11 @@ pub struct ComparisonResult {
 /// Compare two evaluations on the same dataset.
 ///
 /// Both evaluators must have had [`evaluate()`](COCOeval::evaluate) called and must
-/// use the same `eval_mode` and `iou_type`. Accumulation and summarization are
-/// performed internally on the shared image set — callers do not need to call
+/// use the same `eval_mode`, `iou_type`, `iou_thrs`, `rec_thrs`, `max_dets`, and
+/// `area_ranges` (labels and bounds) — the comparison summarizes both runs under
+/// one metric catalog, so a mismatch on any of those axes is an error rather
+/// than a silently wrong delta. Accumulation and summarization are performed
+/// internally on the shared image set — callers do not need to call
 /// `accumulate()` or `summarize()` first.
 ///
 /// When `opts.n_bootstrap > 0`, bootstrap confidence intervals are computed on
@@ -107,6 +110,48 @@ pub fn compare(
             eval_a.params.iou_type, eval_b.params.iou_type
         )
         .into());
+    }
+    // The two runs are summarized under one metric catalog (built from A's
+    // params) and their stats are differenced position by position, so every
+    // axis that catalog reads must be identical on both sides. Without these
+    // checks, B's numbers were silently resolved under A's metric names — the
+    // same class of defect as the index-0 fallback in `summarize`.
+    if eval_a.params.iou_thrs != eval_b.params.iou_thrs {
+        return Err(
+            "iou_thrs mismatch: compare() differences the two runs metric by metric, \
+                    so both evaluators must use the same IoU threshold grid"
+                .into(),
+        );
+    }
+    if eval_a.params.rec_thrs != eval_b.params.rec_thrs {
+        return Err(
+            "rec_thrs mismatch: the recall grid defines what AP means, so comparing \
+                    runs averaged over different grids compares two different metrics"
+                .into(),
+        );
+    }
+    if eval_a.params.max_dets != eval_b.params.max_dets {
+        return Err(format!(
+            "max_dets mismatch: {:?} vs {:?}. The metric catalog reads specific max-det \
+             slots, so both evaluators must use the same list",
+            eval_a.params.max_dets, eval_b.params.max_dets
+        )
+        .into());
+    }
+    let area_ranges_match = eval_a.params.area_ranges.len() == eval_b.params.area_ranges.len()
+        && eval_a
+            .params
+            .area_ranges
+            .iter()
+            .zip(&eval_b.params.area_ranges)
+            .all(|(a, b)| a.label == b.label && a.range == b.range);
+    if !area_ranges_match {
+        return Err(
+            "area_ranges mismatch: per-size metrics would measure different \
+                    object-size buckets on each side, so both evaluators must use the same \
+                    area-range labels and bounds"
+                .into(),
+        );
     }
     if opts.confidence <= 0.0 || opts.confidence >= 1.0 {
         return Err(format!("confidence must be in (0, 1), got {}", opts.confidence).into());

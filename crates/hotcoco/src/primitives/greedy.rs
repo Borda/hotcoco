@@ -30,21 +30,13 @@
 //!
 //! # Threshold-epsilon policy: caller-owned, with one canonical clamp
 //!
-//! pycocotools does not use the raw threshold as its match floor — it starts each
-//! detection's search at `min(t, 1 - 1e-10)` (`evaluateImg`: `iou = min([t,
-//! 1-1e-10])`). That clamp is **the caller's to apply**: [`greedy_match`] compares
-//! against exactly the `iou_thrs` it is handed and adds no epsilon of its own, so
-//! a family whose thresholds mean something other than COCO's is not silently
-//! given COCO's fudge factor.
-//!
-//! The clamp is inert for every threshold `< 1.0`, so it never fires on COCO's
-//! default `0.5:0.05:0.95` sweep. It is observable only at `t == 1.0`, where
-//! pycocotools still matches a pair whose IoU lies in `[1 - 1e-10, 1.0)` and an
-//! unclamped caller does not.
-//!
-//! **Settled at 1.0** (this paragraph replaces the v0.4.x "known carry-over"
-//! note). Callers that claim pycocotools matching semantics apply
-//! [`coco_match_floor`]; callers implementing a different reference do not:
+//! pycocotools starts each detection's search at `min(t, 1 - 1e-10)`
+//! (`evaluateImg`: `iou = min([t, 1-1e-10])`). That clamp is **the caller's to
+//! apply**: [`greedy_match`] compares against exactly the `iou_thrs` it is
+//! handed, so a family whose thresholds mean something other than COCO's is not
+//! silently given COCO's fudge factor. The clamp is inert below `t == 1.0` and
+//! observable only there. Callers that claim pycocotools matching semantics
+//! apply [`coco_match_floor`]; callers implementing a different reference do not:
 //!
 //! | Caller | Clamped? | Why |
 //! |---|---|---|
@@ -52,26 +44,13 @@
 //! | TIDE (`pos_thr`/`bg_thr`) | no | parity contract is *tidecv*, not pycocotools — clamping would diverge from that reference |
 //! | confusion matrix, per-image diagnostics, calibration | no | hotcoco-native analysis with a user-chosen threshold; COCO's fudge factor is not implied |
 //!
-//! Identical geometry yields `1.0` to within a few ulp — but **not** exactly
-//! `1.0`. The intersection width is computed as `(x + w) - x`, which does not
-//! round-trip to `w` in binary floating point: `[94.13, 88.47, 21.53, 46.14]`
-//! against itself gives `0.9999999999999993`. pycocotools computes it the same
-//! way, so this is the reference's arithmetic rather than a defect here.
-//!
-//! The consequence is the reverse of what this note used to claim. For boxes at
-//! least a pixel on a side the drift is bounded around `1e-13`, so a *clamped*
-//! caller still matches exact duplicates at `t == 1.0` — three orders of
-//! magnitude clear of the `1 - 1e-10` floor. An **unclamped** caller comparing
-//! against a raw `1.0` may not. That makes the clamp a reason to apply the floor
-//! at `t == 1.0`, not evidence it is unnecessary.
-//!
-//! The floor is not a universal rescue: for sub-pixel geometry (a side ~1e-5
-//! against a coordinate ~1e2) the subtraction keeps almost none of the extent's
-//! significand and the drift reaches ~1.5e-9, below the floor. No detection
-//! dataset contains boxes that small and no standard sweep reaches `t == 1.0`,
-//! so this bounds the guarantee rather than breaking anything in practice.
-//!
-//! Both regimes are pinned by `sim::tests::bbox_iou_algebraic_properties` and
+//! Identical geometry yields IoU within a few ulp of — but **not** exactly —
+//! `1.0`: the intersection width `(x + w) - x` does not round-trip to `w`, and
+//! pycocotools computes it the same way. A *clamped* caller therefore still
+//! matches exact duplicates at `t == 1.0`; an unclamped caller comparing against
+//! a raw `1.0` may not. For sub-pixel geometry the drift can fall below even the
+//! clamped floor. Both regimes are pinned by
+//! `sim::tests::bbox_iou_algebraic_properties` and
 //! `sim::tests::self_iou_degrades_for_subpixel_boxes`.
 
 /// pycocotools' match floor for an IoU threshold: `min(t, 1 - 1e-10)`.
@@ -238,7 +217,31 @@ pub struct GreedyMatches {
     pub gt_matched: ThreshMatrix<bool>,
 }
 
+/// The two per-GT policy masks [`greedy_match_masked`] takes, as named fields.
+///
+/// They are both `Option<&[bool]>` of the same length, and as adjacent
+/// positional parameters nothing stopped a caller from transposing them — a
+/// silent semantics swap, not an error. Construct with named fields (or
+/// `GtMasks::default()` for the uniform case) so the mix-up cannot compile.
+///
+/// `None` is the **uniform** case: no GT is rematchable, and every GT is
+/// phase-2 eligible. Those are the values every non-crowd, non-OID caller would
+/// otherwise have to materialize — two `vec![_; g]` per matched cell, which on
+/// a COCO run is ~800k allocations per `evaluate()` to say "the usual".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GtMasks<'a> {
+    /// Per-GT: may this ground truth be matched by more than one detection?
+    /// (COCO crowd regions absorb any number of detections.) `None` = no.
+    pub rematchable: Option<&'a [bool]>,
+    /// Per-GT: may the phase-2 (ignored-GT) scan consider this ground truth?
+    /// (OID holds group-of GTs out for a separate driver pass.) `None` = yes.
+    pub phase2_eligible: Option<&'a [bool]>,
+}
+
 /// Greedy-match detections to ground-truths, pycocotools-exact.
+///
+/// [`greedy_match`] with the two per-GT policy masks as the named fields of
+/// [`GtMasks`], so a call site cannot transpose them.
 ///
 /// # Caller ordering contract
 /// - Detections are ordered **score-descending** — matching iterates in this order.
@@ -248,14 +251,10 @@ pub struct GreedyMatches {
 ///
 /// # The two per-GT policy masks
 ///
-/// `gt_rematchable` and `gt_phase2_eligible` are length `g` when present, and
-/// `None` is the **uniform** case: no GT is rematchable, and every GT is
-/// phase-2 eligible. Those are the values every non-crowd, non-OID caller would
-/// otherwise have to materialize — two `vec![_; g]` per matched cell, which on a
-/// COCO run is ~800k allocations per `evaluate()` to say "the usual". The scans
-/// are `T×D×G`, so `None` is resolved to an empty slice once here and the
-/// defaults are supplied by the `get`, rather than branching on an `Option` per
-/// probe.
+/// See [`GtMasks`] for what each mask means and why `None` is the uniform case.
+/// The scans are `T×D×G`, so `None` is resolved to an empty slice once here and
+/// the defaults are supplied by the `get`, rather than branching on an `Option`
+/// per probe.
 ///
 /// The matrix is flat (single allocation) rather than `sim`'s nested `[D][G]`
 /// because the matching loop is `T×D×G` and benefits from contiguous access.
@@ -267,32 +266,60 @@ pub struct GreedyMatches {
 /// # Algorithm (per IoU threshold, per detection in score order)
 /// Phase 1 scans non-ignored GTs for the highest-IoU available match `>= thr`.
 /// Only if phase 1 finds nothing does phase 2 scan the ignored GTs. A GT already
-/// matched is skipped unless `gt_rematchable[gi]` (crowd GTs, which multiple
+/// matched is skipped unless `masks.rematchable[gi]` (crowd GTs, which multiple
 /// detections may match). Phase 2 additionally skips any GT with
-/// `gt_phase2_eligible[gi] == false` (e.g. OID group-of, matched in a separate
+/// `masks.phase2_eligible[gi] == false` (e.g. OID group-of, matched in a separate
 /// driver pass). Among equal IoUs the later GT index wins — matching
 /// pycocotools' `>=` update rule, which is observable through `evalImgs`.
-pub fn greedy_match(
+///
+/// # Panics
+///
+/// If `iou_flat.len() != d * g`, if `num_gt_not_ignored > g`, or if a supplied
+/// mask is not exactly length `g`. (A short mask used to degrade to the uniform
+/// default from its end onward in release builds — a hybrid nothing intended.)
+pub fn greedy_match_masked(
     iou_flat: &[f64],
     d: usize,
     g: usize,
     num_gt_not_ignored: usize,
-    gt_rematchable: Option<&[bool]>,
-    gt_phase2_eligible: Option<&[bool]>,
+    masks: GtMasks<'_>,
     iou_thrs: &[f64],
 ) -> GreedyMatches {
+    assert_eq!(
+        iou_flat.len(),
+        d * g,
+        "greedy_match: iou_flat must be d*g row-major ({d}x{g} = {}, got {})",
+        d * g,
+        iou_flat.len()
+    );
+    assert!(
+        num_gt_not_ignored <= g,
+        "greedy_match: num_gt_not_ignored ({num_gt_not_ignored}) exceeds g ({g})"
+    );
+    for (name, mask) in [
+        ("rematchable", masks.rematchable),
+        ("phase2_eligible", masks.phase2_eligible),
+    ] {
+        if let Some(m) = mask {
+            assert_eq!(
+                m.len(),
+                g,
+                "greedy_match: {name} mask must have one entry per GT \
+                 (got {}, expected g = {g})",
+                m.len()
+            );
+        }
+    }
+
     let t = iou_thrs.len();
     let mut dt_gt = ThreshMatrix::new(t, d, None);
     let mut gt_matched = ThreshMatrix::new(t, g, false);
 
     // `None` becomes the empty slice; the `unwrap_or` defaults below carry its
-    // documented meaning. An index past the end reads as the default, so a mask
-    // shorter than `g` degrades to the uniform case rather than panicking —
-    // debug builds catch the caller instead.
-    let rematchable = gt_rematchable.unwrap_or(&[]);
-    let phase2_eligible = gt_phase2_eligible.unwrap_or(&[]);
-    debug_assert!(rematchable.is_empty() || rematchable.len() >= g);
-    debug_assert!(phase2_eligible.is_empty() || phase2_eligible.len() >= g);
+    // documented meaning (a supplied mask is asserted to length `g` above, so
+    // the `get` default is only ever reached through the `None` case).
+    let rematchable = masks.rematchable.unwrap_or(&[]);
+    let phase2_eligible = masks.phase2_eligible.unwrap_or(&[]);
 
     for (ti, &iou_thr) in iou_thrs.iter().enumerate() {
         // One row borrow per threshold keeps the T×D×G inner scans on plain
@@ -344,6 +371,38 @@ pub fn greedy_match(
     GreedyMatches { dt_gt, gt_matched }
 }
 
+/// [`greedy_match_masked`] with the two policy masks as positional parameters.
+///
+/// A thin delegating form kept so existing call sites keep compiling; the two
+/// adjacent `Option<&[bool]>` parameters are transposable, which is what
+/// [`GtMasks`] exists to prevent — prefer [`greedy_match_masked`] in new code.
+/// Same algorithm, same results, same panics.
+///
+/// # Panics
+///
+/// As [`greedy_match_masked`].
+pub fn greedy_match(
+    iou_flat: &[f64],
+    d: usize,
+    g: usize,
+    num_gt_not_ignored: usize,
+    gt_rematchable: Option<&[bool]>,
+    gt_phase2_eligible: Option<&[bool]>,
+    iou_thrs: &[f64],
+) -> GreedyMatches {
+    greedy_match_masked(
+        iou_flat,
+        d,
+        g,
+        num_gt_not_ignored,
+        GtMasks {
+            rematchable: gt_rematchable,
+            phase2_eligible: gt_phase2_eligible,
+        },
+        iou_thrs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,15 +448,19 @@ mod tests {
             let mut thrs: Vec<f64> = (0..rng.random_range(1..=4))
                 .map(|_| rng.random_range(0.0..=1.0))
                 .collect();
-            thrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            thrs.sort_by(f64::total_cmp);
 
-            let m = greedy_match(
+            // Exercise the struct-taking form here and the positional wrapper in
+            // `simple()` below, so both entry points stay covered.
+            let m = greedy_match_masked(
                 &iou_flat,
                 d,
                 g,
                 num_ni,
-                Some(&rematchable),
-                Some(&phase2),
+                GtMasks {
+                    rematchable: Some(&rematchable),
+                    phase2_eligible: Some(&phase2),
+                },
                 &thrs,
             );
             let ctx = format!("case {case}: d={d} g={g} num_ni={num_ni} thrs={thrs:?}");
@@ -505,7 +568,7 @@ mod tests {
             let phase2: Vec<bool> = (0..g).map(|_| rng.random_bool(0.8)).collect();
 
             let mut thrs: Vec<f64> = (0..2).map(|_| rng.random_range(0.0..=1.0)).collect();
-            thrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            thrs.sort_by(f64::total_cmp);
 
             let m = greedy_match(&iou, d, g, num_ni, Some(&rematchable), Some(&phase2), &thrs);
             let tp_at = |ti: usize| {
@@ -633,5 +696,67 @@ mod tests {
         // Two non-ignored GTs with identical IoU; pycocotools' `>=` picks the last.
         let m = simple(&[0.7, 0.7], 1, 2, 2, &[0.5]);
         assert_eq!(m.dt_gt[(0, 0)], Some(1));
+    }
+
+    /// The positional wrapper and the struct form are the same matcher.
+    #[test]
+    fn positional_wrapper_equals_struct_form() {
+        let iou = [0.9, 0.6, 0.4, 0.8];
+        let (d, g, num_ni) = (2, 2, 1);
+        let rematchable = [false, true];
+        let phase2 = [true, true];
+        let thrs = [0.5, 0.75];
+
+        let a = greedy_match(&iou, d, g, num_ni, Some(&rematchable), Some(&phase2), &thrs);
+        let b = greedy_match_masked(
+            &iou,
+            d,
+            g,
+            num_ni,
+            GtMasks {
+                rematchable: Some(&rematchable),
+                phase2_eligible: Some(&phase2),
+            },
+            &thrs,
+        );
+        for ti in 0..thrs.len() {
+            assert_eq!(a.dt_gt.row(ti), b.dt_gt.row(ti));
+            assert_eq!(a.gt_matched.row(ti), b.gt_matched.row(ti));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "iou_flat must be d*g")]
+    fn wrong_iou_matrix_length_panics() {
+        // 2x2 declared, 3 values supplied — one misaligned row of plausible IoUs.
+        greedy_match(&[0.9, 0.8, 0.7], 2, 2, 2, None, None, &[0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "num_gt_not_ignored")]
+    fn num_not_ignored_beyond_g_panics() {
+        greedy_match(&[0.9], 1, 1, 2, None, None, &[0.5]);
+    }
+
+    /// A short mask used to silently degrade to the uniform default from its end
+    /// onward in release builds; it is now asserted to exactly `g`.
+    #[test]
+    #[should_panic(expected = "rematchable mask")]
+    fn short_rematchable_mask_panics() {
+        greedy_match(&[0.9, 0.8], 1, 2, 2, Some(&[true]), None, &[0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "phase2_eligible mask")]
+    fn overlong_phase2_mask_panics() {
+        greedy_match(
+            &[0.9, 0.8],
+            1,
+            2,
+            1,
+            None,
+            Some(&[true, true, false]),
+            &[0.5],
+        );
     }
 }

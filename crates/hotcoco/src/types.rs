@@ -33,7 +33,7 @@ pub struct Info {
 }
 
 /// A single image in the dataset.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Image {
     pub id: u64,
     #[serde(default)]
@@ -54,10 +54,15 @@ pub struct Image {
     /// LVIS: categories not exhaustively checked in this image (unmatched DTs are ignored).
     #[serde(default)]
     pub not_exhaustive_category_ids: Vec<u64>,
+    /// Keys not in the COCO schema, preserved verbatim so
+    /// load → filter/split/merge → save round-trips user metadata
+    /// (pycocotools keeps unknown keys because it stores raw dicts).
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A single object annotation (ground truth or detection result).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Annotation {
     #[serde(default)]
     pub id: u64,
@@ -86,6 +91,11 @@ pub struct Annotation {
     /// rather than a single instance. Distinct from `iscrowd` — different matching semantics.
     #[serde(default)]
     pub is_group_of: Option<bool>,
+    /// Keys not in the COCO schema, preserved verbatim so
+    /// load → filter/split/merge → save round-trips user metadata
+    /// (pycocotools keeps unknown keys because it stores raw dicts).
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Deserialize `iscrowd` from either a boolean or an integer (0/1).
@@ -217,7 +227,7 @@ impl<'de> Deserialize<'de> for Segmentation {
 }
 
 /// An object category (e.g. "person", "car").
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Category {
     pub id: u64,
     pub name: String,
@@ -230,6 +240,11 @@ pub struct Category {
     /// LVIS frequency bucket: "r" (rare), "c" (common), "f" (frequent).
     #[serde(default)]
     pub frequency: Option<String>,
+    /// Keys not in the COCO schema, preserved verbatim so
+    /// load → filter/split/merge → save round-trips user metadata
+    /// (pycocotools keeps unknown keys because it stores raw dicts).
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Image license information.
@@ -253,20 +268,20 @@ pub struct Rle {
 }
 
 impl Rle {
-    /// Create a new RLE with a debug assertion that counts sum to `h * w`.
-    pub fn new(h: u32, w: u32, counts: Vec<u32>) -> Self {
+    /// Validated constructor: errors unless `counts` sums to exactly `h * w`.
+    ///
+    /// Validation happens in release builds too — use this at untrusted
+    /// boundaries. Internal code that produces RLEs it already knows to be
+    /// well-formed (the codecs in [`crate::mask`]) constructs the struct
+    /// directly instead; the fields stay public for that reason.
+    pub fn new(h: u32, w: u32, counts: Vec<u32>) -> crate::error::Result<Self> {
         let sum: u64 = counts.iter().map(|&c| c as u64).sum();
         let expected = h as u64 * w as u64;
-        debug_assert_eq!(
-            sum, expected,
-            "RLE counts must sum to h*w ({h} * {w} = {expected}), got {sum}",
-        );
-        Self { h, w, counts }
+        if sum != expected {
+            return Err(
+                format!("RLE counts must sum to h*w ({h} * {w} = {expected}), got {sum}").into(),
+            );
+        }
+        Ok(Self { h, w, counts })
     }
 }
-
-// `SummaryStats`, `CategoryStats`, and `DatasetStats` lived here before 1.0. They
-// describe what was *found* in a dataset rather than what a COCO file may contain,
-// so they moved to `crate::quality` alongside `COCO::stats` and the health checks,
-// leaving this module as schema only. Reachable as `hotcoco::SummaryStats` and
-// friends, unchanged.

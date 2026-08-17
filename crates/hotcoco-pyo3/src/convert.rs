@@ -22,6 +22,98 @@ macro_rules! req {
     };
 }
 
+/// The dict keys each record type owns. Any other key on an incoming dict is a
+/// custom key, preserved through the `extra` map (serde-flattened in the core
+/// types) so `load → filter → save` keeps user metadata the way pycocotools does.
+const ANNOTATION_KEYS: &[&str] = &[
+    "id",
+    "image_id",
+    "category_id",
+    "bbox",
+    "area",
+    "segmentation",
+    "iscrowd",
+    "keypoints",
+    "num_keypoints",
+    "obb",
+    "score",
+    "is_group_of",
+];
+const IMAGE_KEYS: &[&str] = &[
+    "id",
+    "file_name",
+    "height",
+    "width",
+    "license",
+    "coco_url",
+    "flickr_url",
+    "date_captured",
+    "neg_category_ids",
+    "not_exhaustive_category_ids",
+];
+const CATEGORY_KEYS: &[&str] = &[
+    "id",
+    "name",
+    "supercategory",
+    "skeleton",
+    "keypoints",
+    "frequency",
+];
+
+/// Collect every key of `dict` not in `known` into a JSON map.
+///
+/// Goes through Python's `json.dumps` in one call per record rather than a
+/// hand-rolled per-value converter: the values are arbitrary user objects, and
+/// `json` already defines exactly which of those a COCO file can hold. A
+/// non-serializable value raises the stdlib's own `TypeError`, naming the type.
+fn extract_extra(
+    dict: &Bound<'_, PyDict>,
+    known: &[&str],
+) -> PyResult<serde_json::Map<String, serde_json::Value>> {
+    let py = dict.py();
+    let mut extras: Option<Bound<'_, PyDict>> = None;
+    for (k, v) in dict {
+        let Ok(key) = k.extract::<String>() else {
+            continue; // non-string keys cannot appear in COCO JSON
+        };
+        if known.contains(&key.as_str()) {
+            continue;
+        }
+        extras
+            .get_or_insert_with(|| PyDict::new(py))
+            .set_item(key, v)?;
+    }
+    let Some(extras) = extras else {
+        return Ok(serde_json::Map::new());
+    };
+    let json_str: String = py
+        .import("json")?
+        .call_method1("dumps", (extras,))?
+        .extract()?;
+    match serde_json::from_str(&json_str) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "custom keys did not round-trip through JSON",
+        )),
+    }
+}
+
+/// Merge a record's `extra` map back into its outgoing Python dict.
+fn merge_extra(
+    dict: &Bound<'_, PyDict>,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> PyResult<()> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    let py = dict.py();
+    let extras = crate::serde_to_py(py, extra)?;
+    for (k, v) in extras.bind(py).cast::<PyDict>()? {
+        dict.set_item(k, v)?;
+    }
+    Ok(())
+}
+
 pub fn annotation_to_py(py: Python<'_>, ann: &Annotation) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("id", ann.id)?;
@@ -52,6 +144,7 @@ pub fn annotation_to_py(py: Python<'_>, ann: &Annotation) -> PyResult<Py<PyAny>>
     if let Some(is_group_of) = ann.is_group_of {
         dict.set_item("is_group_of", is_group_of)?;
     }
+    merge_extra(&dict, &ann.extra)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -103,6 +196,7 @@ pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
     let obb: Option<[f64; 5]> = opt!(dict, "obb");
     let score: Option<f64> = opt!(dict, "score");
     let is_group_of: Option<bool> = opt!(dict, "is_group_of");
+    let extra = extract_extra(dict, ANNOTATION_KEYS)?;
 
     Ok(Annotation {
         id,
@@ -117,6 +211,7 @@ pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
         obb,
         score,
         is_group_of,
+        extra,
     })
 }
 
@@ -165,6 +260,7 @@ pub fn image_to_py(py: Python<'_>, img: &Image) -> PyResult<Py<PyAny>> {
             img.not_exhaustive_category_ids.clone(),
         )?;
     }
+    merge_extra(&dict, &img.extra)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -185,6 +281,7 @@ pub fn category_to_py(py: Python<'_>, cat: &Category) -> PyResult<Py<PyAny>> {
     if let Some(ref freq) = cat.frequency {
         dict.set_item("frequency", freq)?;
     }
+    merge_extra(&dict, &cat.extra)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -225,14 +322,6 @@ pub fn dataset_stats_to_py(py: Python<'_>, stats: &DatasetStats) -> PyResult<Py<
     dict.set_item("image_height", summary_to_dict(&stats.image_height)?)?;
     dict.set_item("annotation_area", summary_to_dict(&stats.annotation_area)?)?;
 
-    Ok(dict.into_any().unbind())
-}
-
-pub fn rle_to_py(py: Python<'_>, rle: &Rle) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    dict.set_item("h", rle.h)?;
-    dict.set_item("w", rle.w)?;
-    dict.set_item("counts", rle.counts.clone())?;
     Ok(dict.into_any().unbind())
 }
 
@@ -310,6 +399,7 @@ pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
     let neg_category_ids: Vec<u64> = opt!(dict, "neg_category_ids").unwrap_or_default();
     let not_exhaustive_category_ids: Vec<u64> =
         opt!(dict, "not_exhaustive_category_ids").unwrap_or_default();
+    let extra = extract_extra(dict, IMAGE_KEYS)?;
 
     Ok(Image {
         id,
@@ -322,6 +412,7 @@ pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
         date_captured,
         neg_category_ids,
         not_exhaustive_category_ids,
+        extra,
     })
 }
 
@@ -332,6 +423,7 @@ pub fn py_to_category(dict: &Bound<'_, PyDict>) -> PyResult<Category> {
     let skeleton: Option<Vec<[u32; 2]>> = opt!(dict, "skeleton");
     let keypoints: Option<Vec<String>> = opt!(dict, "keypoints");
     let frequency: Option<String> = opt!(dict, "frequency");
+    let extra = extract_extra(dict, CATEGORY_KEYS)?;
 
     Ok(Category {
         id,
@@ -340,6 +432,7 @@ pub fn py_to_category(dict: &Bound<'_, PyDict>) -> PyResult<Category> {
         skeleton,
         keypoints,
         frequency,
+        extra,
     })
 }
 
@@ -410,16 +503,9 @@ pub fn calibration_bin_to_py<'py>(
 
 /// A flat `(side, side)` block of confusion counts as a numpy `uint64` array.
 ///
-/// Shared by `COCOeval.confusion_matrix()` and `metrics.confusion_matrix()`.
-/// Both marshal the same `(K+1)²` flat `Vec<u64>` from
-/// `metrics::confusion`, and each reshaped it its own way: the `metrics`
-/// function used a typed `reshape`, while the `COCOeval` method first cast
-/// every count to `i64` and reshaped through `call_method1("reshape", ...)`.
-/// So the same counts reached Python as `int64` from one entry point and
-/// `uint64` from the other — a difference a caller hits when concatenating
-/// the two, or comparing dtypes. `uint64` is the counts' natural type and now
-/// the only one; **the `COCOeval.confusion_matrix()` site previously emitted
-/// `int64`**.
+/// The one marshaling site for `COCOeval.confusion_matrix()` and
+/// `metrics.confusion_matrix()`, so both entry points emit the same dtype —
+/// `uint64`, the counts' natural type.
 pub fn confusion_counts_to_py(
     py: Python<'_>,
     counts: Vec<u64>,
@@ -431,15 +517,9 @@ pub fn confusion_counts_to_py(
 
 /// A flat `Vec<f64>` as a numpy `float64` array of the given shape.
 ///
-/// The typed counterpart to [`confusion_counts_to_py`], for the sites that
-/// reshape a flat float buffer. Those went through
-/// `call_method1("reshape", ((a, b),))`, which builds a tuple, looks the method
-/// up by name, and returns an untyped `PyAny` — so a dimension mismatch
-/// surfaced as a Python `ValueError` from numpy rather than a typed error, and
-/// nothing in the signature said the result was an array at all.
-/// `PyArray1::reshape` takes the dims as a Rust array and keeps the numpy type
-/// through the call. Generic over the shape rather than the rank, so `[k, k]`,
-/// `[t, k, a, m]` and `[t, r, k, a, m]` all use the same helper.
+/// The typed counterpart to [`confusion_counts_to_py`] for the sites that
+/// reshape a flat float buffer. Generic over the shape rather than the rank, so
+/// `[k, k]`, `[t, k, a, m]` and `[t, r, k, a, m]` all use the same helper.
 pub fn f64_array<D: numpy::ndarray::IntoDimension>(
     py: Python<'_>,
     values: Vec<f64>,

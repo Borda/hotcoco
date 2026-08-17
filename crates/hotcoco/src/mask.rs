@@ -16,13 +16,31 @@ use crate::types::Rle;
 
 pub use crate::primitives::sim::{bbox_iou, mask_iou as iou};
 
+/// Total pixel count `h * w`, or an error when it exceeds `u32::MAX`.
+///
+/// RLE run counts are 32-bit (matching the C `maskApi`), so a mask with more
+/// than `u32::MAX` pixels is unrepresentable. Dimensions arrive here straight
+/// from untrusted JSON, where computing `h * w` in `u32` used to overflow —
+/// a debug panic, silently wrapped garbage in release.
+fn checked_hw(h: u32, w: u32) -> crate::error::Result<u32> {
+    let hw = h as u64 * w as u64;
+    u32::try_from(hw).map_err(|_| {
+        crate::error::Error::from(format!(
+            "image dimensions {h}x{w} = {hw} pixels exceed u32::MAX (RLE run counts are 32-bit)"
+        ))
+    })
+}
+
 /// Encode a column-major binary mask into RLE.
 ///
 /// `mask` is stored in column-major order (Fortran order): pixel (x, y) is at index `y + h * x`.
-/// Length must be `h * w`.
-pub fn encode(mask: &[u8], h: u32, w: u32) -> Rle {
-    let n = (h as usize) * (w as usize);
-    assert_eq!(mask.len(), n, "mask length must equal h*w");
+///
+/// Errors when `mask.len() != h * w`, or when `h * w` exceeds `u32::MAX`.
+pub fn encode(mask: &[u8], h: u32, w: u32) -> crate::error::Result<Rle> {
+    let n = checked_hw(h, w)? as usize;
+    if mask.len() != n {
+        return Err(format!("encode: mask length {} must equal h*w = {n}", mask.len()).into());
+    }
 
     let mut counts = Vec::with_capacity(h.min(w) as usize * 2);
     let mut p: u8 = 0;
@@ -39,7 +57,7 @@ pub fn encode(mask: &[u8], h: u32, w: u32) -> Rle {
     }
     counts.push(c);
 
-    Rle { h, w, counts }
+    Ok(Rle { h, w, counts })
 }
 
 /// Decode an RLE to a column-major binary mask of size `h * w`.
@@ -88,7 +106,10 @@ pub fn to_bbox(rle: &Rle) -> [f64; 4] {
     let mut cc = 0usize; // cumulative pixel count (column-major flat index)
     for (i, &c) in rle.counts.iter().enumerate() {
         let c = c as usize;
-        if i % 2 == 1 {
+        // Skip zero-length foreground runs: they contribute no pixels, and
+        // `cc + c - 1` below would underflow on one (untrusted RLE strings can
+        // legally decode to zero-length runs).
+        if i % 2 == 1 && c > 0 {
             // Foreground run: convert flat indices to (column, row) coordinates
             has_any = true;
             let x1 = cc / h; // start column
@@ -126,20 +147,33 @@ pub fn to_bbox(rle: &Rle) -> [f64; 4] {
 }
 
 /// Merge multiple RLE masks with union (intersect=false) or intersection (intersect=true).
-pub fn merge(rles: &[Rle], intersect: bool) -> Rle {
+///
+/// Errors when the masks do not all share the same dimensions (the result
+/// would silently be stamped with the first mask's dims), or when `h * w`
+/// exceeds `u32::MAX`.
+pub fn merge(rles: &[Rle], intersect: bool) -> crate::error::Result<Rle> {
     if rles.is_empty() {
-        return Rle {
+        return Ok(Rle {
             h: 0,
             w: 0,
             counts: vec![0],
-        };
-    }
-    if rles.len() == 1 {
-        return rles[0].clone();
+        });
     }
 
     let h = rles[0].h;
     let w = rles[0].w;
+    checked_hw(h, w)?;
+    if let Some(bad) = rles[1..].iter().find(|r| r.h != h || r.w != w) {
+        return Err(format!(
+            "merge: mismatched RLE dimensions — first mask is {h}x{w}, another is {}x{}",
+            bad.h, bad.w
+        )
+        .into());
+    }
+
+    if rles.len() == 1 {
+        return Ok(rles[0].clone());
+    }
 
     // Merge pairwise
     let mut result = rles[0].clone();
@@ -149,7 +183,7 @@ pub fn merge(rles: &[Rle], intersect: bool) -> Rle {
     // Ensure h/w stay correct
     result.h = h;
     result.w = w;
-    result
+    Ok(result)
 }
 
 /// Merge two RLE masks using a two-pointer walk over both run streams.
@@ -196,6 +230,10 @@ fn merge_two(a: &Rle, b: &Rle, intersect: bool) -> Rle {
         } else {
             break;
         };
+        // The output represents exactly `n` pixels; cap the step so run counts
+        // (including coalesced sums) stay within `n ≤ u32::MAX` even when an
+        // unvalidated input's counts over-run its own `h * w`.
+        let step = step.min(n - total);
 
         let v = if intersect { va && vb } else { va || vb };
 
@@ -298,8 +336,14 @@ pub(crate) fn intersection_area(a: &Rle, b: &Rle) -> u64 {
 /// Faithful port of `rleFrPoly` from maskApi.c.
 /// Uses upsampling by 5x, Bresenham-like edge walking, y-boundary detection,
 /// and differential RLE encoding — exactly matching the C implementation.
-pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> Rle {
-    POLY_SCRATCH.with(|s| fr_poly_impl(&mut s.borrow_mut(), xy, h, w))
+///
+/// Errors when `h * w` exceeds `u32::MAX`. Coordinates far outside the image
+/// (beyond one image-extent past its edges) are clamped — they cannot place
+/// pixels inside the image, but unclamped they overflow the rasterizer's
+/// integer edge walk.
+pub fn fr_poly(xy: &[f64], h: u32, w: u32) -> crate::error::Result<Rle> {
+    let hw = checked_hw(h, w)?;
+    Ok(POLY_SCRATCH.with(|s| fr_poly_impl(&mut s.borrow_mut(), xy, h, w, hw)))
 }
 
 /// Reusable buffers for [`fr_poly`]'s three rasterization stages.
@@ -325,13 +369,13 @@ thread_local! {
         std::cell::RefCell::new(PolyScratch::default());
 }
 
-fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32) -> Rle {
+fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32, hw: u32) -> Rle {
     let k = xy.len() / 2;
     if k < 3 {
         return Rle {
             h,
             w,
-            counts: vec![(h * w)],
+            counts: vec![hw],
         };
     }
 
@@ -347,9 +391,18 @@ fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32) -> Rle {
     y_int.clear();
     x_int.reserve(k + 1);
     y_int.reserve(k + 1);
+    // Clamp upsampled vertices to one image-extent beyond the image (with an
+    // absolute i32-safe ceiling). Stage 2 only emits column crossings inside
+    // [0, w), so real annotations — which sit inside the image give or take a
+    // few pixels — rasterize identically; untrusted coordinates like ±1e9
+    // would otherwise overflow the i32 edge subtractions below (a debug
+    // panic) and reserve multi-GB boundary buffers. Float-to-int casts
+    // saturate and NaN casts to 0, so no coordinate value can panic here.
+    let clamp_x = (2.0 * scale * (w as f64 + 1.0)).min((i32::MAX / 4) as f64);
+    let clamp_y = (2.0 * scale * (h as f64 + 1.0)).min((i32::MAX / 4) as f64);
     for j in 0..k {
-        x_int.push((scale * xy[j * 2] + 0.5) as i32);
-        y_int.push((scale * xy[j * 2 + 1] + 0.5) as i32);
+        x_int.push((scale * xy[j * 2] + 0.5).clamp(-clamp_x, clamp_x) as i32);
+        y_int.push((scale * xy[j * 2 + 1] + 0.5).clamp(-clamp_y, clamp_y) as i32);
     }
     // Close the polygon by repeating the first vertex
     x_int.push(x_int[0]);
@@ -399,19 +452,13 @@ fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32) -> Rle {
             (xe - xs) as f64 / dy as f64
         };
         // `mul_add`, not `a + s * t`, to reproduce the reference's arithmetic.
-        //
-        // maskApi.c writes `(int)(ys+s*t+.5)`, and both clang and gcc default to
+        // maskApi.c writes `(int)(ys+s*t+.5)`, and clang/gcc default to
         // `-ffp-contract=fast`, so every shipped pycocotools wheel fuses `s*t+ys`
         // into a single FMA — one rounding where the unfused form has two. Rust
-        // never contracts implicitly, so the plain expression is a *more accurate*
-        // computation that disagrees with the reference.
-        //
-        // It bites rarely and only at a boundary: with `s = -5/6`, `t = 57`,
-        // `ys = 75` the product lands a hair either side of `-47.5`, so the two
-        // forms round to 28 and 27 and the rasterized polygon differs by one
-        // pixel. Two of 400 random polygons hit it. COCO ground-truth
-        // segmentations are polygons, so this path builds every segm GT mask —
-        // `mul_add` is what makes segmentation parity exact rather than close.
+        // never contracts implicitly, so the plain (more accurate) expression can
+        // round a boundary pixel the other way (~2 of 400 random polygons). This
+        // path builds every segm GT mask, so `mul_add` is what makes segmentation
+        // parity exact rather than close.
         if dx >= dy {
             // Step along x, interpolate y
             for d in 0..=dx {
@@ -465,7 +512,7 @@ fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32) -> Rle {
     // then merge any zero-length runs (which arise when two boundary points land on
     // the same pixel).
     // Sentinel: total pixel count marks the end of the mask
-    a.push(h * w);
+    a.push(hw);
     a.sort_unstable();
 
     // Convert sorted positions to run lengths via successive differences
@@ -505,7 +552,12 @@ fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32) -> Rle {
 ///
 /// Computes column-major RLE counts analytically from bbox coordinates
 /// without allocating a full pixel mask.
-pub fn fr_bbox(bb: &[f64; 4], h: u32, w: u32) -> Rle {
+///
+/// Errors when `h * w` exceeds `u32::MAX`. Box coordinates are clamped to the
+/// image; non-finite or out-of-range values produce an empty mask (the
+/// float-to-int casts saturate, and NaN casts to 0).
+pub fn fr_bbox(bb: &[f64; 4], h: u32, w: u32) -> crate::error::Result<Rle> {
+    let hw = checked_hw(h, w)?;
     let bx = bb[0];
     let by = bb[1];
     let bw = bb[2];
@@ -518,11 +570,11 @@ pub fn fr_bbox(bb: &[f64; 4], h: u32, w: u32) -> Rle {
     let ye = ((by + bh).ceil() as u32).min(h);
 
     if xs >= xe || ys >= ye {
-        return Rle {
+        return Ok(Rle {
             h,
             w,
-            counts: vec![h * w],
-        };
+            counts: vec![hw],
+        });
     }
 
     // In column-major order, each column within [xs, xe) has the pattern:
@@ -532,7 +584,8 @@ pub fn fr_bbox(bb: &[f64; 4], h: u32, w: u32) -> Rle {
     let col_ones = ye - ys;
     let num_cols = xe - xs;
 
-    let mut counts = Vec::with_capacity((2 * num_cols + 2) as usize);
+    // Capacity math in usize: `2 * num_cols` can exceed u32 when w > 2^31.
+    let mut counts = Vec::with_capacity(2 * num_cols as usize + 2);
 
     // Leading zeros before first foreground pixel
     let leading = xs * h + ys;
@@ -566,7 +619,7 @@ pub fn fr_bbox(bb: &[f64; 4], h: u32, w: u32) -> Rle {
         }
     }
 
-    Rle { h, w, counts }
+    Ok(Rle { h, w, counts })
 }
 
 /// Compress an RLE into the LEB128-like string format used by COCO.
@@ -635,6 +688,17 @@ pub fn rle_from_string(s: &str, h: u32, w: u32) -> crate::error::Result<Rle> {
                 )
                 .into());
             }
+            // Bound the LEB-style shift: any valid u32 run length — even
+            // delta-encoded, hence possibly negative — fits well within 11
+            // five-bit groups. Untrusted strings with endless continuation
+            // bits used to grow `shift` past 63 and overflow the `<<` below
+            // (a debug panic, a masked shift in release).
+            if shift > 55 {
+                return Err(format!(
+                    "invalid RLE: run length at byte {i} has too many continuation characters"
+                )
+                .into());
+            }
             let c = (bytes[i] - 48) as i64;
             i += 1;
             x |= (c & 0x1f) << shift;
@@ -656,6 +720,15 @@ pub fn rle_from_string(s: &str, h: u32, w: u32) -> crate::error::Result<Rle> {
             )
             .into());
         }
+        // Validate before narrowing: `as u32` would silently truncate, letting
+        // an oversized run wrap and pass the total-vs-h*w check below.
+        if x > u32::MAX as i64 {
+            return Err(format!(
+                "invalid RLE: count {x} at position {} exceeds u32::MAX",
+                counts.len()
+            )
+            .into());
+        }
         counts.push(x as u32);
     }
 
@@ -673,15 +746,21 @@ pub fn rle_from_string(s: &str, h: u32, w: u32) -> crate::error::Result<Rle> {
 ///
 /// This corresponds to what pycocotools does when converting polygon segmentation:
 /// rasterize each polygon separately, then merge all with union.
-pub fn fr_polys(polygons: &[Vec<f64>], h: u32, w: u32) -> Rle {
+///
+/// Errors when `h * w` exceeds `u32::MAX` (see [`fr_poly`]).
+pub fn fr_polys(polygons: &[Vec<f64>], h: u32, w: u32) -> crate::error::Result<Rle> {
+    let hw = checked_hw(h, w)?;
     if polygons.is_empty() {
-        return Rle {
+        return Ok(Rle {
             h,
             w,
-            counts: vec![h * w],
-        };
+            counts: vec![hw],
+        });
     }
-    let rles: Vec<Rle> = polygons.iter().map(|p| fr_poly(p, h, w)).collect();
+    let rles: Vec<Rle> = polygons
+        .iter()
+        .map(|p| fr_poly(p, h, w))
+        .collect::<crate::error::Result<_>>()?;
     merge(&rles, false)
 }
 
@@ -693,7 +772,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         let mask = vec![0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0];
-        let rle = encode(&mask, 3, 4);
+        let rle = encode(&mask, 3, 4).unwrap();
         let decoded = decode(&rle);
         assert_eq!(mask, decoded);
     }
@@ -701,21 +780,21 @@ mod tests {
     #[test]
     fn test_encode_all_zeros() {
         let mask = vec![0u8; 12];
-        let rle = encode(&mask, 3, 4);
+        let rle = encode(&mask, 3, 4).unwrap();
         assert_eq!(rle.counts, vec![12]);
     }
 
     #[test]
     fn test_encode_all_ones() {
         let mask = vec![1u8; 12];
-        let rle = encode(&mask, 3, 4);
+        let rle = encode(&mask, 3, 4).unwrap();
         assert_eq!(rle.counts, vec![0, 12]);
     }
 
     #[test]
     fn test_area() {
         let mask = vec![0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0];
-        let rle = encode(&mask, 3, 4);
+        let rle = encode(&mask, 3, 4).unwrap();
         assert_eq!(area(&rle), 5);
     }
 
@@ -724,7 +803,7 @@ mod tests {
         // 3 rows x 4 cols, column-major
         // Col 0: [0,0,0], Col 1: [1,1,1], Col 2: [0,0,1], Col 3: [1,0,0]
         let mask = vec![0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0];
-        let rle = encode(&mask, 3, 4);
+        let rle = encode(&mask, 3, 4).unwrap();
         let bb = to_bbox(&rle);
         // x_min=1 (col 1), y_min=0 (row 0 in col 1), width=3, height=3
         assert_eq!(bb[0], 1.0);
@@ -738,9 +817,9 @@ mod tests {
         // Two masks
         let m1 = vec![0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0];
         let m2 = vec![0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0];
-        let r1 = encode(&m1, 3, 4);
-        let r2 = encode(&m2, 3, 4);
-        let merged = merge(&[r1, r2], false);
+        let r1 = encode(&m1, 3, 4).unwrap();
+        let r2 = encode(&m2, 3, 4).unwrap();
+        let merged = merge(&[r1, r2], false).unwrap();
         let decoded = decode(&merged);
         let expected = vec![0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0];
         assert_eq!(decoded, expected);
@@ -750,9 +829,9 @@ mod tests {
     fn test_merge_intersection() {
         let m1 = vec![0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0];
         let m2 = vec![0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0];
-        let r1 = encode(&m1, 3, 4);
-        let r2 = encode(&m2, 3, 4);
-        let merged = merge(&[r1, r2], true);
+        let r1 = encode(&m1, 3, 4).unwrap();
+        let r2 = encode(&m2, 3, 4).unwrap();
+        let merged = merge(&[r1, r2], true).unwrap();
         let decoded = decode(&merged);
         let expected = vec![0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0];
         assert_eq!(decoded, expected);
@@ -762,8 +841,8 @@ mod tests {
     fn test_iou_basic() {
         let m1 = vec![0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0];
         let m2 = vec![0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0];
-        let r1 = encode(&m1, 3, 4);
-        let r2 = encode(&m2, 3, 4);
+        let r1 = encode(&m1, 3, 4).unwrap();
+        let r2 = encode(&m2, 3, 4).unwrap();
         let ious = iou(&[r1], &[r2], &[false]);
         // intersection = 2, union = 3 + 3 - 2 = 4
         assert!((ious[0][0] - 0.5).abs() < 1e-10);
@@ -863,7 +942,7 @@ mod tests {
 
     #[test]
     fn test_fr_bbox() {
-        let rle = fr_bbox(&[1.0, 1.0, 2.0, 2.0], 5, 5);
+        let rle = fr_bbox(&[1.0, 1.0, 2.0, 2.0], 5, 5).unwrap();
         let mask = decode(&rle);
         // Column-major, 5x5
         // Col 0: [0,0,0,0,0], Col 1: [0,1,1,0,0], Col 2: [0,1,1,0,0], Col 3-4: zeros
@@ -882,7 +961,7 @@ mod tests {
         // Simple triangle in a 10x10 image
         // Vertices: (2,2), (7,2), (4,7)
         let poly = vec![2.0, 2.0, 7.0, 2.0, 4.0, 7.0];
-        let rle = fr_poly(&poly, 10, 10);
+        let rle = fr_poly(&poly, 10, 10).unwrap();
         let a = area(&rle);
         // pycocotools gives area=12 for this triangle
         assert_eq!(a, 12, "Triangle area should match pycocotools");
@@ -912,7 +991,7 @@ mod tests {
             187.51, 417.96, 178.43, 420.68, 167.99, 420.68, 163.45, 418.41, 158.01, 419.32, 148.47,
             418.41, 145.3, 413.88, 146.66, 402.53,
         ];
-        let rle = fr_poly(&poly, 612, 612);
+        let rle = fr_poly(&poly, 612, 612).unwrap();
         let a = area(&rle);
         assert!(
             (a as i64 - 79002).abs() <= 2,
@@ -926,8 +1005,8 @@ mod tests {
     /// (not `if`) to skip these, otherwise IoU computes incorrectly.
     #[test]
     fn test_iou_bbox_at_origin() {
-        let r1 = fr_bbox(&[0.0, 0.0, 10.0, 10.0], 20, 20);
-        let r2 = fr_bbox(&[0.0, 0.0, 10.0, 10.0], 20, 20);
+        let r1 = fr_bbox(&[0.0, 0.0, 10.0, 10.0], 20, 20).unwrap();
+        let r2 = fr_bbox(&[0.0, 0.0, 10.0, 10.0], 20, 20).unwrap();
         // Identical masks → IoU = 1.0
         let ious = iou(
             std::slice::from_ref(&r1),
@@ -941,7 +1020,7 @@ mod tests {
         );
 
         // Partially overlapping at origin
-        let r3 = fr_bbox(&[0.0, 0.0, 5.0, 10.0], 20, 20);
+        let r3 = fr_bbox(&[0.0, 0.0, 5.0, 10.0], 20, 20).unwrap();
         let ious2 = iou(
             std::slice::from_ref(&r3),
             std::slice::from_ref(&r1),
@@ -964,13 +1043,13 @@ mod tests {
     /// Regression test: merge of masks at origin (0-length initial runs).
     #[test]
     fn test_merge_bbox_at_origin() {
-        let r1 = fr_bbox(&[0.0, 0.0, 10.0, 10.0], 20, 20);
-        let r2 = fr_bbox(&[5.0, 0.0, 10.0, 10.0], 20, 20);
+        let r1 = fr_bbox(&[0.0, 0.0, 10.0, 10.0], 20, 20).unwrap();
+        let r2 = fr_bbox(&[5.0, 0.0, 10.0, 10.0], 20, 20).unwrap();
         // Union area = 15*10 = 150
-        let union = merge(&[r1.clone(), r2.clone()], false);
+        let union = merge(&[r1.clone(), r2.clone()], false).unwrap();
         assert_eq!(area(&union), 150, "Union of overlapping origin masks");
         // Intersection area = 5*10 = 50
-        let inter = merge(&[r1, r2], true);
+        let inter = merge(&[r1, r2], true).unwrap();
         assert_eq!(area(&inter), 50, "Intersection of overlapping origin masks");
     }
 
@@ -978,7 +1057,7 @@ mod tests {
     fn test_fr_poly_rect_nonsquare() {
         // 40x40 rectangle in a 200h x 100w image
         let poly = vec![10.0, 10.0, 50.0, 10.0, 50.0, 50.0, 10.0, 50.0];
-        let rle = fr_poly(&poly, 200, 100);
+        let rle = fr_poly(&poly, 200, 100).unwrap();
         let a = area(&rle);
         // pycocotools gives area=1600 for this rect
         assert_eq!(a, 1600, "Rect area should match pycocotools");

@@ -16,29 +16,56 @@
 //! document why.
 //!
 
+/// One sampled point on a precision-recall curve.
+///
+/// Named fields instead of the former `(usize, f64, usize)` tuple: two
+/// same-typed indices with different meanings were one transposition away from
+/// a silent bug at every call site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrPoint {
+    /// Index into the `rec_thrs` grid this point samples.
+    pub rec_thr_idx: usize,
+    /// Interpolated precision at that recall threshold.
+    pub precision: f64,
+    /// Detection rank (index into the score-descending ordering) at which the
+    /// threshold is first met — lets the caller recover the sorted score there.
+    pub detection_rank: usize,
+}
+
 /// Precision interpolated at fixed recall thresholds, from cumulative TP/FP.
 ///
 /// `tp_cum` and `fp_cum` must already be cumulative (prefix-summed) over
 /// detections sorted by score descending. Returns:
 /// - the final recall achieved (`tp_cum[nd-1] / num_gt`);
-/// - for each recall threshold that is reached, `(threshold_idx, precision,
-///   detection_ptr)`, where `detection_ptr` is the rank at which the threshold is
-///   first met (lets the caller recover the corresponding sorted score).
+/// - one [`PrPoint`] for each recall threshold that is reached.
 ///
 /// Unreachable recall thresholds are omitted. Precision is made monotonically
 /// non-increasing right-to-left before sampling (PASCAL VOC interpolation),
 /// matching pycocotools.
+///
+/// # Panics
+///
+/// If `tp_cum` and `fp_cum` have different lengths.
 pub fn precision_recall_curve(
     tp_cum: &[f64],
     fp_cum: &[f64],
     num_gt: usize,
     rec_thrs: &[f64],
-) -> (f64, Vec<(usize, f64, usize)>) {
+) -> (f64, Vec<PrPoint>) {
     let mut scratch = PrCurveScratch::default();
     let mut out = Vec::new();
     let final_recall =
         precision_recall_curve_into(tp_cum, fp_cum, num_gt, rec_thrs, &mut scratch, &mut out);
-    (final_recall, out)
+    (
+        final_recall,
+        out.iter()
+            .map(|&(rec_thr_idx, precision, detection_rank)| PrPoint {
+                rec_thr_idx,
+                precision,
+                detection_rank,
+            })
+            .collect(),
+    )
 }
 
 /// Reusable working buffers for [`precision_recall_curve_into`].
@@ -57,8 +84,14 @@ pub struct PrCurveScratch {
 ///
 /// Same computation, same values, same emission order — the only difference is
 /// that the two `nd`-long working vectors and the output vector are supplied
-/// rather than allocated. `out` is cleared first, so the result is exactly the
-/// `Vec` the allocating form returns; the return value is its `final_recall`.
+/// rather than allocated. `out` is cleared first; each emitted tuple is
+/// `(rec_thr_idx, precision, detection_rank)` — the fields of [`PrPoint`], as a
+/// plain tuple so the hot accumulator's reusable buffer stays a flat `Vec`. The
+/// return value is `final_recall`.
+///
+/// # Panics
+///
+/// If `tp_cum` and `fp_cum` have different lengths.
 ///
 /// `detection::accumulate` runs this `T` times per (category, area range,
 /// max_det) cell — on COCO val that is ~10,000 calls per `accumulate()` and
@@ -73,6 +106,15 @@ pub fn precision_recall_curve_into(
     out: &mut Vec<(usize, f64, usize)>,
 ) -> f64 {
     out.clear();
+
+    assert_eq!(
+        tp_cum.len(),
+        fp_cum.len(),
+        "precision_recall_curve: tp_cum and fp_cum must be parallel arrays \
+         (got {} vs {})",
+        tp_cum.len(),
+        fp_cum.len()
+    );
 
     let nd = tp_cum.len();
     if nd == 0 || num_gt == 0 {
@@ -153,7 +195,24 @@ pub fn cumulative_tp_fp(
 /// Mean interpolated precision over `rec_thrs` — the tail every AP path shares.
 fn mean_precision(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize, rec_thrs: &[f64]) -> f64 {
     let (_, curve) = precision_recall_curve(tp_cum, fp_cum, num_gt, rec_thrs);
-    curve.iter().map(|&(_, prec, _)| prec).sum::<f64>() / rec_thrs.len() as f64
+    curve.iter().map(|p| p.precision).sum::<f64>() / rec_thrs.len() as f64
+}
+
+/// AP of one explicit ranking — the body [`average_precision`] and
+/// [`average_precision_ranked`] shared line-for-line before deduplication.
+/// `order` visits indices into `matched`/`ignored` score-descending.
+fn average_precision_of_order(
+    order: impl IntoIterator<Item = usize>,
+    nd: usize,
+    matched: &[bool],
+    ignored: Option<&[bool]>,
+    num_gt: usize,
+    rec_thrs: &[f64],
+) -> f64 {
+    let mut tp_cum = Vec::with_capacity(nd);
+    let mut fp_cum = Vec::with_capacity(nd);
+    cumulative_tp_fp(order, matched, ignored, &mut tp_cum, &mut fp_cum);
+    mean_precision(&tp_cum, &fp_cum, num_gt, rec_thrs)
 }
 
 /// Average precision over `rec_thrs`, from per-detection match flags.
@@ -171,6 +230,15 @@ fn mean_precision(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize, rec_thrs: &[f64
 /// Returns `0.0` when there are no detections or no ground truth — but see the
 /// [module note](self) on empty-set conventions: a caller that wants a different
 /// answer for `num_gt == 0` must guard before calling.
+///
+/// The sort is total ([`f64::total_cmp`], reversed), so `NaN` scores order
+/// deterministically — positive `NaN` above every number, negative `NaN` below —
+/// instead of feeding std's sort a non-total order, which may panic (Rust ≥ 1.81)
+/// or silently scramble the ranking.
+///
+/// # Panics
+///
+/// If `matched` (or `ignored`, when supplied) is not the same length as `scores`.
 pub fn average_precision(
     scores: &[f64],
     matched: &[bool],
@@ -178,29 +246,33 @@ pub fn average_precision(
     num_gt: usize,
     rec_thrs: &[f64],
 ) -> f64 {
+    assert_eq!(
+        scores.len(),
+        matched.len(),
+        "average_precision: scores and matched must be parallel arrays (got {} vs {})",
+        scores.len(),
+        matched.len()
+    );
+    if let Some(ig) = ignored {
+        assert_eq!(
+            scores.len(),
+            ig.len(),
+            "average_precision: scores and ignored must be parallel arrays (got {} vs {})",
+            scores.len(),
+            ig.len()
+        );
+    }
+
     let nd = scores.len();
     if nd == 0 || num_gt == 0 || rec_thrs.is_empty() {
         return 0.0;
     }
 
     let mut order: Vec<usize> = (0..nd).collect();
-    order.sort_by(|&a, &b| {
-        scores[b]
-            .partial_cmp(&scores[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Descending, NaN-total: reversed total_cmp. Stable, so ties keep input order.
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
 
-    let mut tp_cum = Vec::with_capacity(nd);
-    let mut fp_cum = Vec::with_capacity(nd);
-    cumulative_tp_fp(
-        order.iter().copied(),
-        matched,
-        ignored,
-        &mut tp_cum,
-        &mut fp_cum,
-    );
-
-    mean_precision(&tp_cum, &fp_cum, num_gt, rec_thrs)
+    average_precision_of_order(order, nd, matched, ignored, num_gt, rec_thrs)
 }
 
 /// [`average_precision`] for detections **already** in score-descending order.
@@ -217,22 +289,34 @@ pub fn average_precision(
 ///
 /// Returns `0.0` for no detections or no ground truth, matching
 /// [`average_precision`]; see the [module note](self) on empty-set conventions.
+///
+/// # Panics
+///
+/// If `ignored` is supplied with a different length than `matched`.
 pub fn average_precision_ranked(
     matched: &[bool],
     ignored: Option<&[bool]>,
     num_gt: usize,
     rec_thrs: &[f64],
 ) -> f64 {
+    if let Some(ig) = ignored {
+        assert_eq!(
+            matched.len(),
+            ig.len(),
+            "average_precision_ranked: matched and ignored must be parallel arrays \
+             (got {} vs {})",
+            matched.len(),
+            ig.len()
+        );
+    }
+
     let nd = matched.len();
     if nd == 0 || num_gt == 0 || rec_thrs.is_empty() {
         return 0.0;
     }
 
-    let mut tp_cum = Vec::with_capacity(nd);
-    let mut fp_cum = Vec::with_capacity(nd);
-    cumulative_tp_fp(0..nd, matched, ignored, &mut tp_cum, &mut fp_cum);
-
-    mean_precision(&tp_cum, &fp_cum, num_gt, rec_thrs)
+    // Identity permutation: the caller's order *is* the ranking.
+    average_precision_of_order(0..nd, nd, matched, ignored, num_gt, rec_thrs)
 }
 
 /// Average precision by the VOC 2010 "all-points" rule — the exact area under the
@@ -311,18 +395,30 @@ pub fn f_beta(precision: f64, recall: f64, beta: f64) -> f64 {
 /// model be at its best operating point?", which is what an F-score reports —
 /// unlike AP, which averages over the whole curve.
 ///
-/// Entries with negative precision are skipped: `-1.0` is the crate's
-/// "not computed for this configuration" sentinel, not a real low score.
-/// Returns `None` when no entry is valid, so callers pick their own convention
-/// for an undefined score rather than inheriting one.
+/// Entries where **either** the precision or the recall is negative are skipped:
+/// `-1.0` is the crate's "not computed for this configuration" sentinel
+/// ([`crate::metrics::is_missing`]), not a real low score, and a sentinel on
+/// either axis makes the whole point meaningless. Returns `None` when no entry
+/// is valid, so callers pick their own convention for an undefined score rather
+/// than inheriting one.
+///
+/// # Panics
+///
+/// If `precisions` and `recalls` have different lengths.
 pub fn max_f_beta(precisions: &[f64], recalls: &[f64], beta: f64) -> Option<f64> {
-    let n = precisions.len().min(recalls.len());
+    assert_eq!(
+        precisions.len(),
+        recalls.len(),
+        "max_f_beta: precisions and recalls must be parallel arrays (got {} vs {})",
+        precisions.len(),
+        recalls.len()
+    );
     let mut best = f64::NEG_INFINITY;
-    for i in 0..n {
-        if crate::metrics::is_missing(precisions[i]) {
+    for (&p, &r) in precisions.iter().zip(recalls) {
+        if crate::metrics::is_missing(p) || crate::metrics::is_missing(r) {
             continue;
         }
-        best = best.max(f_beta(precisions[i], recalls[i], beta));
+        best = best.max(f_beta(p, r, beta));
     }
     (best > f64::NEG_INFINITY).then_some(best)
 }
@@ -376,7 +472,12 @@ mod tests {
             let mut prev_precision = f64::INFINITY;
             let mut prev_ptr = 0usize;
 
-            for &(r_idx, precision, ptr) in &curve {
+            for &PrPoint {
+                rec_thr_idx: r_idx,
+                precision,
+                detection_rank: ptr,
+            } in &curve
+            {
                 assert!(r_idx < rec_thrs.len(), "{ctx}: r_idx {r_idx} out of range");
                 assert!(ptr < nd, "{ctx}: detection_ptr {ptr} out of range");
                 assert!(
@@ -550,8 +651,8 @@ mod tests {
         let (final_recall, curve) = precision_recall_curve(&tp, &fp, 4, &[0.0, 0.5, 1.0]);
         assert!((final_recall - 1.0).abs() < 1e-12);
         assert_eq!(curve.len(), 3);
-        for (_, p, _) in &curve {
-            assert!((p - 1.0).abs() < 1e-12);
+        for p in &curve {
+            assert!((p.precision - 1.0).abs() < 1e-12);
         }
     }
 
@@ -563,7 +664,10 @@ mod tests {
         let (final_recall, curve) = precision_recall_curve(&tp, &fp, 4, &[0.1, 0.25, 0.5, 1.0]);
         assert!((final_recall - 0.25).abs() < 1e-12);
         // only the 0.1 and 0.25 thresholds are reachable
-        assert_eq!(curve.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            curve.iter().map(|c| c.rec_thr_idx).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]
@@ -576,8 +680,107 @@ mod tests {
         let (_, curve) = precision_recall_curve(&tp, &fp, 3, &[0.5]);
         // recall 0.5 first met at rank 2 (recall .667); interpolated precision .667
         assert_eq!(curve.len(), 1);
-        let (_, p, ptr) = curve[0];
-        assert_eq!(ptr, 2);
-        assert!((p - 2.0 / 3.0).abs() < 1e-12);
+        let p = curve[0];
+        assert_eq!(p.detection_rank, 2);
+        assert!((p.precision - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    /// NaN scores must not scramble the ranking or panic the sort. `total_cmp`
+    /// orders positive NaN above every number, so a NaN-scored detection ranks
+    /// first — deterministically — and the AP is a hand-derivable value.
+    #[test]
+    fn nan_scores_rank_deterministically_instead_of_scrambling() {
+        let rec_thrs = crate::params::default_rec_thrs();
+
+        // NaN FP ranked above the real TP: tp_cum=[0,1], fp_cum=[1,1] =>
+        // precision 0.5 at every reached threshold => AP = 0.5.
+        let ap = average_precision(&[f64::NAN, 0.9], &[false, true], None, 1, &rec_thrs);
+        assert!((ap - 0.5).abs() < 1e-12, "got {ap}");
+
+        // Same arrays, NaN detection is the TP: precision 1.0 => AP = 1.0.
+        let ap = average_precision(&[f64::NAN, 0.9], &[true, false], None, 1, &rec_thrs);
+        assert!((ap - 1.0).abs() < 1e-12, "got {ap}");
+
+        // Negative NaN sorts below every number — the TP at 0.9 stays first.
+        let ap = average_precision(&[-f64::NAN, 0.9], &[false, true], None, 1, &rec_thrs);
+        assert!((ap - 1.0).abs() < 1e-12, "got {ap}");
+
+        // A larger NaN-laced array must not panic (std sort panics on a
+        // non-total order since Rust 1.81).
+        let scores: Vec<f64> = (0..50)
+            .map(|i| {
+                if i % 7 == 0 {
+                    f64::NAN
+                } else {
+                    i as f64 / 50.0
+                }
+            })
+            .collect();
+        let matched: Vec<bool> = (0..50).map(|i| i % 2 == 0).collect();
+        let ap = average_precision(&scores, &matched, None, 25, &rec_thrs);
+        assert!(ap.is_finite());
+    }
+
+    /// The two AP entry points share one body: sorting first and delegating must
+    /// equal calling the ranked form on pre-sorted input.
+    #[test]
+    fn sorted_and_ranked_entry_points_agree() {
+        let mut rng = StdRng::seed_from_u64(0xAB5EED);
+        let rec_thrs = crate::params::default_rec_thrs();
+
+        for _ in 0..500 {
+            let nd = rng.random_range(1..=20);
+            let num_gt = rng.random_range(1..=10);
+            let mut scores: Vec<f64> = (0..nd).map(|_| rng.random_range(0.0..=1.0)).collect();
+            scores.sort_by(|a, b| b.total_cmp(a));
+            let matched: Vec<bool> = (0..nd).map(|_| rng.random_bool(0.5)).collect();
+            let ignored: Vec<bool> = (0..nd).map(|_| rng.random_bool(0.2)).collect();
+
+            let a = average_precision(&scores, &matched, Some(&ignored), num_gt, &rec_thrs);
+            let b = average_precision_ranked(&matched, Some(&ignored), num_gt, &rec_thrs);
+            assert_eq!(a, b, "sorted input must make the two forms bit-identical");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "parallel arrays")]
+    fn average_precision_rejects_mismatched_lengths() {
+        average_precision(&[0.9, 0.8], &[true], None, 1, &[0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "parallel arrays")]
+    fn average_precision_rejects_mismatched_ignored() {
+        average_precision(&[0.9], &[true], Some(&[false, true]), 1, &[0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "parallel arrays")]
+    fn average_precision_ranked_rejects_mismatched_ignored() {
+        average_precision_ranked(&[true, false], Some(&[false]), 1, &[0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "parallel arrays")]
+    fn precision_recall_curve_rejects_mismatched_lengths() {
+        precision_recall_curve(&[1.0, 2.0], &[0.0], 2, &[0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "parallel arrays")]
+    fn max_f_beta_rejects_mismatched_lengths() {
+        max_f_beta(&[0.5, 0.6], &[0.5], 1.0);
+    }
+
+    /// The sentinel is skipped on the recall axis too — a `-1.0` recall with a
+    /// valid precision must not produce a negative "best F-score".
+    #[test]
+    fn max_f_beta_skips_the_sentinel_in_recalls() {
+        assert_eq!(max_f_beta(&[0.5, 0.5], &[-1.0, -1.0], 1.0), None);
+        let best = max_f_beta(&[0.5, 0.8], &[-1.0, 0.8], 1.0).expect("one valid point");
+        assert!((best - 0.8).abs() < 1e-12);
+        // A sentinel on either axis alone invalidates that point, not the sweep.
+        let best = max_f_beta(&[-1.0, 0.6, 0.9], &[0.4, -1.0, 0.9], 1.0).expect("one valid point");
+        assert!((best - 0.9).abs() < 1e-12);
     }
 }

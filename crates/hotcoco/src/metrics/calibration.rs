@@ -66,11 +66,17 @@ pub struct CalibrationBin {
 /// `Err` names the first offending value and how many there are, because a
 /// single stray score and a whole array of logits call for different fixes.
 pub fn scores_in_unit_interval(scores: &[f64]) -> Result<(), String> {
-    let n_bad = scores
-        .iter()
-        .filter(|&&s| !(0.0..=1.0).contains(&s))
-        .count();
-    let Some(&bad) = scores.iter().find(|&&s| !(0.0..=1.0).contains(&s)) else {
+    // One pass: count the offenders and remember the first, rather than
+    // scanning the array twice for the same predicate.
+    let mut n_bad = 0usize;
+    let mut first_bad = None;
+    for &s in scores {
+        if !(0.0..=1.0).contains(&s) {
+            n_bad += 1;
+            first_bad.get_or_insert(s);
+        }
+    }
+    let Some(bad) = first_bad else {
         return Ok(());
     };
     Err(format!(
@@ -100,9 +106,20 @@ pub fn scores_in_unit_interval(scores: &[f64]) -> Result<(), String> {
 /// here because a prediction excluded from calibration should not influence the
 /// bin means either.
 ///
-/// Returns an empty vector when `n_bins` is 0. Predictions beyond the shorter of
-/// the two arrays are dropped, so mismatched lengths can't panic.
+/// Returns an empty vector when `n_bins` is 0.
+///
+/// # Panics
+///
+/// If `scores` and `matched` have different lengths. (They used to truncate to
+/// the shorter silently — a curve quietly missing predictions.)
 pub fn calibration_curve(scores: &[f64], matched: &[bool], n_bins: usize) -> Vec<CalibrationBin> {
+    assert_eq!(
+        scores.len(),
+        matched.len(),
+        "calibration_curve: scores and matched must be parallel arrays (got {} vs {})",
+        scores.len(),
+        matched.len()
+    );
     if n_bins == 0 {
         return Vec::new();
     }
@@ -117,11 +134,10 @@ pub fn calibration_curve(scores: &[f64], matched: &[bool], n_bins: usize) -> Vec
         })
         .collect();
 
-    let n = scores.len().min(matched.len());
-    for i in 0..n {
-        let idx = ((scores[i] * n_bins as f64) as usize).min(n_bins - 1);
-        bins[idx].avg_confidence += scores[i];
-        bins[idx].avg_accuracy += if matched[i] { 1.0 } else { 0.0 };
+    for (&score, &hit) in scores.iter().zip(matched) {
+        let idx = ((score * n_bins as f64) as usize).min(n_bins - 1);
+        bins[idx].avg_confidence += score;
+        bins[idx].avg_accuracy += if hit { 1.0 } else { 0.0 };
         bins[idx].count += 1;
     }
 
@@ -287,19 +303,11 @@ mod tests {
         }
     }
 
-    /// Scores outside `[0, 1]` are bucketed into the end bins and carry their raw
-    /// value into the bin mean, so `avg_confidence` escapes its own interval and
-    /// the resulting ECE can exceed 1.
-    ///
-    /// `calibration_curve` clamps the bin *index* but never the *score*
-    /// (`(score * n_bins) as usize` saturates at 0 for negatives and is capped at
-    /// `n_bins - 1` above). `[0, 1]` is a documented precondition, and detection's
-    /// adapter passes `score.unwrap_or(0.0)` straight from user JSON — so a model
-    /// exporting logits gets a silently meaningless number rather than an error.
-    ///
-    /// Pinned as known behaviour, not endorsed: see the input-validation item in
-    /// `docs/plans/AUDIT-2026-07.md`. Whether to clamp, reject, or keep documenting
-    /// it is a live decision; this test exists so the choice is a choice.
+    /// Pins the documented policy for out-of-range scores: `[0, 1]` is a
+    /// precondition, not an enforced check. `calibration_curve` clamps the bin
+    /// *index* but never the *score*, so an out-of-range score buckets into an
+    /// end bin, carries its raw value into the bin mean, and can push ECE past 1.
+    /// `scores_in_unit_interval` is the named guard callers use to detect this.
     #[test]
     fn out_of_range_scores_escape_their_bin() {
         let bins = calibration_curve(&[5.0, -3.0], &[true, false], 10);
@@ -395,8 +403,8 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_array_lengths_truncate_to_the_shorter() {
-        let bins = calibration_curve(&[0.9, 0.9, 0.9], &[true], 10);
-        assert_eq!(bins.iter().map(|b| b.count).sum::<usize>(), 1);
+    #[should_panic(expected = "parallel arrays")]
+    fn mismatched_array_lengths_panic_instead_of_truncating() {
+        calibration_curve(&[0.9, 0.9, 0.9], &[true], 10);
     }
 }

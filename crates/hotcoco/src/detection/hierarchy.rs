@@ -55,6 +55,14 @@ impl Hierarchy {
             let mut ancestors = vec![id];
             let mut current = id;
             while let Some(&parent) = parent_map.get(&current) {
+                // A cyclic parent map (possible via mutually-referencing
+                // `supercategory` names or a hand-built map) would loop
+                // forever; stop at the first repeat, so cycle members list
+                // each other once and the walk terminates. Chains are short,
+                // so the linear scan beats a per-walk set allocation.
+                if ancestors.contains(&parent) {
+                    break;
+                }
                 ancestors.push(parent);
                 current = parent;
             }
