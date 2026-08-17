@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import functools
 from pathlib import Path
+from types import ModuleType
 
 import hotcoco
 import pytest
@@ -45,8 +46,19 @@ def _parse_stub_names() -> dict[str, set[str]]:
 
 
 def _public_names(obj: object) -> set[str]:
-    """Get public attribute names (no underscore prefix)."""
-    return {name for name in dir(obj) if not name.startswith("_")}
+    """Public attribute names (no underscore prefix), excluding submodules.
+
+    A submodule becomes an attribute of its package the moment anything
+    imports it, so `hotcoco.cli` is a name here only if some earlier test
+    happened to import it. Enumerating them in a skip-list made this check
+    depend on test ordering — it passed file-by-file and failed on the full
+    suite. Submodules carry their own stubs (checked below) or are pure
+    Python that pyright reads from source, so none of them belong to the
+    top-level stub contract.
+    """
+    return {
+        name for name in dir(obj) if not name.startswith("_") and not isinstance(getattr(obj, name, None), ModuleType)
+    }
 
 
 def test_stub_file_exists():
@@ -63,42 +75,17 @@ def test_top_level_exports_covered():
     stub_names = _parse_stub_names()["__top__"]
     runtime_names = _public_names(hotcoco)
 
-    # These are re-exports or internal names we don't need to stub.
+    # Submodules (detection, metrics, primitives, mask, plot, browse, cli, ...)
+    # are already excluded by _public_names; their contents are checked by the
+    # tests below, or read from source by pyright for the pure-Python ones.
+    #
     # "annotations" is the _Feature object bound by `from __future__ import
     # annotations` in __init__.py — a language directive, not public API.
     # The LVIS drop-in surface (LVIS, LVISEval, LVISeval, LVISResults) and the
     # torchvision one (CocoDetection, CocoEvaluator) are deliberately NOT here:
     # they are documented imports, so the stub must carry them or pyright
     # rejects `from hotcoco import LVISEval` in every LVIS example.
-    skip = {
-        "hotcoco",
-        "integrations",
-        "annotations",
-        # Family namespace: it re-exports names already stubbed at the top level
-        # and has its own detection.pyi. Covered by the tests below instead.
-        "detection",
-        # The functional layer. Unlike `detection`, these are *not* re-exported
-        # at the top level — `average_precision` and `lsap` exist only under
-        # their namespace — so their signatures live in metrics.pyi and
-        # primitives.pyi, checked by the tests below.
-        "metrics",
-        "primitives",
-        # Stubbed as a submodule (`from . import mask as mask` + mask.pyi), so
-        # the AST walk over __init__.pyi does not see it as a top-level def.
-        # test_mask_stub_matches_runtime below checks its members instead.
-        "mask",
-        # Pure-Python subpackage — pyright reads its annotations from the source,
-        # so it has no .pyi to be missing from. Listed rather than left to chance:
-        # `hotcoco.plot` only becomes an attribute of `hotcoco` once something
-        # imports it, so whether this test passed depended on which other test
-        # ran first.
-        "plot",
-        # Same import-order hazard: `COCO.browse()` lazily imports these
-        # pure-Python modules, binding them as package attributes for the rest
-        # of the pytest process.
-        "browse",
-        "server",
-    }
+    skip = {"annotations"}
     runtime_names -= skip
 
     missing = runtime_names - stub_names
