@@ -206,7 +206,7 @@ for iou_type, metrics in results.items():
 `CocoEvaluator.synchronize_between_processes()` gathers predictions across all ranks before evaluation. Call it after the last `update()` and before `accumulate()`:
 
 ```python
-evaluator.accumulate()
+evaluator.update(predictions)              # last batch of the epoch
 
 evaluator.synchronize_between_processes()  # no-op if not using torch.distributed
 

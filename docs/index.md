@@ -7,14 +7,14 @@ Fast enough for every epoch, lean enough for every dataset.
 </p>
 
 <p class="hero-sub">
-A drop-in replacement for pycocotools that doesn't become the bottleneck — in your training loop or at foundation model scale. Up to 33× faster on standard COCO, 39× faster on Objects365, and fits comfortably in memory where alternatives run out.
+A drop-in replacement for pycocotools that doesn't become the bottleneck — in your training loop or at foundation model scale. Up to 36× faster on standard COCO, 39× faster on Objects365, and fits comfortably in memory where alternatives run out.
 </p>
 
 <div class="hero-actions" markdown>
 
 [Get Started](getting-started/installation.md){ .md-button .md-button--primary }
 [API Reference](api/coco.md){ .md-button }
-[Open Notebook](../examples/coco_evaluation_101.ipynb){ .md-button }
+[Open Notebook](https://github.com/derekallman/hotcoco/blob/main/examples/coco_evaluation_101.ipynb){ .md-button }
 
 </div>
 
@@ -24,12 +24,12 @@ A drop-in replacement for pycocotools that doesn't become the bottleneck — in 
 
 <div class="feature-card" markdown>
 <strong>Eval in under a second</strong>
-<p>Up to 33× faster than pycocotools. Eval goes from a bottleneck to background noise.</p>
+<p>Up to 36× faster than pycocotools. Eval goes from a bottleneck to background noise.</p>
 </div>
 
 <div class="feature-card" markdown>
 <strong>Your metrics, unchanged</strong>
-<p>All 34 metrics match pycocotools to floating-point precision (3.7e-14). Your AP scores don't budge.</p>
+<p>All 34 metrics match pycocotools to the limit of double precision. Your AP scores don't budge.</p>
 </div>
 
 <div class="feature-card" markdown>
@@ -97,19 +97,11 @@ pip install hotcoco
 
 ## Performance
 
-Benchmarked on COCO val2017 (5,000 images, 36,781 synthetic detections), Apple M1 MacBook Air:
+Bbox evaluation on COCO val2017 runs in **0.14s** against 5.11s for pycocotools — 36× faster. At Objects365 scale (80k images, 1.2M detections), it finishes in 18s where pycocotools takes 721s, using half the memory.
 
-<div class="benchmark-table" markdown>
+All 34 metrics — 12 bbox, 12 segm, 10 keypoints — match pycocotools to the limit of double precision, and a hypothesis-based fuzzer separately checks ~10,000 generated datasets.
 
-| Eval Type | pycocotools | faster-coco-eval | hotcoco |
-|-----------|-------------|------------------|---------|
-| bbox      | 6.01s | 1.45s (4.1×) | **0.18s (33.4×)** |
-| segm      | 6.79s | 3.46s (2.0×) | **0.36s (18.9×)** |
-| keypoints | 2.72s | 1.73s (1.6×) | **0.16s (17.0×)** |
-
-</div>
-
-All 34 metrics — 12 bbox, 12 segm, 10 keypoints — match pycocotools on COCO val2017 to within 3.7e-14, the limit of double precision. A hypothesis-based fuzzer separately checks ~10,000 generated datasets.
+See [Benchmarks](benchmarks.md) for the full tables, hardware, and parity verification.
 
 ## License
 

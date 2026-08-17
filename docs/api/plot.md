@@ -5,6 +5,7 @@ from hotcoco.plot import (
     report,
     pr_curve, pr_curve_iou_sweep, pr_curve_by_category, pr_curve_top_n,
     confusion_matrix, top_confusions, per_category_ap, tide_errors,
+    reliability_diagram, comparison_bar, category_deltas,
     style, SERIES_COLORS, CHROME, SEQUENTIAL,
 )
 ```

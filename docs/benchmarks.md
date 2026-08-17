@@ -12,30 +12,32 @@
 | **F-scores** | No | No | Yes — F-beta at any β |
 | **Per-class AP** | Manual only | Yes — via `extended_metrics` | Built-in via `get_results(per_class=True)` |
 | **Dataset operations** | No | No | Yes — filter, merge, split, sample, stats |
-| **Format conversion** | No | No | Yes — COCO ↔ YOLO, VOC, CVAT, DOTA |
+| **Format conversion** | No | No | Yes — COCO ↔ YOLO, VOC, CVAT, DOTA, Open Images CSV |
 | **PyTorch integration** | Via torchvision | Yes — TorchVision compatible | Yes — `CocoDetection`, `CocoEvaluator` |
 | **Rust API** | No | No | Yes — native crate on crates.io |
 | **CLI** | No | No | Yes — `coco` (Python) + `coco-eval` (Rust) |
 | **Results export** | No | No | Yes — JSON with params + metrics + per-class |
-| **Memory at scale** | 24 GB committed on O365 | 30 GB committed on O365 | 8 GB committed on O365 |
+| **Memory at scale** | Exceeds physical RAM on O365 | Exceeds physical RAM on O365 | Completes within physical RAM ([details](#objects365-scale-benchmark)) |
 | **Python versions** | 3.9+ | 3.7+ | 3.9+ |
 | **License** | BSD | Apache 2.0 | MIT |
 
 ## Speed benchmarks
 
-**Hardware:** Apple M1 MacBook Air, 8 GB RAM
+**Hardware:** Apple M1 MacBook Air — 8 cores (4 performance + 4 efficiency), 8 GB RAM
 **Dataset:** COCO val2017 — 5,000 images
 **Detections:** 36,781 synthetic (seed=42; AP scores are not meaningful)
-**Timing:** Wall clock time — per-cell median of 3 runs at 1×, single run at 10×
-**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 0.5.0
+**Timing:** Wall clock time — per-cell median of 3 runs, at both 1× and 10×. The two
+scales were captured separately and the machine was busier during the 10× capture, so
+absolute times are comparable only within a table; the speedup ratios are not affected.
+**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 1.0.0
 
 ### Results (1x detections)
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 6.01s | 1.45s (4.1×) | **0.18s (33.4×)** |
-| segm      | 6.79s | 3.46s (2.0×) | **0.36s (18.9×)** |
-| keypoints | 2.72s | 1.73s (1.6×) | **0.16s (17.0×)** |
+| bbox      | 5.11s | 1.21s (4.2×) | **0.14s (36.2×)** |
+| segm      | 5.98s | 3.01s (2.0×) | **0.29s (20.8×)** |
+| keypoints | 2.32s | 1.63s (1.4×) | **0.12s (18.8×)** |
 
 Speedups in parentheses are vs pycocotools.
 
@@ -45,11 +47,15 @@ Scaling detections by 10x (~368,000) to test behavior under higher load:
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 27.61s | 4.32s (6.4×) | **0.81s (34.2×)** |
-| segm      | 31.26s | 9.89s (3.2×) | **2.52s (12.4×)** |
-| keypoints | 14.37s | 10.49s (1.4×) | **1.69s (8.5×)** |
+| bbox      | 20.92s | 3.93s (5.3×) | **0.63s (33.4×)** |
+| segm      | 24.16s | 8.05s (3.0×) | **1.53s (15.8×)** |
+| keypoints | 9.86s | 7.83s (1.3×) | **1.24s (8.0×)** |
 
-hotcoco scales better at higher detection counts due to multi-threaded evaluation.
+Absolute times stay under 2s at 368,000 detections. hotcoco's relative advantage is
+narrower here than in the 1× table — 8–33× rather than 19–36× — because per-call
+overhead, where it gains most, is a smaller share of the total once there is this
+much work to do. Compare speedups within a table, not times across the two: each
+table is a separate capture.
 
 ### Where the time goes
 
@@ -60,36 +66,35 @@ time (single run, same synthetic detections as the 1× table):
 
 | Eval type | Phase | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------|-------------|------------------|---------|
-| bbox      | load  | 0.35s | 0.32s (1.1×) | **0.07s (4.7×)** |
-|           | eval  | 4.64s | 1.03s (4.5×) | **0.10s (46.3×)** |
+| bbox      | load  | 0.35s | 0.33s (1.1×) | **0.07s (4.9×)** |
+|           | eval  | 4.67s | 0.98s (4.7×) | **0.07s (69.0×)** |
 | segm      | load  | 0.44s | 0.43s (1.0×) | **0.13s (3.3×)** |
-|           | eval  | 6.99s | 2.73s (2.6×) | **0.24s (29.6×)** |
-| keypoints | load  | 0.53s | 0.55s (1.0×) | **0.11s (4.9×)** |
-|           | eval  | 1.81s | 1.08s (1.7×) | **0.04s (49.7×)** |
-| bbox, bbox-only GT | load | 0.17s | 0.12s (1.4×) | **0.05s (3.4×)** |
-|           | eval  | 4.62s | 1.09s (4.2×) | **0.09s (51.8×)** |
+|           | eval  | 5.57s | 2.59s (2.1×) | **0.16s (35.5×)** |
+| keypoints | load  | 0.52s | 0.54s (1.0×) | **0.09s (5.5×)** |
+|           | eval  | 1.82s | 1.10s (1.7×) | **0.03s (63.3×)** |
+| bbox, bbox-only GT | load | 0.17s | 0.12s (1.4×) | **0.04s (4.2×)** |
+|           | eval  | 4.73s | 1.03s (4.6×) | **0.06s (73.9×)** |
 
-Two things this table makes visible:
+The evaluation engine itself is 35–74× faster than pycocotools; the end-to-end
+headline is lower because JSON parsing is a much larger share of hotcoco's total
+than of anyone else's.
 
-- **The evaluation engine itself is 30–52× faster than pycocotools.** The
-  end-to-end headline is lower only because JSON parsing is a far larger share
-  of hotcoco's total than of anyone else's — loading is the bottleneck hotcoco
-  has left, not evaluation.
-- **The official instances files carry a polygon segmentation on every
-  annotation** — about two-thirds of the file bytes — which bbox evaluation
-  never reads. The *bbox-only GT* row strips them, representing datasets that
-  never had masks (custom bbox datasets, YOLO conversions, Objects365). If
-  that's your data, the load column is the one you'll actually see.
+The *bbox-only GT* row strips the polygon segmentation the official instances
+files carry on every annotation — about two-thirds of the file bytes, which bbox
+evaluation never reads. It represents datasets that never had masks (custom bbox
+datasets, YOLO conversions, Objects365), where the load column is the one you'll
+actually see.
 
 Reproduce with `uv run python scripts/bench.py --phases`.
 
 ### Objects365 scale benchmark
 
-**Hardware:** Windows 11, AMD Ryzen 5 5600X, 16 GB RAM + swap
+**Hardware:** Windows 11, AMD Ryzen 5 5600X — 6 cores / 12 threads, 16 GB RAM + swap
 **Dataset:** Objects365 val — 80,000 images, 1.2M annotations, 365 categories
 **Detections:** ~1.2M synthetic bbox (capped at 100/image, seed=42)
 **Timing:** Wall clock time, single run
-**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 0.3.0
+**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 0.3.0 — this run
+predates the 1.0 loading work, so the hotcoco figure is conservative
 
 | Library | Time | Peak RAM | Committed | Speedup |
 |---------|------|----------|-----------|---------|
@@ -148,9 +153,9 @@ removed the last systematic source of divergence here.
 | ARm    | 0.85891625 | 0.85891625 | 0.00e+00 |
 | ARl    | 0.98103170 | 0.98103170 | 4.44e-16 |
 
-Exact. Segmentation was the last family carrying a real residual (AP ~1e-5);
-it came from polygon rasterization, where the reference's C compiler fuses
-`s*t+ys` into a single FMA and Rust does not. Matching that arithmetic closed it.
+Exact. The residual segmentation once carried (AP ~1e-5) came from polygon
+rasterization, where the reference's C compiler contracts `s*t+ys` into a single
+fused multiply-add; hotcoco reproduces that arithmetic explicitly.
 
 ### Keypoints
 
@@ -167,25 +172,95 @@ it came from polygon rasterization, where the reference's C compiler fuses
 | ARm    | 0.62190658 | 0.62190658 | 0.00e+00 |
 | ARl    | 0.96335935 | 0.96335935 | 0.00e+00 |
 
-Keypoint metrics are exact. Note that keypoint evaluation reports `AR`, `AR50`, and
-`AR75` — there is no small area range and no maxDets sweep, so the `AR1`/`AR10`/`AR100`
-of bbox and segm do not apply.
+Keypoint metrics are exact. Keypoint evaluation reports `AR`, `AR50`, and `AR75` —
+there is no small area range and no maxDets sweep, so the `AR1`/`AR10`/`AR100` of
+bbox and segm do not apply.
+
+### Verify it yourself
+
+You do not have to take these numbers on faith, and you should not have to clone
+the repo to check them. Install both libraries and run your own ground truth and
+detections through each:
+
+```python
+import contextlib, io
+import numpy as np
+from pycocotools.coco import COCO as PyCOCO
+from pycocotools.cocoeval import COCOeval as PyCOCOeval
+import hotcoco
+
+GT, DT, IOU_TYPE = "instances_val2017.json", "my_detections.json", "bbox"
+
+def run(coco_cls, eval_cls):
+    with contextlib.redirect_stdout(io.StringIO()):   # both print a lot
+        gt = coco_cls(GT)
+        dt = gt.loadRes(DT)
+        e = eval_cls(gt, dt, IOU_TYPE)
+        e.evaluate(); e.accumulate(); e.summarize()
+    return np.asarray(e.stats)
+
+ref = run(PyCOCO, PyCOCOeval)
+got = run(hotcoco.COCO, hotcoco.COCOeval)
+
+for i, (a, b) in enumerate(zip(ref, got)):
+    print(f"[{i:2}] pycocotools={a:.8f}  hotcoco={b:.8f}  diff={abs(a - b):.2e}")
+print("max diff:", np.abs(ref - got).max())
+```
+
+Anything above ~1e-12 on your data is worth
+[opening an issue](https://github.com/derekallman/hotcoco/issues) — that is the
+threshold the project's own parity gate uses.
+
+The same shape works for `hotcoco.mask` against `pycocotools.mask`; the repo's
+`scripts/parity_mask.py` does exactly that, operation by operation.
 
 ## Methodology
 
 - **Wall clock time** includes file I/O, evaluation, and accumulation. Excludes Python import time.
+- **Core count affects the ratio.** hotcoco evaluates in parallel; pycocotools is
+  single-threaded. Speedups therefore scale with the cores available, and the numbers
+  here come from an 8-core machine — a 4-core laptop will see less, a 32-core server
+  more. Run the suite on your own hardware for a figure that describes it.
 - **Detections are synthetic** — generated from GT annotations with a fixed seed (`seed=42`), so AP scores are meaningless but detection count and format are representative of real model output. Fixed seed means results are identical across runs.
 - **Only detections are scaled** for the 10x benchmark — ground truth annotations are unchanged.
 - Benchmark scripts are in `scripts/` at the repo root.
 
 ## Reproducing the benchmarks
 
-You'll need the COCO val2017 annotation files and a working hotcoco build — see the [installation page](getting-started/installation.md) for setup. Then:
+These run from a repo checkout — see [CONTRIBUTING](https://github.com/derekallman/hotcoco/blob/main/CONTRIBUTING.md)
+for the build. One command fetches the annotations and generates the synthetic
+detection files:
 
 ```bash
-just bench                                        # speed benchmark (1x)
-uv run python scripts/bench.py --phases          # load/eval phase breakdown
-uv run python scripts/bench.py --scale 10        # 10x stress test
-just parity                                       # metric parity vs pycocotools
-uv run python scripts/bench_objects365.py        # O365 scale (requires O365 annotations)
+just download-coco   # ~240 MB — val2017 annotations + parity result files
+```
+
+That produces:
+
+```
+data/
+├── annotations/
+│   ├── instances_val2017.json
+│   └── person_keypoints_val2017.json
+├── bbox_val2017_results.json
+├── segm_val2017_results.json
+└── kpt_val2017_results.json
+```
+
+Images are never needed — only the JSON annotation and result files. With that in
+place:
+
+```bash
+just bench                                  # speed benchmark (1x)
+uv run python scripts/bench.py --phases     # load/eval phase breakdown
+uv run python scripts/bench.py --scale 10   # 10x stress test
+just parity                                 # metric parity vs pycocotools
+```
+
+The Objects365 benchmark needs a separate download:
+
+```bash
+uv pip install polars
+just download-o365                              # ~220 MB — O365 val annotations
+uv run python scripts/bench_objects365.py
 ```

@@ -1,7 +1,7 @@
 [project]
 site_name = "hotcoco"
 site_url = "https://derekallman.github.io/hotcoco/"
-site_description = "A drop-in replacement for pycocotools, 11-26x faster."
+site_description = "A drop-in replacement for pycocotools, up to 36× faster."
 repo_url = "https://github.com/derekallman/hotcoco"
 repo_name = "derekallman/hotcoco"
 
@@ -10,11 +10,14 @@ nav = [
   { "Getting Started" = [
     { "Installation" = "getting-started/installation.md" },
     { "Quick Start" = "getting-started/quickstart.md" },
+    { "The COCO Format" = "getting-started/coco-format.md" },
     { "Migrating from pycocotools" = "getting-started/migration.md" },
     { "Troubleshooting" = "getting-started/troubleshooting.md" },
   ] },
   { "User Guide" = [
     { "Evaluation" = "guide/evaluation.md" },
+    { "LVIS & Open Images" = "guide/lvis-open-images.md" },
+    { "Model Diagnostics" = "guide/diagnostics.md" },
     { "Dataset Operations" = "guide/datasets.md" },
     { "Working with Results" = "guide/results.md" },
     { "Mask Operations" = "guide/masks.md" },
@@ -35,9 +38,7 @@ nav = [
     { "PyTorch Integrations" = "api/integrations.md" },
     { "CLI" = "cli.md" },
   ] },
-  { "Performance" = [
-    { "Benchmarks" = "benchmarks.md" },
-  ] },
+  { "Benchmarks" = "benchmarks.md" },
 ]
 
 extra_css = ["stylesheets/extra.css"]

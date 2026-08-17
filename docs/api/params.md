@@ -2,6 +2,8 @@
 
 Evaluation parameters. Created automatically by `COCOeval`, but can be modified before calling `evaluate()`.
 
+Every property below also accepts its pycocotools camelCase spelling — `maxDets` for `max_dets`, `iouThrs` for `iou_thrs`, and so on. See the [alias table](../getting-started/migration.md#method-naming).
+
 === "Python"
 
     ```python
@@ -50,10 +52,9 @@ Evaluation type.
 |---|---|---|
 | **Type** | `str` | `IouType` |
 | **Default** | `"bbox"` | `IouType::Bbox` |
-| **Values** | `"bbox"`, `"segm"`, `"keypoints"` | `Bbox`, `Segm`, `Keypoints` |
+| **Values** | `"bbox"`, `"segm"`, `"keypoints"`, `"obb"` | `Bbox`, `Segm`, `Keypoints`, `Obb` |
 
-!!! note "camelCase alias"
-    Also available as `iouType` in Python.
+`"obb"` evaluates oriented boxes with a rotated IoU kernel — see [OBB evaluation](../guide/evaluation.md#oriented-bounding-box-obb-evaluation).
 
 ---
 
@@ -66,9 +67,6 @@ Image IDs to evaluate. Empty list means all images.
 | **Type** | `list[int]` | `Vec<u64>` |
 | **Default** | `[]` | `vec![]` |
 
-!!! note "camelCase alias"
-    Also available as `imgIds` in Python.
-
 ---
 
 ### `cat_ids`
@@ -79,9 +77,6 @@ Category IDs to evaluate. Empty list means all categories.
 |---|---|---|
 | **Type** | `list[int]` | `Vec<u64>` |
 | **Default** | `[]` | `vec![]` |
-
-!!! note "camelCase alias"
-    Also available as `catIds` in Python.
 
 ---
 
@@ -94,9 +89,6 @@ IoU thresholds for evaluation.
 | **Type** | `list[float]` | `Vec<f64>` |
 | **Default** | `[0.5, 0.55, 0.6, ..., 0.95]` (10 values) | Same |
 
-!!! note "camelCase alias"
-    Also available as `iouThrs` in Python.
-
 ---
 
 ### `rec_thrs`
@@ -107,9 +99,6 @@ Recall thresholds for precision interpolation.
 |---|---|---|
 | **Type** | `list[float]` | `Vec<f64>` |
 | **Default** | `[0.0, 0.01, 0.02, ..., 1.0]` (101 values) | Same |
-
-!!! note "camelCase alias"
-    Also available as `recThrs` in Python.
 
 ---
 
@@ -122,9 +111,6 @@ Maximum detections per image. The summary metrics report results at each of thes
 | **Type** | `list[int]` | `Vec<usize>` |
 | **Default (bbox/segm)** | `[1, 10, 100]` | Same |
 | **Default (keypoints)** | `[20]` | Same |
-
-!!! note "camelCase alias"
-    Also available as `maxDets` in Python.
 
 ---
 
@@ -140,9 +126,6 @@ Area ranges for size-based evaluation. Each range is `[min_area, max_area]` in s
 
 The defaults correspond to: all, small (area < 32² px²), medium (32² ≤ area < 96² px²), large (area ≥ 96² px²). Keypoints skip the small range.
 
-!!! note "camelCase alias"
-    Also available as `areaRng` in Python.
-
 ---
 
 ### `area_rng_lbl`
@@ -155,9 +138,6 @@ Labels for the area ranges.
 | **Default (bbox/segm)** | `["all", "small", "medium", "large"]` | Same |
 | **Default (keypoints)** | `["all", "medium", "large"]` | Same |
 
-!!! note "camelCase alias"
-    Also available as `areaRngLbl` in Python.
-
 ---
 
 ### `use_cats`
@@ -168,9 +148,6 @@ Whether to evaluate per-category. When `False`, all detections and ground truth 
 |---|---|---|
 | **Type** | `bool` | `bool` |
 | **Default** | `True` | `true` |
-
-!!! note "camelCase alias"
-    Also available as `useCats` in Python.
 
 ---
 
@@ -189,9 +166,6 @@ Default values (nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles
 [0.026, 0.025, 0.025, 0.035, 0.035, 0.079, 0.079, 0.072, 0.072,
  0.062, 0.062, 0.107, 0.107, 0.087, 0.087, 0.089, 0.089]
 ```
-
-!!! note "camelCase alias"
-    Also available as `kptOksSigmas` in Python.
 
 ---
 

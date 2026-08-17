@@ -12,7 +12,7 @@ ev = COCOeval(coco_gt, coco_dt, "bbox", oid_style=True, hierarchy=h)
 ev.run()
 ```
 
-See the [Open Images evaluation](../guide/evaluation.md#open-images-evaluation) guide for a full walkthrough.
+See the [Open Images evaluation](../guide/lvis-open-images.md#open-images-evaluation) guide for a full walkthrough.
 
 ---
 
@@ -80,21 +80,25 @@ h = Hierarchy.from_parent_map({
 
 ---
 
-### `from_categories`
+### Deriving from `supercategory`
+
+Datasets that already encode their hierarchy in `supercategory` fields need no
+`Hierarchy` at all: in Open Images mode, leaving `hierarchy` unset derives one
+automatically from the ground truth's categories.
 
 ```python
-Hierarchy.from_categories(categories: list[dict]) -> Hierarchy
+ev = COCOeval(coco_gt, coco_dt, "bbox", oid_style=True)   # hierarchy derived
 ```
 
-Derive a hierarchy from `supercategory` fields in a category list. For each category with a `supercategory` value, looks up the matching category by name. If no matching category is found, a virtual node is created.
+Each category with a `supercategory` is linked to the category of that name; when
+no such category exists a virtual node is created, and self-referencing
+supercategories (`name == supercategory`) are skipped.
 
-Handy for COCO-format datasets that already encode the hierarchy via `supercategory`:
-
-```python
-h = Hierarchy.from_categories(coco_gt.dataset["categories"])
-```
-
-Self-referencing supercategories (where `name == supercategory`) are silently skipped.
+!!! note "Rust-only constructor"
+    The explicit form, `Hierarchy::from_categories(&categories)`, is available in
+    the Rust crate. Python has no `from_categories` — use the automatic derivation
+    above, or build the hierarchy explicitly with `from_parent_map`, `from_file`,
+    or `from_dict`.
 
 ---
 

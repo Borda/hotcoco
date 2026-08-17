@@ -91,17 +91,25 @@ After calling `evaluate()`, the `eval_imgs` field contains per-image, per-catego
     }
     ```
 
-Each `eval_img` entry contains:
+Each `eval_img` entry is a dict whose keys match pycocotools' `evalImgs` —
+`image_id` and `category_id` in snake_case, everything else camelCase (there are
+no snake_case variants of the camelCase keys):
 
-| Field | Description |
-|-------|-------------|
+| Key | Description |
+|-----|-------------|
 | `image_id` | Image ID |
 | `category_id` | Category ID |
-| `dt_matches` / `dtMatches` | Detection-to-GT matches per IoU threshold |
-| `gt_matches` / `gtMatches` | GT-to-detection matches per IoU threshold |
-| `dt_scores` / `dtScores` | Detection confidence scores |
-| `gt_ignore` / `gtIgnore` | Whether each GT was ignored (crowd or out of area range) |
-| `dt_ignore` / `dtIgnore` | Whether each detection was ignored per IoU threshold |
+| `aRng` | Area range `[min, max]` this entry was evaluated under |
+| `maxDet` | Max-detections cap applied |
+| `dtIds` | Detection annotation IDs, score-descending |
+| `gtIds` | Ground-truth annotation IDs |
+| `dtMatches` | Per IoU threshold: matched GT id per detection (0 = unmatched) |
+| `gtMatches` | Per IoU threshold: matched DT id per ground truth (0 = unmatched) |
+| `dtScores` | Detection confidence scores |
+| `dtIgnore` | Per IoU threshold: whether each detection was ignored |
+| `gtIgnore` | Whether each GT was ignored (crowd or out of area range) |
+| `dtMatched` / `gtMatched` | hotcoco extension: per-threshold boolean match flags |
+| `gtInDenominator` | hotcoco extension: whether each GT counts in the recall denominator (differs from `gtIgnore` for Open Images group-of boxes) |
 
 ## Precision and recall arrays
 
@@ -175,8 +183,7 @@ report["per_class"]["person"]["AP"]  # 0.521
 ```
 
 Every hotcoco metric family reports in this shape, so a function that renders one
-renders them all. Panoptic, tracking, and concept metrics slot into the same code
-as they land.
+renders them all.
 
 ### Check provenance before you publish a number
 
@@ -328,3 +335,96 @@ For direct access to the raw precision arrays (e.g. to compute AP at a non-stand
         }
     }
     ```
+
+## Saving results to JSON
+
+`results()` and `save_results()` serialize the full evaluation output — parameters, summary metrics, and optionally per-category AP — to a JSON dict or file. Both require `summarize()` (or `run()`) first.
+
+```python
+ev = COCOeval(coco_gt, coco_dt, "bbox")
+ev.run()
+
+# Get results as a dict
+r = ev.results()
+print(r["metrics"]["AP"])      # 0.378
+print(r["params"]["iou_type"]) # "bbox"
+
+# Save to a file
+ev.save_results("results.json")
+
+# Include per-category AP
+ev.save_results("results.json", per_class=True)
+```
+
+The JSON structure:
+
+```json
+{
+  "hotcoco_version": "1.0.0",
+  "provenance": "parity_verified",
+  "params": {
+    "iou_type": "bbox",
+    "eval_mode": "coco",
+    "iou_thresholds": [0.5, 0.55, ...],
+    "recall_thresholds": [0.0, 0.01, ...],
+    "area_ranges": {"all": [0, 10000000000.0], "small": [0, 1024.0], ...},
+    "max_dets": [1, 10, 100],
+    "use_cats": true,
+    "kpt_oks_sigmas": [0.026, 0.025, ...],
+    "reference_deviations": []
+  },
+  "metrics": {
+    "AP": 0.378, "AP50": 0.584, "AP75": 0.412, ...
+  },
+  "per_class": {
+    "person": 0.58, "car": 0.41, ...
+  }
+}
+```
+
+`reference_deviations` lists one sentence per way the run departed from the
+reference configuration (empty when parity-verified), so a saved results file
+explains its own provenance.
+
+From the `coco-eval` CLI, pass `--output <path>` to write the same JSON automatically (always includes per-category AP):
+
+```bash
+coco-eval --gt instances_val2017.json --dt bbox_results.json --output results.json
+```
+
+## Logging metrics
+
+`get_results()` accepts an optional `prefix` and `per_class` flag, returning a flat `dict[str, float]` that plugs directly into any experiment tracker.
+
+```python
+ev = COCOeval(coco_gt, coco_dt, "bbox")
+ev.run()
+
+metrics = ev.get_results(prefix="val/bbox", per_class=True)
+# {"val/bbox/AP": 0.578, ..., "val/bbox/AP/person": 0.82, "val/bbox/AP/car": 0.71, ...}
+```
+
+### Weights & Biases
+
+```python
+import wandb
+wandb.log(ev.get_results(prefix="val/bbox", per_class=True), step=epoch)
+```
+
+### MLflow
+
+```python
+import mlflow
+mlflow.log_metrics(ev.get_results(prefix="val/bbox"), step=epoch)
+```
+
+### TensorBoard
+
+```python
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
+for k, v in ev.get_results(prefix="val/bbox").items():
+    writer.add_scalar(k, v, global_step=epoch)
+```
+
+See [`get_results`](../api/cocoeval.md#get_results) in the API reference for full parameter details.

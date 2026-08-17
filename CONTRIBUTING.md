@@ -33,6 +33,26 @@ Verify the install:
 uv run python -c "import hotcoco; print(hotcoco.__version__)"
 ```
 
+## Architecture
+
+All core logic lives in the Rust library. The Python package and Rust CLI are thin wrappers.
+
+```
+                       ┌──→ PyO3 ──→ hotcoco (Python library + CLI)
+Rust Core (all logic) ─┤
+                       └──→ hotcoco-cli (Rust CLI, eval only)
+```
+
+- **Rust core** (`crates/hotcoco/`) — types, masks, eval, dataset ops, format conversion. Layered by what a function produces: `primitives/` (matching kernels), `metrics/` (numbers from matches), `detection/` (the COCO/LVIS/Open Images driver), `quality/` (dataset introspection). `tests/architecture.rs` enforces the layering and fails the build on duplicated kernels.
+- **Python CLI** (primary) — all subcommands: `coco eval`, `coco stats`, `coco merge`, and the rest. Rich formatting and plots.
+- **Rust CLI** (`crates/hotcoco-cli/`) — evaluation only, no Python. New features added on request.
+
+| Registry | Package | Contents |
+|----------|---------|----------|
+| PyPI | `hotcoco` | Python library + Python CLI + compiled Rust core |
+| crates.io | `hotcoco` | Rust library |
+| crates.io | `hotcoco-cli` | Rust CLI binary (eval only, no Python) |
+
 ## Making changes
 
 ### Pre-commit hook
@@ -40,16 +60,19 @@ uv run python -c "import hotcoco; print(hotcoco.__version__)"
 A hook in `.github/hooks/pre-commit` runs formatting, lint, and tests automatically before every commit. Install it once:
 
 ```bash
-ln -sf ../../.github/hooks/pre-commit .git/hooks/pre-commit
+git config core.hooksPath .github/hooks
 ```
+
+(The relative path resolves in both the main repo and git worktrees; a symlink under `.git/hooks` does not.)
 
 The hook runs:
 
 1. `cargo fmt --all -- --check` — formatting
 2. `cargo clippy --workspace --all-targets -- -D warnings` — lint (warnings are errors)
 3. `cargo test` — all tests
+4. `ruff format --check` and `ruff check` on `python/` and `scripts/` — when Python files are staged
 
-If formatting fails, run `cargo fmt --all` and re-commit. Fix all clippy warnings before committing — never suppress them with `#[allow(...)]`.
+If formatting fails, run `cargo fmt --all` (Rust) or `uv run ruff format python/ scripts/` (Python) and re-commit. Fix all clippy warnings before committing — never suppress them with `#[allow(...)]`.
 
 ### After changing evaluation logic
 
@@ -61,6 +84,8 @@ just parity
 
 Tolerance: 1e-12 for every iou_type. Measured worst case is 3.7e-14, so the gate is sized to floating-point noise and nothing else.
 
+Specialized protocols have their own gates: `just parity-lvis`, `just parity-tide`, `just parity-mask`, and `just parity-oid` (Open Images vs the TF Object Detection API; `just gen-oid-fixtures` regenerates its fixtures). `just parity-all` runs everything.
+
 ### After changing Python bindings
 
 Smoke test:
@@ -70,11 +95,27 @@ just build
 uv run python -c "import hotcoco"
 ```
 
+Then run `uv run pytest scripts/test_stubs.py`. The four hand-written `.pyi` files
+don't update themselves, and the test compares them against the extension in **both**
+directions — a member the stub omits is invisible to autocomplete, and one the stub
+invents is worse, because an IDE offers it and the call fails at runtime.
+
+**Add a camelCase alias only when pycocotools has a method of that exact name.** That
+is the whole reason the convention exists: hotcoco is a drop-in replacement, so
+`getAnnIds` and `loadRes` must resolve. LVIS is not a reason — its API is snake_case.
+Anything hotcoco invented gets one snake_case spelling and no alias; converters,
+diagnostics, and Open Images parameters all have no pycocotools counterpart to match.
+Four converter aliases were shipped against this rule and later removed.
+
+Every `#[pyfunction]` alias needs an explicit `#[pyo3(name = "...")]`. Without one PyO3
+exports the Rust identifier, which is how `fr_py_objects_snake` became public API while
+the documented `fr_py_objects` did not exist.
+
 ## Code style
 
 - **Rust:** `cargo fmt --all`. No clippy warnings.
-- **Python:** No formatter enforced, but keep style consistent with existing code.
-- Don't add comments where the logic is self-evident. Comments should explain *why*, not *what*.
+- **Python:** `ruff format` and `ruff check` — enforced by the pre-commit hook and CI (`just py-fmt-check`, `just py-lint`).
+- Don't add comments where the logic is self-evident. Comments should explain *why*, not *what* — and "why" means a constraint or invariant the code can't show, not the history of how the code got here. Never narrate a change ("used to", "previously", "the old version...") or justify it against alternatives the reader can't see; that rationale belongs in the commit message.
 
 ## Tests
 
@@ -84,7 +125,15 @@ cargo test -p hotcoco # Library tests only
 just test             # Build + cargo test + pytest hypothesis suite
 ```
 
-Test fixtures live in `crates/hotcoco/tests/fixtures/`. When adding a new feature that touches evaluation, add a corresponding Rust integration test.
+Test fixtures live in `crates/hotcoco/tests/fixtures/`. The Rust integration
+suites are split by area: `integration_test.rs` (end-to-end evaluation),
+`convert_fixes.rs` / `core_fixes.rs` / `detection_fixes.rs` (regression tests
+pinning fixed defects in the converters, the core data layer, and detection),
+and `architecture.rs` (layering conformance — fails the build on duplicated
+kernels or layer violations). When adding a feature that touches evaluation, add
+a corresponding Rust integration test; when fixing a bug, pin it in the matching
+`*_fixes.rs` suite. Python-side regression tests live in `scripts/test_*.py`
+(`test_parity.py`, `test_stubs.py`, `test_browse.py`, `test_adversarial.py`).
 
 ## Submitting a pull request
 

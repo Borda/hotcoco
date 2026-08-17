@@ -19,12 +19,14 @@ A complete COCO evaluation in under a minute.
 === "CLI"
 
     ```bash
-    cargo install hotcoco-cli
+    pip install hotcoco   # includes the `coco` command
     ```
+
+    For a standalone binary with no Python: `cargo install hotcoco-cli`.
 
 ## 2. Load ground truth
 
-The ground truth is a COCO-format JSON file containing your dataset's annotations (bounding boxes, segmentation masks, or keypoints). If you're evaluating on public COCO val2017, see the [installation page](installation.md#benchmark-data) for the download command. For your own dataset, see [Working with Results](../guide/results.md#loading-results) for the expected format.
+The ground truth is a COCO-format JSON file containing your dataset's annotations (bounding boxes, segmentation masks, or keypoints). See [The COCO Format](coco-format.md) for the expected file layout and which fields are required.
 
 === "Python"
 
@@ -113,8 +115,10 @@ Your results file should be a JSON array of detection dicts:
 === "CLI"
 
     ```bash
-    coco-eval --gt instances_val2017.json --dt detections.json --iou-type bbox
+    coco eval --gt instances_val2017.json --dt detections.json --iou-type bbox
     ```
+
+    The Rust binary takes the same flags: `coco-eval --gt ... --dt ... --iou-type bbox`.
 
 Output:
 
@@ -156,7 +160,7 @@ Output:
 === "Rust"
 
     ```rust
-    if let Some(stats) = &ev.stats {
+    if let Some(stats) = ev.stats() {
         let ap = stats[0];       // AP @ IoU=0.50:0.95, area=all
         let ap_50 = stats[1];    // AP @ IoU=0.50
         let ap_75 = stats[2];    // AP @ IoU=0.75
@@ -206,10 +210,10 @@ Output:
 
 ## Next steps
 
-- [Evaluation](../guide/evaluation.md) — bbox, segm, and keypoint workflows explained
-- [LVIS Evaluation](../guide/evaluation.md#lvis-evaluation) — federated annotation, 13-metric LVIS output
-- [TIDE Error Analysis](../guide/evaluation.md#tide-error-analysis) — decompose errors into Loc, Cls, Bkg, Miss, and more
+- [Evaluation](../guide/evaluation.md) — bbox, segm, keypoint, and OBB workflows explained
+- [LVIS & Open Images](../guide/lvis-open-images.md) — federated annotation, 13-metric LVIS output, hierarchy-aware Open Images eval
+- [Model Diagnostics](../guide/diagnostics.md) — TIDE errors, confusion matrix, calibration, F-scores, model comparison
 - [PyTorch Integration](../guide/pytorch.md) — `CocoDetection` dataset and `CocoEvaluator` for training loops
 - [Working with Results](../guide/results.md) — load_res, eval_imgs, precision/recall arrays
 - [API Reference](../api/coco.md) — full class and method reference
-- [Notebook: COCO Evaluation 101](../../examples/coco_evaluation_101.ipynb) — end-to-end walkthrough: diagnostics (TIDE, confusion matrix, calibration, label errors), model comparison, dataset ops, plots, and more
+- [Notebook: COCO Evaluation 101](https://github.com/derekallman/hotcoco/blob/main/examples/coco_evaluation_101.ipynb) — end-to-end walkthrough: diagnostics (TIDE, confusion matrix, calibration, label errors), model comparison, dataset ops, plots, and more

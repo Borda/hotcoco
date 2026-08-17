@@ -5,17 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - 2026-08-17
 
 ### Added
 
-### Changed
+- **`COCO.load_warnings`** — everything the loader tolerated but flagged (duplicate
+  annotation ids, non-finite JSON values normalized to `null`, orphaned result ids)
+  is collected on the object as well as printed to stderr.
+- **Custom JSON keys survive.** Keys outside the COCO schema on images, annotations,
+  and categories now round-trip `load → filter/split/merge → save`, appear in the
+  dicts `load_imgs`/`load_anns`/`load_cats` return, and are visible to `slice_by`
+  callables — closing a pycocotools drop-in gap, at no measurable load cost.
+- **`results()["params"]` records the full configuration** — `recall_thresholds`,
+  `use_cats`, `kpt_oks_sigmas`, and `reference_deviations` join the existing keys,
+  so a saved results file explains its own provenance.
+- **Type stubs cover the LVIS / torchvision drop-in surface** — `LVIS`, `LVISEval`,
+  `LVISeval`, `LVISResults`, `CocoDetection`, and `CocoEvaluator` are typed,
+  `import hotcoco.mask` type-checks, and `metrics.is_computed` /
+  `metrics.is_missing` are public.
+- **`coco explore` gained `--iou-type`, `--iou-thr`, `--no-eval`, and `--slices`.**
+  `--iou-thr` (and `COCO.browse(iou_thr=...)`) sets the UI slider's starting
+  position, snapped to 0.50–0.95 in steps of 0.05.
+- **`coco eval --diagnostics`** prints a worst-images-by-F1 table in human output,
+  alongside the label-error candidates.
+- **Docs: a ground-truth COCO JSON schema page** (The COCO Format) — which fields
+  are required on `images`/`annotations`/`categories`, what is optional, and that
+  unknown keys are preserved.
 
-### Fixed
-
-## [1.0.0] - 2026-08-06
-
-### Added
+- **`Image`, `Annotation` and `Category` now implement `Default`** (Rust API), so a
+  struct literal can name the fields it cares about and end with
+  `..Default::default()`. `Dataset` already did, and every optional field on all
+  three was already `#[serde(default)]` — "absent means default" was the schema's
+  contract on load but could not be spelled at a construction site. Removes ~670
+  lines whose only content was `None,` and `vec![],` from the converters and tests.
+- **Open Images CSV conversion** — `COCO.from_oid(csv_path, class_descriptions=None,
+  images_dir=None)`, `COCO.to_oid(output_csv)`, and `gt.load_res_oid(csv_path)`, plus
+  `coco convert --from oid --to coco` with `--class-descriptions`. hotcoco has shipped
+  Open Images evaluation since 0.3.0 but could not read the CSV format Open Images
+  actually distributes, so the feature named after the dataset required the caller to
+  write a parser first. Columns are resolved **by name**, which covers the full V6
+  layout, the challenge subset, and detection CSVs with a `Score` column from one
+  reader — and makes the format's `XMin,XMax,YMin,YMax` ordering (`XMax` before `YMin`)
+  impossible to transpose. `IsGroupOf` maps to the `is_group_of` annotation field that
+  drives IoA group-of matching. `load_res_oid` raises on a detection naming an unknown
+  image or category rather than dropping it, since a silently discarded detection moves
+  recall invisibly. Without `images_dir`, boxes stay normalized against a 1×1 image:
+  Open Images AP is unaffected because IoU and IoA are ratios of areas scaled equally on
+  both axes, but absolute areas and the small/medium/large ranges are not meaningful.
+- **DOTA conversion is now available from Python** — `COCO.to_dota(output_dir)` and
+  `COCO.from_dota(label_dir, images_dir=None, categories=None)`, plus
+  `coco convert --from dota --to coco`. The Rust functions shipped in 0.4.0 and were
+  never bound, so Python users could evaluate oriented boxes but could not load them
+  from the standard oriented-box format.
+- **`just docs-links` — a documentation link checker** (`scripts/check_docs_links.py`).
+  Resolves every internal Markdown link, heading anchor, and `zensical.toml` nav entry,
+  and fails on a link to a missing file, an anchor no page defines, a nav entry with no
+  file, or a page missing from nav. Nothing validated documentation links before, which
+  is how a docs-site button linking a notebook that 404s survived, along with a dozen
+  anchors left dangling by page renames. Wired into the `/docs` and `/ship` workflows.
+- **Two new user guide pages**, split out of `guide/evaluation.md`: **LVIS & Open
+  Images** (federated AP, the 13 LVIS metrics, the Open Images Challenge protocol and
+  group-of semantics) and **Model Diagnostics** (confusion matrix, TIDE, calibration,
+  F-scores, model comparison, per-image diagnostics and label errors).
+- **API reference entries for shipped surfaces that had none**: `COCOeval.slice_by`,
+  `summary_lines`, `virtual_cat_names`, `COCO.healthcheck`, and an LVIS section
+  covering `LVISeval`/`LVISEval`/`LVIS`/`LVISResults`.
 
 - **`hotcoco.metrics` now reads numpy arrays natively.** The module docstring
   always said "lists or numpy arrays", but the bindings put numpy on the slow
@@ -168,6 +222,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   files reappear, and `just disk` / `just clean` report and reclaim.
 
 ### Changed
+
+- **The five format converters now share one contract.** Malformed input raises an
+  error naming the file and line/position; records the target format cannot express
+  are skipped and **counted** — nothing vanishes uncounted. Missing image dimensions
+  are an error wherever geometry must scale (`from_yolo` no longer produces
+  degenerate 0×0 geometry; `to_oid` errors instead of skip-counting), with two
+  documented exceptions (`from_oid` without `images_dir` keeps 1×1 normalized
+  boxes; DOTA dimensions are metadata only). `file_name` is never invented:
+  verbatim where the format records it (CVAT, VOC), bare stem otherwise
+  (YOLO, DOTA, Open Images — no more fabricated `.png`/`.jpg`). Exports raise on
+  file-stem collisions and on an annotation referencing an unknown `category_id`,
+  in all five formats.
+- **Converter stats dicts renamed to the `skipped_<reason>` scheme**:
+  `missing_bbox` → `skipped_no_bbox` in `to_yolo`/`to_voc`/`to_oid`, `to_oid`
+  drops `missing_dims` (now an error), and `to_cvat` adds `skipped_degenerate`.
+- **`from_cvat` reads real CVAT exports**: shapes written as open/close pairs
+  (the form CVAT uses when a shape has `<attribute>` children) now import;
+  unsupported shapes and degenerate polygons are counted skips reported with a
+  `UserWarning` instead of aborting the file.
+- **YOLO `data.yaml` accepts the Ultralytics forms** of `names:` — index-keyed
+  dict and block list — in addition to the flow list; exported category names
+  containing commas are quoted.
+- **VOC conversion applies the devkit's 1-based inclusive convention in both
+  directions** (import `x = xmin − 1`, `w = xmax − xmin + 1`; export the
+  inverse), accepts float coordinates on import, and imports `<difficult>` to
+  `iscrowd` (the mapping was previously export-only).
+- **`dota_to_coco`'s Python argument order is `(label_dir, categories,
+  image_dims)`**, matching the Rust signature.
+- **Converter errors surface as `ValueError` / `IOError`** (was `RuntimeError`),
+  and the Rust CLI prints errors via `Display` instead of `Debug`.
+- **`coco healthcheck` exits 1 on ERROR-level findings** in both human and
+  `--json` modes, so the advertised CI-gate use works; `--help` documents the
+  exit status.
+- **`split(test_frac=0.0)` / `coco split --test-frac 0.0`** is honored as a
+  three-way split with an empty test set instead of falling back to two-way.
+- **Browse and the dashboard are fully offline** — DM Sans and plotly.js are
+  vendored with the package; DM Serif Display and JetBrains Mono fall back to
+  system font stacks.
+- **The `-1.0` "not computed" sentinel is handled consistently**: the PDF report
+  and dashboard render it as `n/a` (the CLI already did), printed metrics show
+  `-1.000` only for the true sentinel, and an unknown area label or max-dets
+  value in `summarize()` degrades to `-1.0` instead of silently reporting the
+  `"all"` slice under a per-size name.
+- **`compare()` raises `ValueError` on mismatched `iou_thrs`, `rec_thrs`,
+  `max_dets`, or area ranges** instead of summarizing one run under the other's
+  metric catalog.
+- **`f_scores()` key style is `F1` / `F2` / `F0.5`** — beta formatted with no
+  trailing zeros (was `F2.0`).
+- **`ev.stats` matches pycocotools in both states**: an empty list before
+  `summarize()`, a numpy `float64` array after (was `None` / plain list).
+- **`annToRLE` / `ann_to_rle` returns `{'size': [h, w], 'counts': bytes}`** —
+  the pycocotools and `mask.encode` format (was `{'h', 'w', 'counts': list}`).
+- **`mask.area` on a list returns a `uint32` array** (pycocotools parity).
+- **Pre-`evaluate()`/`accumulate()` guards are catchable `UserWarning`s** —
+  previously raw stderr prints, invisible in Jupyter.
+- **`params`, `dataset`, `coco_gt`, and `coco_dt` getters return copies** —
+  assign back to apply. Now documented, with the pull-edit-assign idiom, in the
+  migration guide and API reference.
+- **Annotations missing `area` are excluded from explicit area-range queries**
+  (`get_ann_ids(area_rng=...)`, `filter(area_rng=...)`) — a documented divergence
+  from pycocotools, which raises `KeyError` there.
+- **`plot.pr_curve(iou_thr=0.0)` is honored** — an explicit `0.0` was previously
+  swallowed by the dispatcher's `iou_thr or 0.5` default.
+- **The full benchmark tables live only on the Benchmarks page**; the README
+  keeps a headline claim and a link, so the numbers cannot drift apart.
+
+- **ROADMAP.md is forward-looking only** (333 → 49 lines). Shipped items are now
+  deleted from it rather than marked `**Shipped.**` and struck through — that
+  convention had turned the roadmap into a second, worse changelog in which roughly
+  three quarters of the file described work already released. The architecture
+  overview it carried (diagram, crate layout, registry table) moved to
+  `CONTRIBUTING.md`, where contributor-facing reference belongs.
+- **`guide/evaluation.md` reduced from 1,003 to 258 lines**, now covering just the
+  evaluation pipeline, the four `iou_type` values, the standard metrics, params, and
+  sliced evaluation. Its JSON-export and experiment-tracker sections moved to
+  **Working with Results**, which is now the canonical home for both, and for the
+  `provenance` explanation that had been written five different ways across five pages.
+- **Guide and API pages divided by role**: guides hold worked examples and
+  interpretation, API pages hold signatures, parameters, and return shapes. Return-shape
+  and parameter tables duplicated into the guides were removed in favor of links.
+- **26 repeated camelCase-alias admonitions** across `api/coco.md`, `api/params.md`,
+  and `api/mask.md` collapsed into one note per page pointing at the alias table in the
+  migration guide.
+- **~300 lines of comments removed across 26 source files** with no loss of
+  information. The recurring pattern was a change's rationale pasted into the file and
+  left permanently — measurements of code that no longer exists, bug post-mortems, and
+  in two cases a comment arguing with its own earlier revision. Parity references,
+  invariants, and compatibility traps were kept. `hotcoco`'s crate-level docs dropped
+  from 83 to 59 lines, with the 1.0 module-rename table moved to the migration guide.
+- **Internal planning documents moved from `docs/plans/` to `plans/`** at the repo
+  root. Zensical builds every Markdown file under `docs/` whether or not it appears in
+  the nav, so planning notes were being rendered into the site output and its search
+  index; only `.gitignore` kept them out of CI. They are now outside the docs tree
+  entirely.
+- **Benchmarks re-measured on 1.0** (they had been published from 0.5.0 and 0.3.0
+  builds). On COCO val2017 bbox evaluation is now 0.14s against 5.11s for pycocotools
+  — 36.2×, up from a published 33.4× — with segm at 20.8× and keypoints at 18.8×;
+  the evaluation engine alone is 35–74× rather than 30–52×. Every figure is the
+  per-cell median of three runs. The claim that hotcoco "scales better at higher
+  detection counts" was removed: at 10× detections its advantage narrows to 8–33×,
+  which the previous numbers already showed for segm and keypoints. The benchmark
+  pages now state the **core count** of each machine and note that speedups scale
+  with it — hotcoco evaluates in parallel and pycocotools does not, so a ratio
+  measured on 8 cores does not describe a 4-core laptop.
+- Docs-site description updated from "11-26x faster" (a figure matching no current
+  measurement) to "up to 36× faster", and Benchmarks promoted to a top-level nav item.
 
 - **TIDE's `FP` and `FN` ΔAP now follow tidecv's special-oracle definitions,
   and both are parity-gated.** Previously `FP` was the union fix of the five
@@ -406,6 +566,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and Objects365.
 
 ### Fixed
+
+- **Result files carrying both `segmentation` and `keypoints` are typed as
+  segmentation**, matching pycocotools' `elif` precedence — previously keypoints
+  won, a silent parity divergence.
+- **`evaluate()` no longer panics on empty `max_dets`** — it degrades to the
+  default detection cap and `-1.0` summary stats, like every sibling entry point.
+- **Malformed RLE strings, polygon coordinates, and mask dimensions now raise
+  errors** instead of panicking or overflowing — the mask kernels no longer trust
+  values from untrusted annotation files.
+- **Extension import failures explain themselves**: when the package is present
+  but its compiled extension fails to import, the CLI says so and suggests
+  reinstalling, rather than claiming hotcoco is not installed.
+
+- **VOC conversion reported a `<part>`'s bounding box as its object's.** A VOC2012
+  `<object>` may contain `<part>` sub-elements describing regions of itself — a person's
+  head, hand, or foot — each with its own `<name>` and `<bndbox>`. The parser skipped a
+  part's `<name>` but not its `<bndbox>`, and because parts always follow the object's
+  own box in VOC2012, the *last part's* coordinates overwrote the object's. Every
+  annotation with parts converted to the wrong box, silently, on the most common class
+  in the dataset. Nothing caught it: no test used a `<part>` element, and the guard was
+  spelled out on one branch of a five-flag state machine and forgotten on the next.
+  The parser now tracks a single position value in which "inside a part" and "inside the
+  object's box" are mutually exclusive, so there is no second branch to forget.
+- **`mask.fr_py_objects` was unreachable, and `mask.fr_py_objects_snake` was public
+  instead.** The snake_case alias carried no `#[pyo3(name)]`, so PyO3 exported the Rust
+  identifier verbatim. Every other mask function ships both spellings, and both the API
+  reference and the migration guide's alias table promised this one, so the documented
+  call raised `AttributeError` while a name no one would type was the only way in.
+- **`COCO.toYolo`, `COCO.fromYolo` and `Params.expandDt` were declared in the type stubs
+  but never defined**, so an IDE would autocomplete all three into an `AttributeError`.
+  The stub conformance test only asserted that every runtime member appears in the
+  stub — never the reverse — so a stub could invent members freely.
+  `test_members_covered` now checks both directions; it fails on all four defects
+  above when run against the previous build.
+- **Two documented Python APIs did not exist.** `COCO.to_dota()` / `from_dota()` were
+  described with worked examples on five surfaces including the README, and
+  `Hierarchy.from_categories` in the evaluation guide and API reference; both were
+  Rust-only, so the Python examples raised `AttributeError`. DOTA is resolved by
+  binding it (see Added). `Hierarchy.from_categories` stays Rust-only, and the
+  hierarchy guidance now shows the automatic `supercategory` derivation that
+  `oid_style=True` performs when no hierarchy is passed.
+- **`COCO.browse()` was documented with 4 of its 8 parameters**, omitting `iou_type`,
+  `iou_thr`, `slices`, and `eval` — the last being the one the README points at for the
+  evaluation dashboard.
+- **`iou_type` documentation omitted `"obb"`** in `api/cocoeval.md` and `api/params.md`,
+  contradicting the guide and README. The CLI's `--iou-type` genuinely does not accept
+  it, which is now stated rather than left as a surprise.
+- **Stale version references**: the Rust install snippet pinned `hotcoco = "0.4"`, the
+  CLI's sample JSON output showed `"hotcoco_version": "0.3.0"`, and the val2017
+  benchmark table was labeled 0.5.0 despite reporting 1.0 timings.
+- **A citation of hotcoco 0.6.0**, a release that never existed, in the Open Images
+  protocol note.
+- **The docs-site "Open Notebook" button and a quickstart link** pointed at a relative
+  path outside `docs/`, which 404s on the published site; both now use the repository
+  URL.
+- **`api/integrations.md` showed a `CocoEvaluator` import path that does not exist**
+  in torchvision (`torchvision.models.detection.coco_utils`).
+- **A doc comment placed between `#[derive]` and `#[non_exhaustive]`** on
+  `AccumulatedEval`, separating the struct from its documentation.
+- **Two comments in `metrics/calibration.rs` contradicted each other** about whether
+  out-of-range score handling was settled policy or an open question; the test now
+  pins the documented behavior.
 
 - **Unsorted `max_dets` no longer silently empties `image_diagnostics()`.** Five
   sites each derived the per-image detection cap independently — four spelled
@@ -728,6 +950,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   each gap without the torch dependency.
 
 ### Removed
+
+- **`hotcoco.eval_index`** — a deprecated shim with zero callers, removed before
+  1.0 froze it.
+
+- **The `toVoc`, `fromVoc`, `toCvat` and `fromCvat` camelCase aliases.** A camelCase
+  alias exists for exactly one reason — pycocotools has a method of that name and
+  hotcoco is a drop-in replacement — and pycocotools has no converters at all. (LVIS
+  never motivated the convention either; its API is snake_case.) The four were
+  undocumented on every surface, absent from the migration guide's alias table, and
+  reachable only via `dir()`. `to_voc`, `from_voc`, `to_cvat` and `from_cvat` are
+  unchanged, and the nine genuine pycocotools aliases — `getAnnIds`, `loadRes`,
+  `annToMask` and friends — are untouched. No camelCase aliases were added for the new
+  DOTA and Open Images converters, for the same reason.
 
 - **Five pre-1.0 Rust *module* paths, with no compatibility aliases.** `cargo-semver-checks`
   reports 47 removed paths, and every one is under these five:

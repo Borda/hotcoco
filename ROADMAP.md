@@ -1,333 +1,47 @@
 # Roadmap
 
-Planned features and improvements, organized by priority.
-
-## Architecture
-
-All core logic lives in the Rust library. The Python package and Rust CLI are thin wrappers.
-
-```
-                       ┌──→ PyO3 ──→ hotcoco (Python library + CLI)
-Rust Core (all logic) ─┤
-                       └──→ hotcoco-cli (Rust CLI, eval only)
-```
-
-- **Rust core** — types, masks, eval, dataset ops, format conversion, streaming
-- **`primitives/`** — the shared evaluation substrate: similarity kernels (`sim`), matching (`greedy`, `assign`), and count/AP aggregation (`counts`). One auditable home per operation. Detection composes these today; panoptic, tracking, and concepts will compose the same ones.
-- **Python CLI** (primary) — all subcommands: `$ coco eval`, `$ coco stats`, `$ coco merge`, `$ coco plot`, etc. Rich formatting, plots via matplotlib/plotly.
-- **Rust CLI** (`hotcoco-cli`) — evaluation only. Subcommands `eval` (the default action, also accepted bare) and `completions`. JSON/CSV/markdown output, no plots, no Python. New features added on request.
-
-| Registry | Package | Contents |
-|----------|---------|----------|
-| PyPI | `hotcoco` | Python library + Python CLI + compiled Rust core |
-| crates.io | `hotcoco` | Rust library |
-| crates.io | `hotcoco-cli` | Rust CLI binary (eval only, no Python) |
-
----
-
-## Shipped
-
-### 1.0 — Detection on the Stage Architecture
-
-**Shipped.**
-
-~~Rebuilt detection on the `primitives/` substrate and deleted the `eval/` monolith. The Rust `eval` module is now `detection` — one metric family beside the panoptic, tracking, and concept families to come — with `quality/` as a separate dataset-introspection tier. `eval/types.rs` dissolved, each type moving next to the stage that produces it; `summarize.rs` (861 lines, five jobs) split into `metrics` / `summarize` / `report`; per-image matching moved into `matching.rs`; TIDE's tidecv priority order extracted as a unit-testable `classify_fp`; the whole-dataset similarity cache made driver-private so tracking keeps the option to recompute rather than retain.
-
-Added `EvalReport` — the shape every family reports in — with enforced `Provenance`, so extension numbers cannot silently read as leaderboard numbers. Added the `hotcoco.detection` namespace and fixed `import hotcoco.mask`, which had never worked.
-
-Completed the functional layer, which had stopped half-built. `primitives` already exposed the kernels as free functions, but every derived metric — calibration, confusion, bootstrap — had been written as a `COCOeval` method, so scoring anything outside the COCO pipeline meant reimplementing it. Those moved into `metrics` as functions over flat arrays (`average_precision`, `precision_recall_curve`, `calibration_curve`, `calibration_error`, `confusion_matrix`), the shape `sklearn.metrics` and `torchmetrics.functional` use, and both namespaces ship in Python. `primitives` narrowed to the three matching kernels, splitting the two by what a function produces — matches versus numbers from matches — with `tests/architecture.rs` enforcing the direction of the dependency. `COCOeval`'s analysis methods became adapters over the same functions, so the object API and the functional API cannot diverge.
-
-**Numbers did not move.** Every step was gated byte-identical against a pinned baseline — stats, precision/recall/scores arrays, every `evalImgs` entry, printed output, and the analysis layer — across bbox, segm, and keypoints on full val2017 plus LVIS-federated and threshold-boundary fixtures. `cargo-semver-checks` confirms the entire reorganisation is invisible from outside the crate.
-
-The one deliberate behavior change: detection matching now applies pycocotools' `min(t, 1-1e-10)` match floor, closing a real divergence at `iou_thr=1.0`. Inert below 1.0, so no published metric moves.~~
-
-**Compatibility.** Python is untouched — `hotcoco.COCOeval`, `init_as_pycocotools()`, and the `pycocotools`/LVIS drop-in surface are permanent, and everything new is additive. On the Rust side five pre-1.0 *module* paths are gone (`eval`, `hierarchy`, `healthcheck`, `types::*Stats`, `primitives::counts`) with no aliases: 0.x carried no stability promise under SemVer, and the crate-root re-exports — `hotcoco::COCOeval`, `hotcoco::Hierarchy`, `hotcoco::SummaryStats` and the rest — absorbed every move unchanged. 1.0 is where the surface is fixed.
-
-### Evaluation Primitives Foundation
-
-**Shipped.**
-
-~~Extracted the shared evaluation substrate into `primitives/` — the groundwork for rebuilding detection on a stage architecture at 1.0, and for the panoptic/tracking/concepts families after it. `sim` owns every similarity kernel (bbox, mask, OBB, OKS) plus the scalar `bbox_iou_pair`; `greedy` owns pycocotools-exact matching; `assign` owns scipy-exact rectangular LSAP; `counts` owns the PR accumulator and the AP core. Collapsed the duplication this replaced: bbox IoU 4 impls → 1, the crowd/union formula 3 → 1, AP-from-matched 3 → 1, greedy matchers 2 → 1, and two disagreeing `MIN_PARALLEL_WORK` constants → 1. Behavior is unchanged throughout — parity with pycocotools holds and the confusion-matrix rewrite was proven byte-identical on val2017 across 160 configurations. `tests/architecture.rs` now fails the build if any of it is duplicated again.~~
-
-### Plotting & PDF Report
-
-**Shipped.**
-
-~~Publication-quality matplotlib plots (`pr_curve`, `confusion_matrix`, `top_confusions`, `per_category_ap`, `tide_errors`) and a single-page PDF evaluation report (`report()`). Mode-aware metrics table adapts rows for bbox/segm, keypoints, and LVIS. Available via Python API and `coco report` CLI subcommand.~~
-
-### Python CLI Evaluation
-
-`coco eval` — full COCO evaluation from the Python CLI, matching all flags of the Rust `coco-eval` binary: `--gt`, `--dt`, `--iou-type`, `--img-ids`, `--cat-ids`, `--no-cats`.
-
-### Dataset Statistics
-
-Quick health check for any COCO dataset — annotation counts per category, image size distributions, area distributions, crowd/iscrowd breakdown. Available as `coco.stats()` in Python and `coco stats` in the Python CLI.
-
-### Dataset Operations
-
-Split, merge, filter, and sample COCO datasets:
-
-- ~~**Filter** — subset by category, image ID, area range, or custom predicate~~
-- ~~**Merge** — combine multiple annotation files (e.g., separate labeling batches)~~
-- ~~**Split** — reproducible train/val/test split with deterministic shuffle~~
-- ~~**Sample** — random or deterministic subset for quick iteration~~
-
-All implemented in Rust core, exposed via Python CLI and Python API.
-
-### CI/CD
-
-- ~~`cargo test` / `cargo clippy` / `cargo fmt --check`~~
-- ~~Cross-platform matrix (Linux/macOS/Windows)~~
-- ~~Python smoke test (`maturin develop` + inline import/eval check)~~
-- ~~Automated release publishing to crates.io and PyPI~~
-
-### Objects365
-
-**Shipped.**
-
-~~Standard COCO evaluation protocol over 365 categories and ~2M images.~~ Verified working on real O365 annotation data. Benchmark numbers published: 39× vs pycocotools, 14× vs faster-coco-eval on 80k images / 365 categories / 1.2M detections, using 8 GB committed vs 24–30 GB for alternatives.
-
-### LVIS
-
-**Shipped.**
-
-~~1,200 category long-tail dataset requiring **federated AP** evaluation — per-category results are computed independently across the subset of images that contain each category, rather than globally. Using standard pycocotools on LVIS gives subtly wrong numbers. Increasingly common in foundation model benchmarking (SAM, DINO, CLIP-based detectors). faster-coco-eval already supports this and is winning users there.~~
-
-### Confusion Matrices
-
-**Shipped.**
-
-~~Per-category confusion matrix generation to identify systematic misclassifications. Self-contained, high value for practitioners debugging model failures, and the natural starting point for the visualization story.~~
-
-### Confidence Calibration
-
-**Shipped.**
-
-~~Expected Calibration Error (ECE), Maximum Calibration Error (MCE), per-bin accuracy vs confidence breakdown, and per-category ECE. `COCOeval.calibration()` in Python, `calibration()` in Rust, reliability diagram plot, `coco eval --calibration` CLI flag.~~
-
-### Model Comparison & A/B Testing
-
-**Shipped.**
-
-~~Compare two or more models on the same dataset — per-category AP deltas, per-image score comparison, and statistical significance via bootstrap confidence intervals.~~
-
-- ~~`coco.compare(eval_a, eval_b)` — side-by-side metrics table with deltas and significance~~
-- ~~Per-category AP delta sorted by largest change; worst regressions and best improvements~~
-- In browse: toggle Model A / Model B predictions on the same image (future)
-- ~~Bootstrap resampling for confidence intervals on AP ("Model B is better by 0.3 AP, 95% CI [0.1, 0.5]")~~
-
-### Per-Image Diagnostics & Failure Mining
-
-**Shipped.**
-
-~~Find the hardest images, understand failure modes, sort by difficulty.~~
-
-- ~~Per-image AP / F1 — sortable in gallery ("worst images first")~~
-- ~~Error profiles: perfect / FP-heavy / FN-heavy / mixed~~
-- Failure clustering — group images by dominant TIDE error type (future)
-- Quick filters: "Images with only FP", "Images with only FN" (browse UI — future)
-- Click-through from confusion matrix cell to browse filtered to those misclassifications (browse UI — future)
-
-### Label Error Detection
-
-**Shipped.**
-
-~~Automatically surface likely annotation mistakes using model predictions as a proxy.~~
-
-- ~~"Wrong label" — high-confidence predictions that disagree with GT labels~~
-- ~~Missing annotation detector — FPs that might be GT errors~~
-- Integration with healthcheck: flag likely label errors alongside structural issues (future)
-
-### Interactive Eval Dashboard
-
-**Shipped.**
-
-~~Unified page showing all evaluation results with click-through to browse.~~
-
-- ~~`/dashboard` route in browse server with embedded Plotly charts (via `fig.to_html()`)~~
-- ~~Click confusion matrix cell → filtered gallery~~
-- Click PR curve point → browse images at that threshold (future)
-- ~~Click per-category AP bar → browse that category's predictions~~
-- Drill-down: aggregate → category → image → annotation (future)
-
----
-
-## Tier 1 — Near Term
-
-### HTML Evaluation Report
-
-One self-contained HTML file per eval run — the first viewport is a glanceable one-pager (headline metrics, provenance, PR curves, error impact), with interactive depth below the fold (sortable per-category table, hover detail). `ev.report().to_html(path)` plus a CLI flag, and print CSS covers casual PDF needs.
-
-- Rendering contract first: surfaces render `EvalReport`, they never compute — the viz twin of "metric math lives in `metrics`", enforced the same way
-- HTML charts move from Plotly to Observable Plot: SVG-in-DOM inherits page CSS, so the Cold Brew theme applies as stylesheet tokens instead of transcribed hex constants; vendored offline, which also removes browse's only CDN dependency
-- Browse's dashboard tab migrates to the same templates and specs
-- Composable matplotlib figures (`plot/plots.py`) stay — `ax=` composition for notebooks and papers
-- The matplotlib PDF report freezes at 1.0 and retires once the HTML report ships
-
-## Tier 2 — Medium Term
-
-### Format Conversion
-
-**Shipped (COCO ↔ YOLO, COCO ↔ Pascal VOC, COCO ↔ CVAT).**
-
-~~COCO ↔ YOLO first (most requested). Everyone has a slightly broken converter script — a correct, well-tested one has real value.~~
-
-~~Pascal VOC~~ — bbox-only, bidirectional. VOC `<difficult>` mapped from COCO `iscrowd` on export, dropped on import. Integer-pixel round-trip within ≤1px.
-
-~~CVAT for Images 1.1~~ — single XML file, boxes + polygon segmentation. Polygon area via shoelace, bbox from vertex extents. `<polyline>`, `<points>`, `<cuboid>` skipped. Video deferred.
-
-### Oriented Bounding Boxes (OBB)
-
-**Shipped.**
-
-~~Evaluate rotated/oriented detections for aerial imagery, document analysis, and scene text. The rotated IoU kernel is the only new Rust code (~175 lines); everything else (AP accumulation, TIDE, confusion matrix) works unchanged with the different IoU function.~~
-
-- ~~Rotated IoU computation (polygon intersection of two rotated rectangles via Sutherland-Hodgman clipping)~~
-- ~~OBB parameterized as `(cx, cy, w, h, angle)` in radians~~
-- ~~DOTA format import/export~~
-- ~~Shapely-based parity fuzzer for IoU kernel verification~~
-- ~~OBB visualization in browse (rotated rectangle overlays, hit-testing)~~
-
-### Panoptic Segmentation (PQ)
-
-Panoptic Quality metric (Kirillov et al.) for unified "stuff" + "things" evaluation. Simpler than AP — no confidence scores, no accumulation over IoU thresholds.
-
-- PQ = SQ (Segmentation Quality) × RQ (Recognition Quality)
-- Per-class PQ, PQ_things, PQ_stuff breakdown
-- Panoptic PNG format support (category_id × 256 + instance_id encoding)
-
-### Open-Vocabulary Detection & Grounding
-
-Open-vocabulary detectors (Grounding DINO, OWL-ViT, YOLO-World) are evaluated with standard AP — OV-LVIS, the standard open-vocab benchmark, is federated LVIS AP over rare categories, which hotcoco already computes correctly. The near-term work is documentation, not code: a guide to evaluating open-vocabulary detector outputs with hotcoco, including mapping text-prompted predictions onto COCO category IDs.
-
-If demand shows up, a `grounding` metric family (Recall@k over box–phrase matches, RefCOCO-style Acc@IoU≥0.5) composes directly from the existing `primitives` layer as a sibling of `detection`.
-
-**Out of scope:** caption metrics (CIDEr, SPICE, METEOR) and model-in-the-loop metrics (CLIPScore, FID). Every hotcoco metric is a pure function from predictions and ground truth to numbers, verified against a reference implementation. Caption metrics aren't compute-bound and are being displaced by LLM-as-judge; CLIPScore and FID require running a model and their values depend on the checkpoint, so no parity claim is possible.
-
-### TIDE Error Analysis
-
-**Shipped.**
-
-~~Error decomposition following [TIDE](https://github.com/dbolya/tide) — classification, localization, duplicate, background, and missed errors. Builds naturally on confusion matrices and is a meaningful differentiator from faster-coco-eval.~~
-
-### PyTorch Ecosystem Integrations
-
-**Shipped.**
-
-~~Drop-in ``CocoEvaluator`` and ``CocoDetection`` classes for PyTorch training loops. No torchvision or pycocotools dependency required. ``CocoEvaluator`` supports distributed multi-GPU evaluation with ``synchronize_between_processes()``. ``CocoDetection`` is a lightweight COCO dataset class compatible with ``DataLoader``.~~
-
----
-
-## Tier 3 — Later
-
-### Streaming Evaluation
-
-Evaluate datasets that don't fit in memory. Process annotations in chunks without loading the full ground truth and detection sets upfront. Needed at O365/LVIS scale in production but not blocking anyone today — slot in once real users hit memory limits.
-
-### CrowdPose
-
-Keypoint dataset for crowded scenes. Uses a modified OKS matching algorithm with a crowd factor. Niche audience and significant custom eval logic — not worth prioritising before LVIS.
-
-### Hierarchical Evaluation
-
-**Shipped.**
-
-~~Open Images-style evaluation with category hierarchies, where a detection of a parent category is not penalized against a child. Small, specialised audience.~~ `COCOeval(oid_style=True, hierarchy=h)` with `Hierarchy.from_file()` / `from_categories()` / `from_parent_map()`; group-of matching semantics, GT expansion, optional DT expansion via `params.expand_dt`.
-
-### Dataset Healthcheck
-
-**Shipped.**
-
-~~4-layer validation (structural, quality, distribution, GT/DT compatibility) for COCO annotation files. `coco.healthcheck()` and `coco.healthcheck(dt)` in Python; `healthcheck()` / `healthcheck_compatibility()` in Rust; `coco healthcheck` CLI subcommand. `--healthcheck` flag on `coco eval` runs validation before evaluation.~~
-
-### Sliced Evaluation
-
-**Shipped.**
-
-~~`COCOeval.slice_by(slices)` re-accumulates metrics for named image-ID subsets (e.g. indoor/outdoor, day/night) without recomputing IoU. `--slices <json>` flag on `coco eval` CLI.~~
-
-### Shell Completions
-
-**Shipped.**
-
-~~Tab completion for both CLIs: `coco-eval completions <bash|zsh|fish|elvish|powershell>` (Rust, powered by `clap_complete`; the older `--completions <shell>` flag still works but was unusable standalone until 0.5); `pip install "hotcoco[completions]"` enables `coco` tab completion via `argcomplete`.~~
-
-### Viewer Migration: FastAPI + HTMX
-
-**Shipped.**
-
-~~The current Gradio-based viewer hits a hard ceiling: no click/hover events, no interactive zoom, ~50MB dependency weight. Replaced with FastAPI + HTMX + Jinja2 + Canvas:~~
-~~- Gallery browsing and filtering via HTMX (server-rendered, no build toolchain)~~
-~~- Annotation detail panel as Canvas overlay with vanilla JS hover/zoom/click~~
-~~- Same `coco.browse()` / `coco explore` API surface — drop-in replacement~~
-~~- ~5MB dependency weight vs ~50MB for Gradio~~
-~~- Jupyter embed via IFrame; responsive from 400px to 1400px+~~
-
-### Multi-Object Tracking Metrics (HOTA/MOTA/IDF1)
-
-Full tracking evaluation — HOTA (Higher Order Tracking Accuracy), MOTA, IDF1. TrackEval (the de-facto standard) is pure Python, effectively unmaintained, and the Ultralytics community is actively requesting tracking metrics. A fast Rust implementation would be a strong differentiator. HOTA decomposes into DetA × AssA, evaluated across IoU thresholds; requires cross-frame global alignment. Track AP (TAO) is the most natural entry point since it reuses the AP accumulation pipeline.
-
-This is a significant scope expansion — commit fully or not at all. A partial MOT implementation has no value.
-
-### Video Sequence Analysis
-
-Lightweight per-sequence metric breakdowns for video object detection, surfacing high-level trends like which clips perform worst. Track AP (used by TAO, BURST, YouTube-VIS) is a natural extension of the existing COCO AP pipeline and the most likely entry point here.
-
-### FiftyOne Evaluation Backend
-
-Custom evaluation backend for [FiftyOne](https://github.com/voxel51/fiftyone) (Voxel51). FiftyOne's built-in COCO eval is slow and surfaces only the 12 standard metrics. A hotcoco backend would bring the speed advantage and expose TIDE error breakdowns and confusion matrices directly in the FiftyOne UI — metrics that don't exist in any other FiftyOne backend today. `init_as_pycocotools()` may already work as a zero-code path; the full backend adds discoverability and UI integration.
-
-Longer term, full multi-object tracking metrics — MOTA, HOTA, IDF1 — are worth exploring as a Phase 2 effort. TrackEval (the de-facto standard) is effectively unmaintained and slow; there's a real opening for a fast Rust alternative. This would be a meaningful scope expansion and is not planned for the near term, but the direction is intentional.
-
-### torchmetrics Backend
-
-`MeanAveragePrecision(backend="hotcoco")` via a setuptools entry point that torchmetrics discovers at runtime. One-word change in training code; no other modifications needed.
-
-### Experiment Tracking Integrations — **Shipped.**
-
-~~Logging COCO metrics to experiment trackers is boilerplate every practitioner rewrites.~~
-~~A `hotcoco.loggers` submodule with a `log_metrics(eval, logger, step=None)` helper would~~
-~~eliminate this, providing sensible default metric names (`eval/AP`, `eval/AP50`, etc.) and~~
-~~handling the flat dict format each platform expects.~~
-
-Implemented as `get_results(prefix, per_class)` — returns a flat `dict[str, float]` with
-prefixed keys and optional per-category AP, ready for `wandb.log()`, `mlflow.log_metrics()`,
-or any tracker. No framework-specific wrappers needed.
-
-### Hugging Face Integration
-
-Hugging Face's [`evaluate`](https://github.com/huggingface/evaluate) library has a metric
-backend concept — publish a `hotcoco` metric module and it shows up in hub search, gets
-discovered by anyone browsing COCO-related metrics, and slots into any HF training pipeline
-(Trainer, Accelerate, etc.) with a one-liner. COCO detection and segmentation metrics are
-among the most searched in `evaluate`; a faster, drop-in implementation is a natural fit.
-
-### Kaggle
-
-No formal plugin system, but Kaggle is high-traffic for object detection competitions that
-use COCO-format annotations. Two practical plays:
-
-- **Notebooks** — a public notebook on a popular COCO-format competition demonstrating
-  hotcoco eval gets surfaced in Kaggle search and "related notebooks," reaching a targeted
-  audience of practitioners who are already running COCO evaluation.
-
-### Data Viewer / Explorer
-
-**Shipped.**
-
-~~Lightweight dataset browsing without pulling in FiftyOne or other heavy tools. Two layers:~~
-
-~~- **Python API** — `coco.browse(category="person", limit=20)` opens a simple grid view of
-  images with overlaid annotations. Enough to sanity-check a dataset, spot labeling errors,
-  and verify detections at a glance. Renders inline in Jupyter notebooks via IPython display;
-  falls back to a temp HTML file outside notebooks.~~
-
-~~- **Streamlit app** — `coco explore` CLI command launches a local Streamlit dashboard with
-  filtering by category, image ID, area range, and confidence score. Covers the 90% use case
-  of "let me look at my data" without any setup. Includes a one-click "Open in FiftyOne"
-  button for users who outgrow the built-in viewer — generates the FiftyOne dataset import
-  snippet and copies it to the clipboard.~~
-
-~~Intentionally minimal — not trying to compete with FiftyOne's full feature set. The goal is
-zero-dependency quick looks (Python API) and a lightweight local dashboard (Streamlit) that
-bridge the gap between "stare at JSON" and "install a full data platform."~~
+What's planned, in rough priority order. This page is forward-looking only — for
+what has already shipped, see the [CHANGELOG](CHANGELOG.md).
+
+## Near term
+
+- **HTML evaluation report** — one self-contained HTML file per eval run:
+  headline metrics, provenance, PR curves, and error impact at a glance, with
+  interactive depth (sortable per-category table, hover detail) below the fold.
+  `ev.report().to_html(path)` plus a CLI flag; print CSS covers casual PDF
+  needs. Charts move from Plotly to vendored Observable Plot, browse's
+  dashboard tab migrates to the same templates, and the matplotlib PDF report
+  retires once the HTML report ships.
+
+## Medium term
+
+- **Panoptic segmentation (PQ)** — PQ = SQ × RQ for unified "stuff" + "things"
+  evaluation, with per-class, things, and stuff breakdowns and panoptic PNG
+  format support.
+- **Open-vocabulary detection** — a guide to evaluating open-vocabulary
+  detector outputs (Grounding DINO, OWL-ViT, YOLO-World) with hotcoco. OV-LVIS
+  is federated LVIS AP over rare categories, which hotcoco already computes;
+  the near-term work is documentation, with a `grounding` metric family
+  (Recall@k over box–phrase matches, RefCOCO-style accuracy) to follow only if
+  demand shows up. Caption metrics (CIDEr, SPICE) and model-in-the-loop metrics
+  (CLIPScore, FID) stay out of scope — their values depend on a checkpoint, so
+  no parity claim is possible.
+
+## Later
+
+- **Multi-object tracking metrics** — HOTA, MOTA, IDF1, with Track AP (TAO) as
+  the natural entry point. All-or-nothing scope: a partial MOT implementation
+  has no value.
+- **Streaming evaluation** — chunked evaluation for datasets that don't fit in
+  memory. Slots in once real users hit memory limits at Objects365/LVIS scale.
+- **Ecosystem backends** — a FiftyOne evaluation backend surfacing TIDE errors
+  and confusion matrices in its UI; `MeanAveragePrecision(backend="hotcoco")`
+  for torchmetrics via a setuptools entry point; a Hugging Face `evaluate`
+  metric module.
+- **Browse enhancements** — model A/B overlay toggle, failure clustering by
+  TIDE error type, PR-curve click-through, aggregate → category → image
+  drill-down.
+- **CrowdPose** — crowded-scene keypoint evaluation with the modified OKS
+  crowd factor.
+- **Per-sequence video breakdowns** — per-clip metric trends for video object
+  detection.

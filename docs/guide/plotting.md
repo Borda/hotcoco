@@ -39,14 +39,8 @@ who did not run the evaluation, the marker is always present, so a report *witho
 caveat means the run was checked rather than that the caveat was omitted. See
 [Check provenance before you publish a number](results.md#check-provenance-before-you-publish-a-number).
 
-Works with all three evaluation modes — hotcoco automatically selects the right metric rows
-for each:
-
-| Mode | Rows |
-|------|------|
-| `bbox` / `segm` | AP, AP50, AP75, APs, APm, APl · AR1, AR10, AR100, ARs, ARm, ARl |
-| `keypoints` | AP, AP50, AP75, APm, APl · AR, AR50, AR75, ARm, ARl |
-| LVIS | AP, AP50, AP75, APs, APm, APl, APr, APc, APf · AR@300, ARs@300, ARm@300, ARl@300 |
+Works with all three evaluation modes — the metrics table picks the right rows for
+each automatically ([which rows](../api/plot.md#report)).
 
 Or from the CLI (requires `pip install hotcoco[plot]`):
 
@@ -161,14 +155,9 @@ AP deltas sorted by magnitude — green for improvements, red for regressions.
 
 ## Themes
 
-Every plot function accepts a `theme` argument:
-
-| Theme | Description |
-|-------|-------------|
-| `"cold-brew"` | Default. Warm off-white background, 10-color infographic palette. |
-| `"warm-slate"` | Warm off-white background, terracotta + slate palette. |
-| `"scientific-blue"` | Cool/academic. Blue-grey background, navy + red anchor colors. |
-| `"ember"` | Warm/editorial. Parchment background, rust + copper + amber palette. |
+Every plot function accepts a `theme` argument — `"cold-brew"` (the default),
+`"warm-slate"`, `"scientific-blue"`, or `"ember"`. See
+[themes](../api/plot.md#themes) for what each looks like.
 
 ```python
 fig, ax = pr_curve(ev, theme="scientific-blue")

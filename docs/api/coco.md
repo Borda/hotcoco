@@ -76,6 +76,20 @@ which is how pycocotools consumers construct in-memory datasets
 re-indexes, and is a formality after assignment since the setter already
 indexed).
 
+Reading `coco.dataset` returns a **fresh copy** on every access — mutating it in
+place is a no-op. To modify a dataset, pull the dict out, edit it, and assign it
+back:
+
+```python
+d = coco.dataset
+d["annotations"].append(new_ann)
+coco.dataset = d          # applies the change and rebuilds the index
+```
+
+Keys outside the COCO schema (custom metadata on images, annotations, or
+categories) are preserved through load, dataset ops, and `save` — see
+[The COCO Format](../getting-started/coco-format.md#unknown-keys-are-preserved).
+
 === "Python"
 
     ```python
@@ -91,6 +105,21 @@ indexed).
     println!("{}", coco.dataset.images.len());       // 5000
     println!("{}", coco.dataset.annotations.len());  // 36781
     ```
+
+---
+
+### `load_warnings`
+
+Warnings collected while loading and indexing — duplicate annotation ids,
+non-finite JSON values normalized to `null`, orphaned result ids. Empty for a
+clean load. Each warning is also printed to stderr at load time; this property
+keeps them inspectable afterwards.
+
+```python
+coco = COCO("annotations.json")
+for w in coco.load_warnings:
+    print("loader:", w)
+```
 
 ---
 
@@ -122,13 +151,6 @@ Get annotation IDs matching the given filters. All filters are ANDed together.
     ann_ids = coco.get_ann_ids(img_ids=[42], cat_ids=[1])
     ann_ids = coco.get_ann_ids(42)   # a bare id works, as in pycocotools
     ```
-
-    !!! note "camelCase alias"
-        Also available as `getAnnIds()`, with pycocotools' keyword spellings —
-        `getAnnIds(imgIds=…, catIds=…, areaRng=…)`. The other query and load
-        methods (`get_img_ids`, `get_cat_ids`, `load_anns`, `load_imgs`,
-        `load_cats`) accept bare scalars and the camelCase keyword forms the
-        same way.
 
 === "Rust"
 
@@ -179,9 +201,6 @@ Get category IDs matching the given filters.
     cat_ids = coco.get_cat_ids(cat_nms=["person", "dog"])
     ```
 
-    !!! note "camelCase alias"
-        Also available as `getCatIds()`.
-
 === "Rust"
 
     ```rust
@@ -216,9 +235,6 @@ Get image IDs matching the given filters.
     img_ids = coco.get_img_ids(cat_ids=[1])
     ```
 
-    !!! note "camelCase alias"
-        Also available as `getImgIds()`.
-
 === "Rust"
 
     ```rust
@@ -247,9 +263,6 @@ Load annotations by their IDs.
     anns = coco.load_anns([101, 102, 103])
     print(anns[0]["bbox"])  # [x, y, width, height]
     ```
-
-    !!! note "camelCase alias"
-        Also available as `loadAnns()`.
 
 === "Rust"
 
@@ -283,9 +296,6 @@ Load categories by their IDs.
     print(cats[0]["name"])  # "person"
     ```
 
-    !!! note "camelCase alias"
-        Also available as `loadCats()`.
-
 === "Rust"
 
     ```rust
@@ -315,9 +325,6 @@ Load images by their IDs.
     imgs = coco.load_imgs([42])
     print(f"{imgs[0]['width']}x{imgs[0]['height']}")
     ```
-
-    !!! note "camelCase alias"
-        Also available as `loadImgs()`.
 
 === "Rust"
 
@@ -364,9 +371,6 @@ Load detection results into a new `COCO` object. Images and categories are copie
     coco_dt = coco_gt.load_res(arr)
     ```
 
-    !!! note "camelCase alias"
-        Also available as `loadRes()`.
-
 === "Rust"
 
     ```rust
@@ -383,7 +387,7 @@ Load detection results into a new `COCO` object. Images and categories are copie
     ```
 
 !!! tip
-    `load_res` automatically computes missing fields: `area` from bounding boxes or segmentation masks, and polygon segmentations from bbox results. This matches pycocotools behavior.
+    `load_res` automatically computes missing fields: `area` from bounding boxes or segmentation masks, and polygon segmentations from bbox results. This matches pycocotools behavior — including precedence: a result carrying both `segmentation` and `keypoints` is treated as a segmentation result.
 
 ---
 
@@ -397,16 +401,15 @@ Convert an annotation to RLE format.
     ann_to_rle(ann: dict) -> dict
     ```
 
-    Returns an RLE dict with `"counts"` (str) and `"size"` ([h, w]).
+    Returns an RLE dict with `"size"` (`[h, w]`) and `"counts"` (`bytes`) — the
+    same format `mask.encode` and pycocotools produce.
 
     ```python
     ann = coco.load_anns([101])[0]
     rle = coco.ann_to_rle(ann)
-    print(rle.keys())  # dict_keys(['counts', 'size'])
+    print(rle["size"])           # [height, width]
+    print(type(rle["counts"]))   # <class 'bytes'>
     ```
-
-    !!! note "camelCase alias"
-        Also available as `annToRLE()`.
 
 === "Rust"
 
@@ -442,9 +445,6 @@ Convert an annotation to a binary mask.
     mask = coco.ann_to_mask(ann)
     print(mask.shape)  # (height, width)
     ```
-
-    !!! note "camelCase alias"
-        Also available as `annToMask()`.
 
 === "Rust"
 
@@ -517,6 +517,46 @@ annotation area distribution, and per-category breakdowns.
 
 ---
 
+### `healthcheck`
+
+Validate a dataset before training or evaluation.
+
+=== "Python"
+
+    ```python
+    healthcheck(dt: COCO | None = None) -> dict
+    ```
+
+    | Parameter | Type | Default | Description |
+    |-----------|------|---------|-------------|
+    | `dt` | <code>COCO &#124; None</code> | `None` | Detections. When given, also runs GT/DT compatibility checks. |
+
+    **Returns** a dict with `errors` and `warnings` (each a `list[dict]` with `code`,
+    `message`, and context fields) plus a `summary` dict of dataset counts and the
+    category `imbalance_ratio`.
+
+    ```python
+    report = coco.healthcheck()
+    for f in report["errors"]:
+        print(f"[{f['code']}] {f['message']}")
+    ```
+
+=== "Rust"
+
+    ```rust
+    fn healthcheck(&self) -> HealthReport
+    fn healthcheck_compatibility(&self, dt: &COCO) -> HealthReport
+    ```
+
+    The Python method dispatches to `healthcheck_compatibility` when `dt` is given.
+
+Four layers run in order: structural (duplicate IDs, orphaned references — errors),
+quality (degenerate boxes, out-of-bounds, near-duplicates), distribution (category
+imbalance), and — with `dt` — GT/DT compatibility. See the
+[healthcheck guide](../guide/datasets.md#healthcheck).
+
+---
+
 ### `browse`
 
 Launch an interactive dataset browser. Requires `pip install hotcoco[browse]`.
@@ -525,6 +565,10 @@ Launch an interactive dataset browser. Requires `pip install hotcoco[browse]`.
 browse(
     image_dir: str | None = None,
     dt: COCO | str | None = None,
+    iou_type: str = "bbox",
+    iou_thr: float = 0.5,
+    eval: COCOeval | None = None,
+    slices: dict[str, list[int]] | str | None = None,
     batch_size: int = 12,
     port: int = 7860,
 ) -> None
@@ -534,6 +578,10 @@ browse(
 |-----------|------|---------|-------------|
 | `image_dir` | <code>str &#124; None</code> | `None` | Image directory. Overrides `self.image_dir` if given. |
 | `dt` | <code>COCO &#124; str &#124; None</code> | `None` | Detection results to overlay. Pass a `COCO` object (from `load_res()`) or a path string (auto-loaded). |
+| `iou_type` | `str` | `"bbox"` | Similarity used to match detections against ground truth in the browser. |
+| `iou_thr` | `float` | `0.5` | IoU threshold for the TP/FP/FN coloring. |
+| `eval` | <code>COCOeval &#124; None</code> | `None` | An evaluated `COCOeval`. Enables the eval dashboard tab — PR curves, confusion matrix, TIDE errors, calibration, per-image F1. |
+| `slices` | <code>dict &#124; str &#124; None</code> | `None` | Named image subsets for the dashboard's slice breakdown, as a mapping or a path to a JSON file. |
 | `batch_size` | `int` | `12` | Number of images loaded per batch. |
 | `port` | `int` | `7860` | Local server port. |
 
@@ -546,9 +594,17 @@ coco.browse()
 # With detection overlay
 coco.browse(dt="bbox_results.json")
 
+# With the eval dashboard
+ev = COCOeval(coco, coco.load_res("bbox_results.json"), "bbox")
+ev.run()
+coco.browse(dt="bbox_results.json", eval=ev)
+
 # Custom port
 coco.browse(port=7861)
 ```
+
+Passing `eval=` without `dt=` shows the dashboard but leaves the gallery without
+detection overlays — pass both.
 
 Raises `ValueError` if `image_dir` is `None` and `self.image_dir` is also `None`.
 Raises `ImportError` if browse dependencies are not installed.
@@ -669,7 +725,7 @@ category list.
     | Parameter | Type | Default | Description |
     |-----------|------|---------|-------------|
     | `val_frac` | `float` | `0.2` | Fraction of images for validation |
-    | `test_frac` | <code>float &#124; None</code> | `None` | Fraction for a test set; omit for a two-way split |
+    | `test_frac` | <code>float &#124; None</code> | `None` | Fraction for a test set; omit (`None`) for a two-way split. `0.0` returns a three-way split with an empty test set. |
     | `seed` | `int` | `42` | Random seed for reproducibility |
 
     ```python
@@ -763,7 +819,27 @@ Serialize the dataset to a COCO-format JSON file.
 
 ---
 
-## Format Conversion
+## Format Conversion {#convert}
+
+All ten converters share one contract:
+
+- **Malformed input is an error, not a skip.** Parse failures raise `ValueError`
+  naming the file and line/position; filesystem problems raise `IOError`. Records
+  the target format simply cannot express (an annotation with no bbox in a
+  bbox-only format, say) are skipped and **counted** in the returned stats dict
+  under a `skipped_<reason>` key — nothing vanishes uncounted.
+- **Missing image dimensions are an error wherever geometry must scale.**
+  `from_yolo` and `to_oid` need real `width`/`height` (YOLO and Open Images store
+  normalized coordinates) and raise without them. Two documented exceptions:
+  `from_oid` without `images_dir` keeps boxes normalized against a 1×1 image, and
+  DOTA works in absolute pixels so dimensions are metadata only.
+- **`file_name` is never invented.** Formats that record it (CVAT, VOC) round-trip
+  it verbatim; formats keyed by file stem (YOLO, DOTA, Open Images) import the bare
+  stem with no fabricated extension.
+- **Exports fail loudly on ambiguity.** Two images whose file stems collide
+  (`train/img.jpg` and `val/img.jpg` both writing `img.txt`) raise instead of
+  silently overwriting, as does an annotation referencing a `category_id` missing
+  from `categories`.
 
 ### `to_yolo`
 
@@ -780,23 +856,25 @@ Export the dataset to YOLO label format.
     | `output_dir` | `str` | Directory to write label files and `data.yaml`. Created if it doesn't exist. |
 
     Writes one `<stem>.txt` per image (normalized `class_idx cx cy w h` lines) and a
-    `data.yaml` with `nc` and `names`. Returns a stats dict:
+    `data.yaml` with `nc` and `names` (names containing commas are quoted). Returns
+    a stats dict:
 
     | Key | Type | Description |
     |-----|------|-------------|
     | `images` | `int` | Number of images processed |
     | `annotations` | `int` | Number of label lines written |
     | `skipped_crowd` | `int` | Crowd annotations skipped |
-    | `missing_bbox` | `int` | Annotations without a bbox skipped |
+    | `skipped_no_bbox` | `int` | Annotations without a bbox skipped |
 
     ```python
     coco = COCO("instances_val2017.json")
     stats = coco.to_yolo("labels/val2017/")
     print(stats)
-    # {'images': 5000, 'annotations': 36781, 'skipped_crowd': 12, 'missing_bbox': 0}
+    # {'images': 5000, 'annotations': 36781, 'skipped_crowd': 12, 'skipped_no_bbox': 0}
     ```
 
-    Raises `RuntimeError` if any image has `width == 0` or `height == 0`.
+    Raises `ValueError` if any image has zero or unknown `width`/`height` — YOLO
+    coordinates are normalized, so export cannot scale without them.
 
 === "Rust"
 
@@ -829,13 +907,17 @@ Load a YOLO label directory as a COCO dataset. Class method.
     | `images_dir` | <code>str &#124; None</code> | `None` | Source image directory; used by Pillow to read `width`/`height`. Requires `pip install Pillow`. |
 
     ```python
-    # Without image dims (width/height stored as 0)
-    coco = COCO.from_yolo("labels/val2017/")
-
-    # With real image dimensions
     coco = COCO.from_yolo("labels/val2017/", images_dir="images/val2017/")
     coco.save("reconstructed.json")
     ```
+
+    YOLO labels are normalized to the image size, so real dimensions are
+    required: importing an image whose dimensions cannot be determined raises
+    `ValueError` rather than producing degenerate 0×0 geometry. `data.yaml`
+    `names` is accepted in all three common forms — the flow list
+    (`names: [a, b]`), the block list, and the Ultralytics index-keyed dict
+    (`names:\n  0: person`). Imported `file_name`s are the bare label-file stem
+    (YOLO does not record the image extension).
 
     Raises `ImportError` if `images_dir` is given but Pillow is not installed.
 
@@ -866,7 +948,10 @@ Export the dataset to Pascal VOC annotation format.
     ```
 
     Writes one XML file per image into `output_dir/Annotations/`, plus `labels.txt`.
-    Returns a stats dict with keys: `images`, `annotations`, `crowd_as_difficult`, `missing_bbox`.
+    Coordinates use VOC's 1-based inclusive convention (`xmin = x + 1`,
+    `xmax = x + w`, rounded to integers); COCO `iscrowd` exports as
+    `<difficult>1</difficult>`. Returns a stats dict with keys: `images`,
+    `annotations`, `crowd_as_difficult`, `skipped_no_bbox`.
 
     ```python
     coco = COCO("instances_val2017.json")
@@ -893,7 +978,10 @@ Load a Pascal VOC annotation directory as a COCO dataset.
     ```
 
     Scans `voc_dir/Annotations/` for `.xml` files (falls back to `voc_dir/` directly).
-    Image dimensions come from each XML's `<size>` element.
+    Image dimensions come from each XML's `<size>` element. Coordinates may be
+    integers or floats and are converted from VOC's 1-based inclusive convention
+    (`x = xmin − 1`, `w = xmax − xmin + 1` — the exact inverse of `to_voc`);
+    `<difficult>1</difficult>` imports as `iscrowd`.
 
     ```python
     coco = COCO.from_voc("VOCdevkit/VOC2012/")
@@ -921,7 +1009,9 @@ Export the dataset to CVAT for Images 1.1 XML format.
     ```
 
     Writes a single XML file. Bboxes become `<box>`, polygons become `<polygon>`.
-    Returns a stats dict with keys: `images`, `boxes`, `polygons`, `skipped_no_geometry`.
+    Returns a stats dict with keys: `images`, `boxes`, `polygons`,
+    `skipped_no_geometry`, `skipped_degenerate` (polygons with fewer than three
+    points).
 
     ```python
     coco = COCO("instances_val2017.json")
@@ -947,7 +1037,11 @@ Load a CVAT for Images 1.1 XML file as a COCO dataset.
     COCO.from_cvat(cvat_path: str) -> COCO
     ```
 
-    Reads a single XML file. Supports `<box>` and `<polygon>` elements.
+    Reads a single XML file. Supports `<box>` and `<polygon>` elements, in both
+    the self-closing form and the open/close-pair form CVAT writes when a shape
+    carries `<attribute>` children. Unsupported shapes (`<polyline>`, `<points>`,
+    `<cuboid>`) and degenerate polygons are skipped and reported with a
+    `UserWarning` naming the count — they do not abort the file.
 
     ```python
     coco = COCO.from_cvat("annotations.xml")
@@ -962,4 +1056,170 @@ Load a CVAT for Images 1.1 XML file as a COCO dataset.
 
     let dataset = cvat_to_coco(Path::new("annotations.xml"))?;
     let coco = hotcoco::COCO::from_dataset(dataset);
+    ```
+
+### `to_dota`
+
+Export oriented bounding boxes to DOTA label format.
+
+=== "Python"
+
+    ```python
+    to_dota(output_dir: str) -> dict
+    ```
+
+    Writes one `.txt` per image: 8 corner coordinates, category name, difficulty
+    flag. Only annotations carrying an `obb` are written. Returns a stats dict
+    with keys: `images`, `annotations`, `skipped_no_obb`.
+
+    ```python
+    stats = coco.to_dota("labelTxt/")
+    ```
+
+=== "Rust"
+
+    ```rust
+    use hotcoco::convert::{coco_to_dota, DotaStats};
+    use std::path::Path;
+
+    let stats: DotaStats = coco_to_dota(&coco.dataset, Path::new("labelTxt/"))?;
+    ```
+
+### `from_dota`
+
+Load a DOTA label directory as a COCO dataset with oriented boxes.
+
+=== "Python"
+
+    ```python
+    COCO.from_dota(
+        label_dir: str,
+        images_dir: str | None = None,
+        categories: list[str] | None = None,
+    ) -> COCO
+    ```
+
+    Each annotation gets both an `obb` and its axis-aligned `bbox` envelope.
+    DOTA coordinates are absolute pixels, so `images_dir` only populates
+    `width`/`height` on the image records (they stay `0` without it — metadata
+    only, evaluation is unaffected). Imported `file_name`s are the bare
+    label-file stem. Without `categories`, category names are discovered from
+    the label files and sorted.
+
+    ```python
+    coco = COCO.from_dota("labelTxt/", images_dir="images/")
+    ```
+
+=== "Rust"
+
+    ```rust
+    use hotcoco::convert::dota_to_coco;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    let dims: HashMap<String, (u32, u32)> = HashMap::new();
+    let dataset = dota_to_coco(Path::new("labelTxt/"), None, &dims)?;
+    ```
+
+### `to_oid`
+
+Export the dataset to Open Images challenge CSV format.
+
+=== "Python"
+
+    ```python
+    to_oid(output_csv: str) -> dict
+    ```
+
+    Writes `ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf` — note that Open
+    Images puts `XMax` before `YMin` — with coordinates normalized to `[0, 1]`.
+    A `Score` column is added when any annotation carries a score, so detection
+    files round-trip too. Coordinates are normalized, so every referenced image
+    needs real `width`/`height` — missing dimensions raise `ValueError`. Returns
+    a stats dict with keys: `images`, `annotations`, `group_of`,
+    `skipped_no_bbox`.
+
+    ```python
+    stats = coco.to_oid("boxes.csv")
+    ```
+
+=== "Rust"
+
+    ```rust
+    use hotcoco::convert::{coco_to_oid, OidStats};
+    use std::path::Path;
+
+    let stats: OidStats = coco_to_oid(&coco.dataset, Path::new("boxes.csv"))?;
+    ```
+
+### `from_oid`
+
+Load an Open Images annotation CSV as a COCO dataset.
+
+=== "Python"
+
+    ```python
+    COCO.from_oid(
+        csv_path: str,
+        class_descriptions: str | None = None,
+        images_dir: str | None = None,
+    ) -> COCO
+    ```
+
+    Reads the full V6 layout and the challenge subset alike — columns are
+    resolved by name, not position. `IsGroupOf` becomes the `is_group_of`
+    annotation field. `class_descriptions` resolves `LabelName` MIDs such as
+    `/m/0cmf2` to names such as `Beer`. Imported `file_name`s are the bare
+    `ImageID` (Open Images does not record an extension).
+
+    Without `images_dir`, boxes stay in `[0, 1]` against a 1×1 image; see the
+    [conversion guide](../guide/datasets.md#open-images) for what that does and
+    does not affect.
+
+    ```python
+    gt = COCO.from_oid(
+        "challenge-2019-validation-detection-bbox.csv",
+        class_descriptions="class-descriptions-boxable.csv",
+    )
+    ```
+
+=== "Rust"
+
+    ```rust
+    use hotcoco::convert::oid_to_coco;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    let dims: HashMap<String, (u32, u32)> = HashMap::new();
+    let dataset = oid_to_coco(Path::new("boxes.csv"), None, &dims)?;
+    ```
+
+### `load_res_oid`
+
+Load Open Images detections as a result `COCO`, aligned to this dataset.
+
+=== "Python"
+
+    ```python
+    load_res_oid(csv_path: str, class_descriptions: str | None = None) -> COCO
+    ```
+
+    The Open Images counterpart to [`load_res`](#load_res). `ImageID` is matched
+    against image file-name stems and `LabelName` against category names, so pass
+    the same `class_descriptions` used for the ground truth. A detection naming an
+    unknown image or category raises rather than being skipped.
+
+    ```python
+    dt = gt.load_res_oid("predictions.csv")
+    ev = COCOeval(gt, dt, "bbox", oid_style=True)
+    ```
+
+=== "Rust"
+
+    ```rust
+    use hotcoco::convert::oid_results_to_anns;
+    use std::path::Path;
+
+    let anns = oid_results_to_anns(&gt.dataset, Path::new("predictions.csv"), None)?;
+    let dt = gt.load_res_anns(anns)?;
     ```

@@ -54,7 +54,7 @@ Run COCO evaluation to compute AP/AR metrics.
     |-----------|------|---------|-------------|
     | `coco_gt` | `COCO` | — | Ground truth COCO object |
     | `coco_dt` | `COCO` | — | Detections COCO object (from `load_res`) |
-    | `iou_type` | `str` | — | `"bbox"`, `"segm"`, or `"keypoints"` |
+    | `iou_type` | `str` | — | `"bbox"`, `"segm"`, `"keypoints"`, or `"obb"` |
     | `lvis_style` | `bool` | `False` | Enable LVIS federated evaluation mode |
     | `oid_style` | `bool` | `False` | Enable Open Images evaluation mode (IoU=0.5, group-of matching) |
     | `hierarchy` | <code>Hierarchy &#124; None</code> | `None` | Category hierarchy for GT expansion in OID mode |
@@ -82,8 +82,12 @@ Run COCO evaluation to compute AP/AR metrics.
     |-----------|------|-------------|
     | `coco_gt` | `COCO` | Ground truth COCO object |
     | `coco_dt` | `COCO` | Detections COCO object (from `load_res`) |
-    | `iou_type` | `IouType` | `IouType::Bbox`, `IouType::Segm`, or `IouType::Keypoints` |
+    | `iou_type` | `IouType` | `IouType::Bbox`, `IouType::Segm`, `IouType::Keypoints`, or `IouType::Obb` |
     | `hierarchy` | `Option<Hierarchy>` | Category hierarchy for GT expansion; `None` to skip expansion |
+
+`"obb"` evaluates oriented boxes with a rotated IoU kernel — see [OBB evaluation](../guide/evaluation.md#oriented-bounding-box-obb-evaluation).
+
+The same classes are also reachable under `hotcoco.detection` (`from hotcoco.detection import COCOeval`), an explicit namespace for the detection metric family. Both spellings return the same objects.
 
 ---
 
@@ -126,10 +130,10 @@ See [Params](params.md) for all configurable fields.
 === "Python"
 
     ```python
-    stats: list[float] | None
+    stats: np.ndarray
     ```
 
-    The 12 summary metrics (10 for keypoints), populated after `summarize()`. `None` before `summarize()` is called.
+    The 12 summary metrics (10 for keypoints) as a `float64` numpy array, populated after `summarize()`. An empty list before `summarize()` is called — both states match pycocotools.
 
     ```python
     ev.summarize()
@@ -228,7 +232,7 @@ summarize() -> None
 Compute and print the standard COCO metrics. Populates `stats`.
 
 !!! warning "Non-default parameters"
-    `summarize()` uses a fixed display format that assumes default `iou_thrs`, `max_dets`, and `area_rng_lbl`. If you've changed any of these, a warning is printed to stderr and some metrics may show `-1.000` (e.g. AP50 when `iou_thrs` doesn't include 0.50). The `stats` array always has 12 entries (10 for keypoints) regardless of your parameters.
+    `summarize()` uses a fixed display format that assumes default `iou_thrs`, `max_dets`, and `area_rng_lbl`. If you've changed any of these, a `UserWarning` is emitted (catchable with `warnings.catch_warnings`, visible in Jupyter) and some metrics may show `-1.000` (e.g. AP50 when `iou_thrs` doesn't include 0.50). The `stats` array always has 12 entries (10 for keypoints) regardless of your parameters. `-1.000` always means "not computed for this configuration" — an unknown area label or max-dets value degrades to `-1.0` rather than silently substituting the `"all"` slice.
 
 Prints 12 lines for bbox/segm (10 for keypoints):
 
@@ -335,6 +339,50 @@ print_results() -> None
 ```
 
 Print a formatted results table to stdout. For LVIS, matches the lvis-api `print_results()` style. Must be called after `summarize()` (or `run()`).
+
+---
+
+### `summary_lines`
+
+```python
+summary_lines() -> list[str]
+```
+
+The same lines `summarize()` prints, returned instead of written to stdout — one string per metric, already formatted. Use it to route the summary into a logger, a report, or a test assertion. Must be called after `summarize()` (or `run()`).
+
+---
+
+### `virtual_cat_names`
+
+```python
+virtual_cat_names: list[str]   # property
+```
+
+Category names added by Open Images hierarchy expansion — ancestor categories that exist in the hierarchy but not in the dataset's own taxonomy. Empty when not in OID mode, when no hierarchy expansion occurred, or before `evaluate()`. Use it to distinguish expanded ancestor categories from the model's native classes:
+
+```python
+ev = COCOeval(gt, dt, "bbox", oid_style=True, hierarchy=h)
+ev.evaluate()
+ev.virtual_cat_names   # e.g. ['Carnivore', 'Mammal'] — no parentheses; it's a property
+```
+
+---
+
+### `slice_by`
+
+```python
+slice_by(slices: dict[str, list[int]] | Callable[[dict], str]) -> dict[str, Any]
+```
+
+Re-accumulate metrics for named subsets of images without recomputing IoU, and return one metrics dict per slice. Pass either an explicit `{name: [image_ids]}` mapping or a function that takes an image dict and returns a slice name.
+
+```python
+ev.run()
+by_light = ev.slice_by({"day": day_ids, "night": night_ids})
+by_light["night"]["AP"]
+```
+
+Requires `evaluate()` to have run. Matching is done once and reused for every slice, so slicing a dozen ways costs barely more than slicing one way. See [sliced evaluation](../guide/evaluation.md#sliced-evaluation).
 
 ---
 
@@ -487,7 +535,8 @@ Return evaluation results as a serializable dict. Must be called after `summariz
 | Key | Type | Description |
 |-----|------|-------------|
 | `"hotcoco_version"` | `str` | hotcoco version that produced these results. |
-| `"params"` | `dict` | Evaluation parameters: `iou_type`, `iou_thresholds`, `area_ranges`, `max_dets`, `is_lvis`. |
+| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — same value as `report()["provenance"]`. |
+| `"params"` | `dict` | Evaluation parameters: `iou_type`, `eval_mode`, `iou_thresholds`, `recall_thresholds`, `area_ranges`, `max_dets`, `use_cats`, `kpt_oks_sigmas`, and `reference_deviations` — enough for a saved run to explain its own provenance. |
 | `"metrics"` | `dict[str, float]` | Summary metrics keyed by name (same keys as `get_results()`). |
 | `"per_class"` | `dict[str, float]` \| absent | Per-category AP values keyed by category name. Only present if `per_class=True`. |
 
@@ -555,7 +604,7 @@ This method is **standalone** — no `evaluate()` call is needed first.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `"matrix"` | `np.ndarray[int64]` shape `(K+1, K+1)` | Raw confusion counts. Rows = GT category, cols = predicted. Index `K` is background. |
+| `"matrix"` | `np.ndarray[uint64]` shape `(K+1, K+1)` | Raw confusion counts. Rows = GT category, cols = predicted. Index `K` is background. Unsigned — cast before subtracting counts (e.g. `matrix.astype(np.int64)`) to avoid underflow. |
 | `"normalized"` | `np.ndarray[float64]` shape `(K+1, K+1)` | Row-normalized version (rows sum to 1.0; zero rows stay zero). |
 | `"cat_ids"` | `list[int]` | Category IDs for rows/cols `0..K-1`. |
 | `"cat_names"` | `list[str]` | Category names for rows/cols `0..K-1`, in the same order as `cat_ids`. |
@@ -588,7 +637,7 @@ fp = matrix[-1, :-1]
 print(cm["normalized"])
 ```
 
-See [Confusion Matrix](../guide/evaluation.md#confusion-matrix) in the evaluation guide for a full walkthrough.
+See [Confusion Matrix](../guide/diagnostics.md#confusion-matrix) in the evaluation guide for a full walkthrough.
 
 ---
 
@@ -633,7 +682,7 @@ for k, v in sorted(result["delta_ap"].items(), key=lambda x: -x[1]):
         print(f"  {k}: ΔAP={v:.4f}  n={result['counts'].get(k, '—')}")
 ```
 
-See [TIDE Error Analysis](../guide/evaluation.md#tide-error-analysis) in the evaluation guide for a detailed walkthrough.
+See [TIDE Error Analysis](../guide/diagnostics.md#tide-error-analysis) in the evaluation guide for a detailed walkthrough.
 
 ---
 
@@ -681,7 +730,7 @@ for name, ece in sorted(cal["per_category"].items(), key=lambda x: -x[1])[:5]:
     print(f"  {name}: ECE={ece:.4f}")
 ```
 
-See [Confidence Calibration](../guide/evaluation.md#confidence-calibration) in the evaluation guide for a full walkthrough.
+See [Confidence Calibration](../guide/diagnostics.md#confidence-calibration) in the evaluation guide for a full walkthrough.
 
 ---
 
@@ -707,7 +756,7 @@ For each (IoU threshold, category), finds the confidence operating point that ma
 | `"F1_50"` | Max-F1 at IoU=0.50 |
 | `"F1_75"` | Max-F1 at IoU=0.75 |
 
-Key names reflect `beta`: `"F0.5"`, `"F0.5_50"`, `"F0.5_75"` for `beta=0.5`, etc.
+Key names reflect `beta`, formatted with no trailing zeros: `"F0.5"`, `"F0.5_50"`, `"F0.5_75"` for `beta=0.5`; `"F2"`, `"F2_50"`, `"F2_75"` for `beta=2.0`.
 
 Returns an empty dict if `accumulate()` has not been called.
 
@@ -723,7 +772,7 @@ print(f"F1: {scores['F1']:.3f}, F1@50: {scores['F1_50']:.3f}")
 print(ev.f_scores(beta=0.5))   # {"F0.5": ..., "F0.5_50": ..., "F0.5_75": ...}
 
 # Recall-weighted
-print(ev.f_scores(beta=2.0))   # {"F2.0": ..., "F2.0_50": ..., "F2.0_75": ...}
+print(ev.f_scores(beta=2.0))   # {"F2": ..., "F2_50": ..., "F2_75": ...}
 ```
 
 ---
@@ -801,7 +850,60 @@ for le in diag["label_errors"]:
     print(f"{le['type']}: {le['dt_category']}→{le.get('gt_category', 'N/A')}")
 ```
 
-See [Per-image diagnostics](../guide/evaluation.md#per-image-diagnostics-label-error-detection) in the evaluation guide.
+See [Per-image diagnostics](../guide/diagnostics.md#per-image-diagnostics-label-error-detection) in the evaluation guide.
+
+---
+
+## LVIS evaluation
+
+LVIS uses federated AP: each category is scored only over the images where it was
+exhaustively annotated. These three names are drop-in replacements for the
+`lvis-api` package, so Detectron2 and MMDetection pipelines run unchanged. See the
+[LVIS guide](../guide/lvis-open-images.md#lvis-evaluation) for the protocol.
+
+### `LVISeval`
+
+```python
+hotcoco.LVISeval(gt: COCO, dt: COCO, iou_type: str = "segm") -> COCOeval
+```
+
+Returns a `COCOeval` configured for federated evaluation — equivalent to
+`COCOeval(gt, dt, iou_type, lvis_style=True)`. Supports `run()`,
+`print_results()`, and `get_results()`, which is what those pipelines call.
+Note the default `iou_type` is `"segm"`, matching `lvis-api`.
+
+`LVISEval` (capital E) is an alias: that is the spelling `lvis-api` exports and
+the one `from lvis import LVISEval` expects.
+
+```python
+from hotcoco import LVIS, LVISeval, LVISResults
+
+lvis_gt = LVIS("lvis_v1_val.json")
+lvis_dt = LVISResults(lvis_gt, "predictions.json", max_dets=300)
+
+ev = LVISeval(lvis_gt, lvis_dt, "segm")
+ev.run()
+ev.print_results()
+```
+
+Evaluation reports 13 metrics — the 12 COCO metrics with `AR@300` in place of the
+detection-count variants, plus `APr` / `APc` / `APf` for rare, common, and
+frequent categories. See [the 13 LVIS metrics](../guide/lvis-open-images.md#the-13-lvis-metrics).
+
+### `LVIS`
+
+An alias for `COCO`, provided because `lvis-api` names its dataset class `LVIS`.
+Loading is identical.
+
+### `LVISResults`
+
+```python
+hotcoco.LVISResults(lvis_gt: COCO, results, max_dets: int = 300) -> COCO
+```
+
+Returns a `COCO` detections object, equivalent to `lvis_gt.load_res(results)`.
+`max_dets` is accepted for API compatibility but not applied here — the 300-detection
+cap is a `Params` setting that `LVISeval` already configures.
 
 ---
 
@@ -819,7 +921,7 @@ hotcoco.compare(
 ) -> dict
 ```
 
-Pairwise model comparison. Both evaluators must have had `evaluate()` called and use the same `eval_mode` and `iou_type`. Accumulation and summarization are performed internally on the shared image set.
+Pairwise model comparison. Both evaluators must have had `evaluate()` called and use the same `eval_mode`, `iou_type`, and evaluation grid — mismatched `iou_thrs`, `rec_thrs`, `max_dets`, or area ranges raise `ValueError` rather than summarizing one run under the other's catalog. Accumulation and summarization are performed internally on the shared image set.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

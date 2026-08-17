@@ -143,4 +143,4 @@ init_as_lvis()
 from lvis import LVIS, LVISEval, LVISResults
 ```
 
-See [LVIS Evaluation](evaluation.md#lvis-evaluation) for the full LVIS workflow.
+See [LVIS Evaluation](lvis-open-images.md#lvis-evaluation) for the full LVIS workflow.

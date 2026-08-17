@@ -22,6 +22,8 @@ For background on RLE and usage patterns, see the [Mask Operations](../guide/mas
     `{"size": [h, w], "counts": b"..."}`, `decode` returns Fortran-order arrays,
     and batch functions accept single values or lists.
 
+The functions that exist in `pycocotools.mask` under a camelCase name are available under both spellings — `toBbox`/`to_bbox`, `frBbox`/`fr_bbox`, `frPoly`/`fr_poly`, `frPyObjects`/`fr_py_objects`. Everything else (`encode`, `decode`, `area`, `iou`, `merge`, `bbox_iou`, `rle_to_string`, `rle_from_string`) has one spelling. See the [alias table](../getting-started/migration.md#method-naming).
+
 ---
 
 ## Functions
@@ -134,8 +136,8 @@ Compute the area (number of foreground pixels) of RLE mask(s).
 
     | Input | Returns |
     |-------|---------|
-    | Single dict | `int` (uint64) |
-    | List of dicts | `numpy.ndarray` of uint64 |
+    | Single dict | `int` |
+    | List of dicts | `numpy.ndarray` of uint32 (matching pycocotools) |
 
     ```python
     a = mask.area(rle)        # scalar
@@ -175,9 +177,6 @@ Convert RLE mask(s) to bounding box(es).
     bbox = mask.to_bbox(rle)      # shape (4,)
     bboxes = mask.to_bbox(rles)   # shape (N, 4)
     ```
-
-    !!! note "camelCase alias"
-        Also available as `toBbox()`.
 
 === "Rust"
 
@@ -282,9 +281,6 @@ Compute pairwise IoU between two lists of bounding boxes.
     ious = mask.bbox_iou(dt_boxes, gt_boxes, [False] * len(gt_boxes))
     ```
 
-    !!! note "camelCase alias"
-        Also available as `bboxIou()`.
-
 === "Rust"
 
     ```rust
@@ -323,9 +319,6 @@ Encode segmentation objects to RLEs. This is pycocotools' universal entry point 
     rle = mask.frPyObjects({"size": [480, 640], "counts": [0, 5, 100, ...]}, 480, 640)
     ```
 
-    !!! note "snake_case alias"
-        Also available as `fr_py_objects()`.
-
 ---
 
 ### `fr_poly`
@@ -347,9 +340,6 @@ Rasterize a polygon to an RLE mask.
     ```python
     rle = mask.fr_poly([10, 10, 50, 10, 50, 50, 10, 50], 100, 100)
     ```
-
-    !!! note "camelCase alias"
-        Also available as `frPoly()`.
 
 === "Rust"
 
@@ -383,9 +373,6 @@ Convert a bounding box to an RLE mask.
     rle = mask.fr_bbox([10, 10, 40, 40], 100, 100)
     ```
 
-    !!! note "camelCase alias"
-        Also available as `frBbox()`.
-
 === "Rust"
 
     ```rust
@@ -411,9 +398,6 @@ Encode an RLE to its compact LEB128 string representation.
     ```python
     s = mask.rle_to_string(rle)
     ```
-
-    !!! note "camelCase alias"
-        Also available as `rleToString()`.
 
 === "Rust"
 
@@ -446,9 +430,6 @@ Decode an LEB128 string to an RLE.
     ```python
     rle = mask.rle_from_string(s, 100, 100)
     ```
-
-    !!! note "camelCase alias"
-        Also available as `rleFromString()`.
 
 === "Rust"
 

@@ -15,7 +15,9 @@ so you can chain filter → split → sample in a single expression.
     contain them even though they are not valid JSON. `COCO(...)` tolerates these:
     non-finite values are normalized to `null` on load (becoming `None` on fields like
     `area` and `score`), matching pycocotools' behavior. A one-line notice is printed
-    reporting how many values were normalized.
+    reporting how many values were normalized, and the same notice is kept on
+    [`coco.load_warnings`](../api/coco.md#load_warnings) alongside any other loader
+    warnings (duplicate annotation ids, orphaned result ids).
 
 ---
 
@@ -82,12 +84,13 @@ train, val, test = coco.split(val_frac=0.15, test_frac=0.15, seed=42)
 # train ~70%, val ~15%, test ~15%
 ```
 
+`test_frac=0.0` is honored as a three-way split with an empty test set — useful
+when a pipeline always expects three files. Omit it (`None`) for a two-way split.
+
 The same `seed` always produces the same split — important for reproducibility
-across experiments. One caveat worth knowing if you are pinning a split for a
-paper: that guarantee holds for a given installed version of hotcoco, not across
-all of them. The underlying generator is not portable across a `rand` upgrade or a
-32-bit target, so record the resulting image IDs — or the split files themselves —
-rather than relying on the seed to regenerate them years later.
+across experiments. The guarantee holds per installed hotcoco version (not across
+`rand` upgrades or 32-bit targets), so pin a split for a paper by saving the split
+files or image IDs, not just the seed.
 
 ```python
 # These are identical
@@ -181,7 +184,7 @@ coco.filter(cat_ids=[person_id]).sample(n=1000, seed=0).save("person_sample.json
 
 ## convert
 
-Convert between COCO and other annotation formats. Supported formats:
+Convert between COCO and other annotation formats:
 
 | Format | Direction | Method |
 |--------|-----------|--------|
@@ -189,167 +192,121 @@ Convert between COCO and other annotation formats. Supported formats:
 | Pascal VOC | COCO ↔ VOC | `to_voc()` / `from_voc()` |
 | CVAT | COCO ↔ CVAT | `to_cvat()` / `from_cvat()` |
 | DOTA | COCO ↔ DOTA | `to_dota()` / `from_dota()` |
+| Open Images | COCO ↔ CSV | `to_oid()` / `from_oid()` |
 
-### COCO → YOLO
+Each `to_*` method returns a stats dict recording what was written and what was
+skipped, by reason (`skipped_crowd`, `skipped_no_bbox`, …) — records the target
+format cannot express are counted, never silently dropped, while malformed
+*input* raises an error naming the file and position. Full field mappings,
+category-ordering rules, return shapes, and the shared converter contract are in
+the [`convert` API reference](../api/coco.md#convert).
+
+### YOLO
 
 ```python
 from hotcoco import COCO
 
 coco = COCO("instances_val2017.json")
-stats = coco.to_yolo("labels/val2017/")
-print(stats)
-# {'images': 5000, 'annotations': 36781, 'skipped_crowd': 12, 'missing_bbox': 0}
-```
+coco.to_yolo("labels/val2017/")   # one .txt per image + data.yaml
 
-`to_yolo` creates `labels/val2017/` (if it doesn't exist) and writes:
-
-- One `<stem>.txt` per image, where each line is `class_idx cx cy w h`
-  — all coordinates normalized to `[0, 1]` by image dimensions.
-- An empty `<stem>.txt` for images with no annotations (YOLO convention).
-- `data.yaml` with `nc` (category count) and an ordered `names` list.
-
-Category IDs are sorted numerically and assigned 0-indexed YOLO class IDs in
-that order: COCO ID 1 → class 0, ID 3 → class 1, ID 7 → class 2, etc.
-
-Crowd annotations and annotations without a bounding box are silently skipped
-and counted in the returned stats dict.
-
-### YOLO → COCO
-
-```python
-# Without image dimensions (width/height stored as 0)
-coco = COCO.from_yolo("labels/val2017/")
-
-# With image dimensions read from disk via Pillow
-coco = COCO.from_yolo("labels/val2017/", images_dir="images/val2017/")
-coco.save("reconstructed.json")
-print(f"{len(coco.dataset['images'])} images, {len(coco.dataset['annotations'])} annotations")
-```
-
-`from_yolo` reads `data.yaml` for the category list, then parses every `.txt`
-file in the directory. If `images_dir` is given, hotcoco uses Pillow to read
-each image's `(width, height)` — install it with `pip install Pillow` if needed.
-
-Without `images_dir`, bounding boxes are still parsed but stored relative to a
-`0×0` canvas. This is fine for inspection or re-evaluation, but tools that need
-pixel-space coordinates (visualization, `ann_to_mask`) will need real dims.
-
-### Round-trip
-
-COCO bbox values round-trip within floating-point precision (less than 0.0001 px
-error for typical image sizes):
-
-```python
-coco     = COCO("instances_val2017.json")
-stats    = coco.to_yolo("labels/")
-coco2    = COCO.from_yolo("labels/", images_dir="images/val2017/")
+# Round-trip — images_dir lets Pillow restore real image dimensions
+coco2 = COCO.from_yolo("labels/val2017/", images_dir="images/val2017/")
 coco2.save("reconstructed.json")
 ```
 
-### COCO → Pascal VOC
+Bbox values round-trip within floating-point precision (under 0.0001 px for
+typical image sizes). YOLO coordinates are normalized to the image size, so both
+directions need real dimensions: `to_yolo` raises if an image records none, and
+`from_yolo` raises for an image whose dimensions it cannot determine (pass
+`images_dir` so Pillow can read them). `data.yaml` is accepted in the flow-list,
+block-list, and Ultralytics dict forms of `names:`. Because YOLO does not record
+image extensions, re-imported `file_name`s are bare stems.
+
+### Pascal VOC
 
 ```python
-from hotcoco import COCO
-
-coco = COCO("instances_val2017.json")
-stats = coco.to_voc("voc_output/")
-print(stats)
-# {'images': 5000, 'annotations': 36781, 'crowd_as_difficult': 12, 'missing_bbox': 0}
-```
-
-`to_voc` creates `voc_output/Annotations/` and writes one `<stem>.xml` per image
-in standard Pascal VOC format (`<annotation>/<object>/<bndbox>` with absolute
-pixel coordinates). Also writes `labels.txt` listing category names sorted by
-COCO ID.
-
-Field mapping:
-
-- COCO `bbox [x, y, w, h]` → VOC `<xmin>/<ymin>/<xmax>/<ymax>` (rounded to integers)
-- COCO `iscrowd` → VOC `<difficult>1</difficult>` (approximate mapping)
-- Segmentation and keypoints are not exported (bbox-only)
-
-### Pascal VOC → COCO
-
-```python
-coco = COCO.from_voc("VOCdevkit/VOC2012/")
-coco.save("voc2012_as_coco.json")
-print(f"{len(coco.dataset['images'])} images, {len(coco.dataset['annotations'])} annotations")
-```
-
-`from_voc` scans for `*.xml` files in `voc_dir/Annotations/` (falls back to the
-root directory). Image dimensions are read from each XML's `<size>` element — no
-Pillow needed.
-
-If `labels.txt` is present (as written by `to_voc`), it determines category
-ordering. Otherwise, categories are sorted alphabetically with IDs starting at 1.
-
-VOC `<difficult>` and `<truncated>` fields are dropped — `difficult` is not
-equivalent to COCO `iscrowd` (different concepts).
-
-### Round-trip precision
-
-VOC uses integer pixel coordinates, so COCO→VOC→COCO round-trip error is bounded
-at ≤1 pixel per coordinate due to rounding:
-
-```python
-coco  = COCO("instances_val2017.json")
-coco.to_voc("voc_output/")
+coco.to_voc("voc_output/")        # Annotations/<stem>.xml + labels.txt
 coco2 = COCO.from_voc("voc_output/")
-coco2.save("reconstructed.json")
 ```
 
-### COCO → CVAT
+VOC is bbox-only and writes integer pixel coordinates in the devkit's 1-based
+inclusive convention; hotcoco applies it in both directions (import
+`x = xmin − 1`, `w = xmax − xmin + 1`; export the inverse), so a COCO→VOC→COCO
+round-trip is bounded only by the integer rounding on export. Float coordinates
+in the XML are accepted on import. COCO `iscrowd` maps to VOC `<difficult>` on
+export and back to `iscrowd` on import; `<truncated>` has no COCO counterpart
+and is dropped.
+
+### CVAT
 
 ```python
-from hotcoco import COCO
-
-coco = COCO("instances_val2017.json")
-stats = coco.to_cvat("annotations.xml")
-print(stats)
-# {'images': 5000, 'boxes': 36781, 'polygons': 0, 'skipped_no_geometry': 0}
+coco.to_cvat("annotations.xml")   # CVAT for Images 1.1, single XML file
+coco2 = COCO.from_cvat("annotations.xml")
 ```
 
-`to_cvat` writes a single CVAT for Images 1.1 XML file. Bounding boxes become
-`<box>` elements; polygon segmentations become `<polygon>` elements with
-semicolon-separated point pairs.
+Bounding boxes and polygon segmentations convert in both directions — including
+shapes CVAT writes as open/close pairs when they carry `<attribute>` children.
+`<polyline>`, `<points>`, and `<cuboid>` elements and degenerate polygons are
+skipped with a `UserWarning` reporting the count.
 
-### CVAT → COCO
+### DOTA {#dota}
+
+DOTA is the aerial-detection benchmark's label format: one text file per image,
+each line holding the 8 corner coordinates of a rotated box, then the category
+name and a difficulty flag. It is the usual source of data for
+[OBB evaluation](evaluation.md).
 
 ```python
-coco = COCO.from_cvat("annotations.xml")
-coco.save("cvat_as_coco.json")
-print(f"{len(coco.dataset['images'])} images, {len(coco.dataset['annotations'])} annotations")
+coco.to_dota("labelTxt/")         # one .txt per image
+coco2 = COCO.from_dota("labelTxt/", images_dir="images/")
 ```
 
-`from_cvat` reads a single CVAT XML file. Category ordering comes from the
-`<meta><task><labels>` block. Supports `<box>` and `<polygon>` elements;
-`<polyline>`, `<points>`, and `<cuboid>` are skipped.
+Corner coordinates are written to one decimal place, which bounds a
+COCO→DOTA→COCO round-trip at ≤0.1 px per coordinate. Each imported annotation
+gets both an `obb` and its axis-aligned `bbox` envelope, so the result evaluates
+under either `iou_type`. COCO `iscrowd` maps to DOTA's difficulty flag.
 
-Polygon area is computed via the shoelace formula; bounding boxes are derived
-from polygon vertex extents.
+Categories are discovered from the label files and sorted. Pass
+`categories=[...]` to fix the numbering instead — two splits of one dataset
+otherwise disagree on IDs whenever a class is missing from one of them.
 
-### COCO → DOTA {#dota}
+### Open Images {#open-images}
+
+Open Images ships CSV rather than JSON, with coordinates normalized to `[0, 1]`:
 
 ```python
-coco = COCO("annotations.json")
-stats = coco.to_dota("dota_labels/")
-print(f"{stats['images']} images, {stats['annotations']} annotations")
+gt = COCO.from_oid(
+    "challenge-2019-validation-detection-bbox.csv",
+    class_descriptions="class-descriptions-boxable.csv",
+)
+dt = gt.load_res_oid("predictions.csv")
+
+ev = COCOeval(gt, dt, "bbox", oid_style=True)
+ev.run()
 ```
 
-Exports oriented bounding box annotations to DOTA text format. Each image gets
-a `.txt` file with one line per annotation: `x1 y1 x2 y2 x3 y3 x4 y4 category difficulty`.
-Annotations without an `obb` field are skipped.
+`from_oid` reads both the full V6 layout and the challenge subset — columns are
+resolved by name, so the two orderings need no flag. `IsGroupOf` becomes the
+`is_group_of` annotation field, which [Open Images evaluation](lvis-open-images.md)
+matches by IoA rather than IoU.
 
-### DOTA → COCO
+`class_descriptions` is optional and resolves `LabelName` MIDs such as `/m/0cmf2`
+to readable names such as `Beer`. Without it, category names stay as MIDs. Pass
+the same file to `load_res_oid` that you passed to `from_oid`, so detections
+resolve to the same categories.
 
-```python
-coco = COCO.from_dota("dota_labels/", image_dir="images/")
-coco.save("dota_as_coco.json")
-```
+`load_res_oid` is the Open Images counterpart to `load_res`: it aligns detections
+onto the ground truth's image and category IDs. A detection naming an image or
+category the ground truth doesn't have raises rather than being dropped —
+silently discarding detections moves recall, and nothing downstream would show it.
 
-Reads DOTA text files and converts 8-point polygon coordinates to the
-`[cx, cy, w, h, angle]` OBB representation. Categories are auto-discovered
-from the label files. Image dimensions are read from the `image_dir` if provided.
+!!! note "Image dimensions are optional, with one consequence"
+
+    Open Images CSVs don't record pixel sizes. Without `images_dir`, boxes stay
+    in `[0, 1]` against a 1×1 image. IoU and IoA are ratios of areas scaled
+    identically on both axes, so Open Images AP is unaffected — but absolute
+    areas, and therefore the small/medium/large ranges, are meaningless in that
+    mode. Pass `images_dir` if you need them.
 
 ---
 
@@ -397,6 +354,10 @@ coco healthcheck annotations.json --dt detections.json
 # As a pre-flight check before evaluation
 coco eval --gt annotations.json --dt detections.json --healthcheck
 ```
+
+`coco healthcheck` exits `1` when any ERROR-level finding is present, so it can
+gate a CI step; warnings alone exit `0`. See the
+[CLI reference](../cli.md#coco-healthcheck).
 
 ---
 

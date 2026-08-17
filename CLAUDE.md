@@ -90,7 +90,7 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - **Not everything has a *checked* reference.** `scripts/parity.py` covers pycocotools (bbox/segm/keypoints), `parity_lvis.py` covers LVIS, `parity_tide.py` covers tidecv, `parity_mask.py` covers `pycocotools.mask`. Open Images and oriented boxes have **no parity script**, which is why `report()` marks them `Provenance::Extension`.
 
   Say *no parity script*, not *no reference implementation* — the distinction matters. Open Images has two reference implementations (the TF Object Detection API, which the official protocol page points to, and FiftyOne). We simply do not compare against them, and a group-of defect went unnoticed for the life of the feature partly because the "no reference exists" framing made a comparison look impossible rather than merely unwritten. Oriented boxes genuinely have no reference protocol, but their IoU kernel is checked against Shapely.
-- **Open Images follows the Challenge protocol**, not V2: a group-of box counts as one ground truth, its best-scoring enclosed detection is a TP, surplus detections are ignored, and an undetected group-of box is a miss. "Inside" is IoA (intersection ÷ *detection* area), the same measure as COCO `iscrowd`. Equivalent to TF `group_of_weight = 1.0`. Both protocols are real — see `docs/guide/evaluation.md` — so name which one before changing anything here.
+- **Open Images follows the Challenge protocol**, not V2: a group-of box counts as one ground truth, its best-scoring enclosed detection is a TP, surplus detections are ignored, and an undetected group-of box is a miss. "Inside" is IoA (intersection ÷ *detection* area), the same measure as COCO `iscrowd`. Equivalent to TF `group_of_weight = 1.0`. Both protocols are real — see `docs/guide/lvis-open-images.md` — so name which one before changing anything here.
 
 ## Testing
 
@@ -176,6 +176,17 @@ monotonically until the disk fills. Assume nothing cleans up for you.
 Docs are built with Zensical (config: `zensical.toml`). Preview locally with `zensical serve`.
 
 When updating documentation (`docs/`) or `README.md`, always ensure both reflect the same information. Any change to one must be checked against the other — benchmark numbers, API examples, CLI flags, installation instructions, and feature descriptions must stay consistent across both.
+
+Two structural rules, both learned the hard way (2026-08 docs audit):
+
+- **Every fact has one owning page**; other surfaces link, never restate. The owner map is in the `/docs` skill. The audit found the same content in up to 9 places, already drifting.
+- **ROADMAP.md is forward-looking only.** When something ships, delete its roadmap entry — the CHANGELOG is the record. No `**Shipped.**` markers, no strikethrough.
+
+Internal planning docs live in `plans/` at the repo root (gitignored). Never put them under `docs/` — zensical builds every `.md` there, nav or not, so they would be published.
+
+`just docs-links` checks every internal link, heading anchor, and nav entry. Run it after
+any page split, rename, or heading change — a moved heading breaks inbound anchors
+silently, and the site build does not catch it.
 
 ## Design System ("Cold Brew")
 

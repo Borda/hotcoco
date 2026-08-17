@@ -38,32 +38,9 @@ coco explore \
 
 ## UI overview
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  hotcoco · dataset browser                                       │
-├──────────────┬───────────────────────────────────────────────────┤
-│  FILTERS     │  Thumbnail grid                                   │
-│              │                                                   │
-│  Category    │  [img] [img] [img] [img]                          │
-│  [dropdown]  │  [img] [img] [img] [img]                          │
-│              │  [img] [img] [img] [img]                          │
-│  Min Score   │                ↓ infinite scroll                   │
-│  [slider]    │                                                   │
-│              │                                                   │
-│  [Shuffle ⇄] │                                                   │
-│  24 of 5000  │                                                   │
-├──────────────┴───────────────────────────────────────────────────┤
-│                                                                   │
-│  Lightbox (click any thumbnail):                                 │
-│  ┌─────────────────────────────┬──────────────┐                  │
-│  │  Full-res image + canvas    │  Annotations  │                 │
-│  │  overlay (bbox, segm, kpts) │  list sidebar │                 │
-│  │                             │              │                  │
-│  │  [☑ Boxes] [☑ Segm] [☑ KP] │  ● person GT │                 │
-│  │  [☑ GT] [☑ DT]             │  ● car   0.92│                  │
-│  └─────────────────────────────┴──────────────┘                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+A filter sidebar sits beside an infinite-scroll thumbnail grid; clicking any
+thumbnail opens a lightbox with the full-resolution image, a canvas annotation
+overlay, and an annotation list.
 
 **Sidebar controls:**
 
@@ -189,15 +166,9 @@ of raising an error.
 
 ## Responsive layout
 
-The browser adapts to different viewport sizes, making it suitable for Jupyter
-IFrames, side-by-side notebook layouts, and standalone browser windows:
-
-- **Wide (800px+):** Sidebar on the left, gallery grid on the right
-- **Medium (480–800px):** Toolbar mode — controls collapse to a compact horizontal bar
-- **Narrow (<480px):** Minimal toolbar, smaller thumbnails, full-screen lightbox
-
-The lightbox switches between side-by-side (image + info panel) and stacked
-(image above, annotations below) layout depending on available width.
+The layout adapts from narrow Jupyter IFrames to wide standalone windows —
+controls collapse to a toolbar and the lightbox stacks vertically as the
+viewport shrinks.
 
 ---
 
@@ -208,9 +179,22 @@ coco explore \
     --gt <annotations.json> \
     --images <images_dir/> \
     [--dt <results.json>] \
+    [--iou-type bbox|segm|keypoints] \
+    [--iou-thr 0.5] \
+    [--no-eval] \
+    [--slices slices.json] \
     [--batch-size 12] \
     [--port 7860]
 ```
+
+`--iou-type` picks the evaluation type used for TP/FP/FN coloring, `--iou-thr`
+sets the starting position of the UI's IoU slider (snapped to 0.50–0.95 in steps
+of 0.05 — same as `coco.browse(iou_thr=...)`), `--no-eval` shows detections
+without coloring, and `--slices` loads named image subsets for the dashboard.
+See the [CLI reference](../cli.md#coco-explore) for the full flag table.
+
+The browser and dashboard are fully self-contained — fonts and chart libraries
+are bundled with the package, so both work offline.
 
 ---
 
@@ -258,7 +242,7 @@ The dashboard shows:
 - **Label errors** — suspected annotation mistakes; click a row to view the image
 
 The sidebar always states the run's **provenance**. When it is not
-`parity-verified` — oriented boxes, Open Images, or any non-default parameter — a
+`parity_verified` — oriented boxes, Open Images, or any non-default parameter — a
 banner above the KPI tiles says so and lists why, so numbers screenshotted out of
 the dashboard do not read as leaderboard numbers. See
 [Check provenance before you publish a number](results.md#check-provenance-before-you-publish-a-number).

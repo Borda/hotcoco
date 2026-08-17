@@ -34,8 +34,9 @@ python -c "import sys; sys.exit(0 if $AP >= 0.50 else 1)"
 ```
 
 `coco eval --json` also carries `provenance` and `reference_deviations`, so a pipeline
-can refuse to publish numbers that are not leaderboard-comparable. The warnings
-`summarize()` prints go to stderr and do not survive a pipe — these do:
+can refuse to publish numbers that are not leaderboard-comparable (see
+[provenance](guide/results.md#check-provenance-before-you-publish-a-number)). The
+warnings `summarize()` prints go to stderr and do not survive a pipe — these do:
 
 ```bash
 # Fail if the run is not comparable to the reference implementation
@@ -73,7 +74,7 @@ coco eval --gt <gt.json> --dt <dt.json> [options]
 | `--tide` | Print TIDE error decomposition after standard metrics | off |
 | `--tide-pos-thr` | IoU threshold for TP/FP classification in TIDE | `0.5` |
 | `--tide-bg-thr` | Minimum IoU with any GT for Loc/Both/Bkg distinction | `0.1` |
-| `--diagnostics` | Per-image diagnostics: F1 distribution and label error candidates | off |
+| `--diagnostics` | Per-image diagnostics: worst images by F1 and label error candidates | off |
 | `--diag-iou-thr` | IoU threshold for diagnostics TP/FP classification | `0.5` |
 | `--diag-score-thr` | Min detection score for label error candidates | `0.5` |
 | `--report <path>` | Save a PDF evaluation report to this path (requires `hotcoco[plot]`) | off |
@@ -127,7 +128,7 @@ coco eval --gt instances_val2017.json --dt bbox_results.json --tide --slices sli
 
 ```json
 {
-  "hotcoco_version": "0.3.0",
+  "hotcoco_version": "1.0.0",
   "params": { "iou_type": "bbox", "iou_thresholds": [...], "area_ranges": {...}, ... },
   "metrics": { "AP": 0.578, "AP50": 0.861, "AP75": 0.600, "APs": 0.327, ... },
   "tide": { "delta_ap": {...}, "counts": {...}, "ap_base": 0.578, ... },
@@ -138,6 +139,11 @@ coco eval --gt instances_val2017.json --dt bbox_results.json --tide --slices sli
 
 `tide`, `slices`, and `healthcheck` keys are only present when the corresponding
 flag is passed.
+
+!!! note "OBB is Python-only"
+    `--iou-type` covers `bbox`, `segm`, and `keypoints`. Oriented bounding box
+    evaluation is available through the Python API — see
+    [OBB evaluation](guide/evaluation.md#oriented-bounding-box-obb-evaluation).
 
 ### `coco healthcheck`
 
@@ -151,6 +157,9 @@ coco healthcheck <annotation_file> [--dt <detections.json>]
 |------|-------------|
 | `--dt <path>` | Detection results JSON — enables GT/DT compatibility checks |
 | `--json` | Write results as JSON to stdout |
+
+**Exit status:** exits `1` when any ERROR-level finding is present (in both human
+and `--json` modes), so it can gate a CI step. Warnings alone exit `0`.
 
 ```bash
 # Dataset only
@@ -214,7 +223,7 @@ coco split <file> -o <prefix> [options]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--val-frac` | Fraction of images for validation | `0.2` |
-| `--test-frac` | Fraction for a test set (omit for two-way split) | — |
+| `--test-frac` | Fraction for a test set (omit for two-way split; `0.0` gives a three-way split with an empty test file) | — |
 | `--seed` | Random seed for reproducibility | `42` |
 | `-o / --output` | Output prefix | *(required)* |
 | `--json` | Write per-split counts as JSON to stdout | off |
@@ -283,6 +292,10 @@ coco explore --gt <annotations.json> --images <images_dir/> [options]
 | `--gt <path>` | Ground truth annotation JSON | *required* |
 | `--images <dir>` | Directory containing image files | *required* |
 | `--dt <path>` | Detection results JSON (enables detection overlay) | off |
+| `--iou-type` | Evaluation type for TP/FP/FN coloring: `bbox`, `segm`, or `keypoints` | `bbox` |
+| `--iou-thr THR` | Initial IoU threshold for TP/FP classification; sets the UI slider's starting position (snapped to 0.50–0.95 in steps of 0.05) | `0.5` |
+| `--no-eval` | Disable automatic evaluation — show detections without TP/FP/FN coloring | off |
+| `--slices <path>` | JSON file mapping slice names to image ID lists, e.g. `{"daytime": [1, 2, 3]}` | off |
 | `--batch-size N` | Images loaded per batch | `12` |
 | `--port N` | Local server port | `7860` |
 
@@ -291,6 +304,12 @@ coco explore --gt instances_val2017.json --images /data/coco/val2017/
 
 # With detection overlay
 coco explore --gt instances_val2017.json --images /data/images/ --dt results.json
+
+# Detection overlay without TP/FP/FN coloring
+coco explore --gt instances_val2017.json --images /data/images/ --dt results.json --no-eval
+
+# Segmentation-based eval coloring at a stricter threshold
+coco explore --gt gt.json --images imgs/ --dt results.json --iou-type segm --iou-thr 0.75
 
 # Custom port
 coco explore --gt instances_val2017.json --images /data/images/ --port 7861
@@ -338,7 +357,7 @@ coco compare --gt ann.json --dt-a a.json --dt-b b.json --bootstrap 1000 --json
 
 ### `coco convert`
 
-Convert between annotation formats. Supports COCO JSON ↔ YOLO labels, COCO JSON ↔ Pascal VOC XML, and COCO JSON ↔ CVAT for Images XML.
+Convert between annotation formats. Supports COCO JSON ↔ YOLO labels, Pascal VOC XML, CVAT for Images XML, DOTA oriented-box labels, and Open Images CSV.
 
 **COCO → YOLO:**
 
@@ -376,13 +395,38 @@ coco convert --from coco --to cvat --input <annotations.json> --output <annotati
 coco convert --from cvat --to coco --input <annotations.xml> --output <annotations.json>
 ```
 
+**COCO → DOTA:**
+
+```bash
+coco convert --from coco --to dota --input <annotations.json> --output <labelTxt_dir/>
+```
+
+**DOTA → COCO:**
+
+```bash
+coco convert --from dota --to coco --input <labelTxt_dir/> --output <annotations.json> [--images-dir <images/>]
+```
+
+**COCO → Open Images:**
+
+```bash
+coco convert --from coco --to oid --input <annotations.json> --output <boxes.csv>
+```
+
+**Open Images → COCO:**
+
+```bash
+coco convert --from oid --to coco --input <boxes.csv> --output <annotations.json> [--class-descriptions <descriptions.csv>]
+```
+
 | Flag | Description |
 |------|-------------|
-| `--from` | Source format: `coco`, `yolo`, `voc`, or `cvat` |
-| `--to` | Target format: `coco`, `yolo`, `voc`, or `cvat` |
-| `--input` | Input path — JSON file (COCO), label directory (YOLO), annotation directory (VOC), or XML file (CVAT) |
-| `--output` | Output path — label directory (YOLO), annotation directory (VOC), XML file (CVAT), or JSON file (COCO) |
-| `--images-dir` | *(YOLO → COCO only)* Directory of source images; used by Pillow to populate `width`/`height` on each image record. Requires `pip install Pillow`. |
+| `--from` | Source format: `coco`, `yolo`, `voc`, `cvat`, `dota`, or `oid` |
+| `--to` | Target format: `coco`, `yolo`, `voc`, `cvat`, `dota`, or `oid` |
+| `--input` | Input path — JSON file (COCO), CSV file (Open Images), XML file (CVAT), or label directory (YOLO, VOC, DOTA) |
+| `--output` | Output path — JSON file (COCO), CSV file (Open Images), XML file (CVAT), or label directory (YOLO, VOC, DOTA) |
+| `--images-dir` | *(YOLO, DOTA, Open Images → COCO)* Directory of source images, read by Pillow. YOLO and Open Images store normalized coordinates, so this is what converts them to pixels; for DOTA, which is already in pixels, it only fills in `width`/`height`. Requires `pip install Pillow`. |
+| `--class-descriptions` | *(Open Images → COCO only)* Path to `class-descriptions-boxable.csv`, resolving `LabelName` MIDs such as `/m/0cmf2` to names such as `Beer`. Without it, category names stay as MIDs. |
 | `--json` | Write conversion stats as JSON to stdout |
 
 ```bash
@@ -416,7 +460,23 @@ coco convert --from coco --to cvat \
 coco convert --from cvat --to coco \
     --input annotations.xml \
     --output cvat_as_coco.json
+
+# Import DOTA oriented boxes
+coco convert --from dota --to coco \
+    --input labelTxt/ \
+    --output dota_as_coco.json \
+    --images-dir images/
+
+# Import Open Images, resolving MIDs to readable category names
+coco convert --from oid --to coco \
+    --input challenge-2019-validation-detection-bbox.csv \
+    --output oid_val_as_coco.json \
+    --class-descriptions class-descriptions-boxable.csv
 ```
+
+Detections are a Python-side step: the CLI converts annotation files, but
+pairing an Open Images predictions CSV with its ground truth needs
+[`load_res_oid`](guide/datasets.md#open-images).
 
 ---
 
@@ -514,77 +574,60 @@ The standard 12 COCO metrics (10 for keypoints):
 
 Both CLIs support tab completion for flags, subcommands, and values.
 
-### `coco` (Python)
+??? note "Setting up completions"
 
-Install `argcomplete`:
-
-```bash
-pip install "hotcoco[completions]"
-```
-
-Then register the completion for your shell. The one-time setup depends on your shell:
-
-=== "bash"
-
-    Add to `~/.bashrc`:
+    **`coco` (Python)** — install `argcomplete`, then register it for your shell:
 
     ```bash
-    eval "$(register-python-argcomplete coco)"
+    pip install "hotcoco[completions]"
     ```
 
-=== "zsh"
+    === "bash"
 
-    Add to `~/.zshrc`:
+        Add to `~/.bashrc`:
 
-    ```zsh
-    autoload -U bashcompinit && bashcompinit
-    eval "$(register-python-argcomplete coco)"
-    ```
+        ```bash
+        eval "$(register-python-argcomplete coco)"
+        ```
 
-=== "fish"
+    === "zsh"
 
-    ```fish
-    register-python-argcomplete --shell fish coco | source
-    ```
+        Add to `~/.zshrc`:
 
-After restarting your shell (or sourcing the config), `coco <TAB>` completes subcommands and `coco eval --<TAB>` completes flags.
+        ```zsh
+        autoload -U bashcompinit && bashcompinit
+        eval "$(register-python-argcomplete coco)"
+        ```
 
-### `coco-eval` (Rust)
+    === "fish"
 
-`coco-eval completions <SHELL>` prints a completion script to stdout. Pipe it to the right location for your shell:
+        ```fish
+        register-python-argcomplete --shell fish coco | source
+        ```
 
-=== "bash"
+    **`coco-eval` (Rust)** — `coco-eval completions <SHELL>` prints a script to
+    stdout; write it where your shell looks for completions:
 
-    ```bash
-    coco-eval completions bash > ~/.bash_completion.d/coco-eval
-    # or for system-wide:
-    coco-eval completions bash | sudo tee /etc/bash_completion.d/coco-eval
-    ```
+    === "bash"
 
-    Then add to `~/.bashrc` if not already sourcing `~/.bash_completion.d/`:
+        ```bash
+        coco-eval completions bash > ~/.bash_completion.d/coco-eval
+        source ~/.bash_completion.d/coco-eval
+        ```
 
-    ```bash
-    source ~/.bash_completion.d/coco-eval
-    ```
+    === "zsh"
 
-=== "zsh"
+        ```zsh
+        mkdir -p ~/.zsh/completions
+        coco-eval completions zsh > ~/.zsh/completions/_coco-eval
+        # ~/.zshrc must have ~/.zsh/completions on fpath, then `autoload -U compinit && compinit`
+        ```
 
-    ```zsh
-    mkdir -p ~/.zsh/completions
-    coco-eval completions zsh > ~/.zsh/completions/_coco-eval
-    ```
+    === "fish"
 
-    Make sure `~/.zsh/completions` is on your `fpath` in `~/.zshrc`:
+        ```fish
+        coco-eval completions fish > ~/.config/fish/completions/coco-eval.fish
+        ```
 
-    ```zsh
-    fpath=(~/.zsh/completions $fpath)
-    autoload -U compinit && compinit
-    ```
-
-=== "fish"
-
-    ```fish
-    coco-eval completions fish > ~/.config/fish/completions/coco-eval.fish
-    ```
-
-Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+    Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`. Restart your
+    shell afterwards.

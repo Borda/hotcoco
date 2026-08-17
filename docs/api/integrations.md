@@ -133,15 +133,11 @@ results = evaluator.get_results()
 
 ## Replacing torchvision references
 
-These classes are designed to be swapped in without any other code changes:
+Both classes swap in without any other code changes, and no pycocotools install:
 
 ```python
-# Before
-from torchvision.datasets import CocoDetection
-from torchvision.models.detection.coco_utils import CocoEvaluator
-
-# After
 from hotcoco.integrations import CocoDetection, CocoEvaluator
 ```
 
-No pycocotools installation required.
+See the [PyTorch integration guide](../guide/pytorch.md) for the full migration,
+including the distributed-training path.

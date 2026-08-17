@@ -24,6 +24,10 @@ hotcoco ships prebuilt wheels that bundle a compiled Rust extension. If you upgr
 pip install --upgrade hotcoco
 ```
 
+The `coco` CLI distinguishes this case: when the package is present but its
+compiled extension fails to import (broken wheel, wrong platform), the error says
+so and suggests reinstalling rather than claiming hotcoco is not installed.
+
 ---
 
 ### Name conflict with pycocotools
@@ -38,18 +42,7 @@ from pycocotools.coco import COCO
 from hotcoco import COCO
 ```
 
-To use hotcoco as a drop-in without changing any imports, call `init_as_pycocotools()` once at the start of your script:
-
-```python
-from hotcoco import init_as_pycocotools
-init_as_pycocotools()
-
-# All pycocotools imports now route through hotcoco
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
-```
-
-See [Migrating from pycocotools](migration.md) for more details.
+To use hotcoco as a drop-in without changing any imports, call `init_as_pycocotools()` once at the start of your script — see [Framework Integrations](../guide/frameworks.md) for the details and per-framework notes.
 
 ---
 
@@ -137,7 +130,9 @@ if missing_cats:
 
 ### RLE `counts` field: bytes vs string
 
-The RLE `counts` field should be a UTF-8 string, not raw bytes. Some libraries return `bytes`:
+`mask.encode` returns `counts` as `bytes` (matching pycocotools), and `load_res`
+accepts either `bytes` or `str` in memory. JSON files, however, cannot hold
+bytes — decode before serializing an RLE dict yourself:
 
 ```python
 import hotcoco.mask as mask_utils
@@ -145,7 +140,7 @@ import numpy as np
 
 rle = mask_utils.encode(np.asfortranarray(binary_mask))
 
-# Fix bytes → str
+# bytes → str, only needed before json.dump
 if isinstance(rle["counts"], bytes):
     rle["counts"] = rle["counts"].decode("utf-8")
 ```
@@ -162,9 +157,9 @@ COCO RLE uses `[height, width]` order, not `[width, height]`. If your masks look
 
 ### Metrics differ slightly from pycocotools
 
-hotcoco is verified to match pycocotools to floating-point precision — the worst measured difference across all 34 metrics on val2017 is 3.7e-14. Differences at that scale are the last bits of a `float64` and are expected; anything larger is a bug worth reporting.
+hotcoco is verified to match pycocotools to floating-point precision on val2017 (see [Benchmarks](../benchmarks.md#metric-parity)). Differences at the last bits of a `float64` are expected; anything larger is a bug worth reporting.
 
-If you see differences larger than these tolerances, the most common cause is mismatched `iou_thrs` or `area_ranges` — double-check that `ev.params` matches your expected configuration.
+If you see differences larger than these tolerances, the most common cause is mismatched `iou_thrs` or `area_rng` — double-check that `ev.params` matches your expected configuration.
 
 ---
 

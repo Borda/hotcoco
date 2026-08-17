@@ -53,7 +53,7 @@ An RLE dict looks like:
     ```
 
 !!! warning "RLE `counts` is bytes, not a string"
-    `mask.encode()` returns `counts` as a `bytes` object. When passing RLE dicts to `load_res()` or storing them in a COCO JSON file, `counts` must be a UTF-8 string. Convert with:
+    `mask.encode()` returns `counts` as a `bytes` object, matching pycocotools. `load_res()` accepts either form in memory, but JSON cannot hold bytes — when writing RLE dicts into a COCO JSON file yourself, convert first:
 
     ```python
     if isinstance(rle["counts"], bytes):

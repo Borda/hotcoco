@@ -14,14 +14,16 @@ Metric functions over flat arrays — no evaluator required.
     use hotcoco::metrics;
     ```
 
-Every function here is pure: arrays in, numbers out. This is the same shape
-`sklearn.metrics` and `torchmetrics.functional` use, and it means you can score
-predictions that never went through a COCO JSON file.
+Every function here is pure: arrays in, numbers out — the same shape
+`sklearn.metrics` and `torchmetrics.functional` use. `COCOeval`'s analysis methods
+call these functions, so the object API and the functional API cannot disagree.
+Reach for `metrics` when you have arrays rather than a COCO dataset.
 
-Float and bool inputs accept lists or numpy arrays. A `float64` / `bool`
-ndarray is read in a single copy; other dtypes and plain sequences work too,
-element by element. The signatures below write `Sequence[float]` — read every
-such parameter as "or a 1-D ndarray".
+[`primitives`](primitives.md) is the layer below: it decides *which prediction pairs
+with which ground truth*; `metrics` turns those matches into numbers.
+
+Float and bool parameters accept lists or 1-D numpy arrays interchangeably —
+signatures written `Sequence[float]` also take an ndarray.
 
 ```python
 from hotcoco import metrics
@@ -31,36 +33,10 @@ matched = [True, True, False, True]
 
 ap = metrics.average_precision(scores, matched, num_gt=5)
 ece, mce = metrics.calibration_error(scores, matched)
-
-# numpy arrays work directly — no .tolist() needed
-import numpy as np
-ap = metrics.average_precision(np.array(scores), np.array(matched), num_gt=5)
 ```
 
-!!! tip "`COCOeval` still does the whole pipeline"
-    `COCOeval` is unchanged and is the right tool when you have COCO-format
-    ground truth and detections. Its analysis methods — `calibration()`,
-    `confusion_matrix()` — call straight into these functions. Reach for
-    `metrics` when you have arrays rather than a dataset, or when you are
-    scoring something that is not detection.
-
-## `metrics` vs `primitives`
-
-The two split by what a function produces:
-
-| Module | Produces | Contains |
-|---|---|---|
-| [`primitives`](primitives.md) | matches and similarities | `lsap`, `bbox_iou`, `mask_iou` |
-| `metrics` | numbers from matches | `average_precision`, `calibration_error`, `confusion_matrix` |
-
-`primitives.lsap` decides *which prediction pairs with which ground truth*.
-`metrics.average_precision` turns that decision into a number.
-
-!!! warning "Provisional through 1.x"
-    These APIs are public so drivers and users can share them, but they are not
-    frozen until 1.4. Expect additive change rather than reshaping. `COCOeval`
-    and the `pycocotools` drop-in surface are the permanent, frozen part of the
-    API and are unaffected.
+These functions are additive-change-only through 1.x; `COCOeval` and the
+pycocotools drop-in surface are frozen.
 
 ---
 
@@ -280,15 +256,10 @@ stray label can't take down an evaluation run.
 
 ---
 
-## Not yet exposed to Python
+## Rust-only
 
-**Bootstrap confidence intervals** (`metrics::bootstrap::bootstrap_ci` in Rust)
-take the statistic as a closure, and calling back into Python from the parallel
-resampling loop would mean re-acquiring the GIL per sample — which would make it
-slower than doing the whole thing in Python. `compare()` uses it internally and
-returns the intervals, which covers the case people actually ask for.
+**Bootstrap confidence intervals** (`metrics::bootstrap::bootstrap_ci`) take the
+statistic as a closure. `compare()` uses them internally and returns the intervals.
 
-**Greedy matching** (`primitives::greedy::greedy_match`) carries pycocotools'
-crowd and ignore semantics in its signature. Exposing that faithfully needs a
-Python-facing shape designed on purpose rather than transliterated; it lands in
-a 1.x minor. `COCOeval.evaluate()` uses it today.
+**Greedy matching** (`primitives::greedy::greedy_match`) is used by
+`COCOeval.evaluate()`. A Python binding is on the [roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md).

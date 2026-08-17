@@ -24,19 +24,14 @@ sim = primitives.bbox_iou(detections, ground_truths, iscrowd=[False] * len(groun
 rows, cols = primitives.lsap(sim, maximize=True)
 ```
 
-Nothing here scores. Feed the pairs to [`metrics`](metrics.md) for that.
+Nothing here scores — feed the pairs to [`metrics`](metrics.md) for that.
 
-!!! note "The IoU kernels are also `hotcoco.mask`"
-    `primitives.bbox_iou` and `primitives.mask_iou` are the same functions
-    `hotcoco.mask` exposes, under their kernel names. `hotcoco.mask` mirrors
-    `pycocotools.mask` and is a permanent compatibility surface; this module is
-    where they live as primitives. Both call one implementation, so they cannot
-    disagree — enforced by `tests/architecture.rs`, which fails the build if a
-    second IoU formula appears anywhere in the crate.
+`primitives.bbox_iou` and `primitives.mask_iou` are the same functions
+[`hotcoco.mask`](mask.md) exposes under their pycocotools names; both call one
+implementation, so they cannot disagree.
 
-!!! warning "Provisional through 1.x"
-    Not frozen until 1.4, like [`metrics`](metrics.md). The IoU kernels are the
-    exception: those are frozen, since `pycocotools` parity depends on them.
+These functions are additive-change-only through 1.x. The IoU kernels are the
+exception — they are frozen, since pycocotools parity depends on them.
 
 ---
 
@@ -143,11 +138,10 @@ Same crowd convention as `bbox_iou`. Inputs are RLE dicts as produced by
 
 ---
 
-## Not yet exposed to Python
+## Rust-only
 
 **Greedy matching** (`primitives::greedy::greedy_match`) is COCO's rank-ordered
-assignment, and the reason hotcoco matches pycocotools detection-for-detection.
-Its signature carries the crowd and ignore semantics that make that parity work,
-and exposing it faithfully needs a Python-facing shape designed on purpose
-rather than transliterated. It lands in a 1.x minor; `COCOeval.evaluate()` uses
-it today.
+assignment — the reason hotcoco matches pycocotools detection-for-detection. Its
+signature carries the crowd and ignore semantics that parity depends on.
+`COCOeval.evaluate()` uses it today; a Python binding is on the
+[roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md).

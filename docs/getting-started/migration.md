@@ -54,7 +54,7 @@ Both camelCase and snake_case names are supported:
 | `annToRLE()` | `ann_to_rle()` | Both work |
 | `annToMask()` | `ann_to_mask()` | Both work |
 
-The same applies to `Params` properties: `maxDets` / `max_dets`, `catIds` / `cat_ids`, `imgIds` / `img_ids`, `iouThrs` / `iou_thrs`, `recThrs` / `rec_thrs`, `areaRng` / `area_rng`, `areaRngLbl` / `area_rng_lbl`, `useCats` / `use_cats`, `kptOksSigmas` / `kpt_oks_sigmas`.
+The same applies to `Params` properties: `maxDets` / `max_dets`, `catIds` / `cat_ids`, `imgIds` / `img_ids`, `iouThrs` / `iou_thrs`, `recThrs` / `rec_thrs`, `areaRng` / `area_rng`, `areaRngLbl` / `area_rng_lbl`, `useCats` / `use_cats`. OKS sigmas have one spelling, `kpt_oks_sigmas` — pycocotools also spells that attribute in snake_case.
 
 And `mask` functions: `toBbox` / `to_bbox`, `frPoly` / `fr_poly`, `frBbox` / `fr_bbox`, `frPyObjects` / `fr_py_objects`.
 
@@ -70,68 +70,62 @@ print(type(anns[0]))  # <class 'dict'>
 
 Annotation dicts have the same keys: `id`, `image_id`, `category_id`, `bbox`, `area`, `segmentation`, `iscrowd`, etc.
 
-## What about `params`?
+## Getters return copies — assign back to apply
 
-Accessing `ev.params` returns a **clone** of the internal parameters, consistent with pycocotools. Modify it and assign it back, or modify it before calling `evaluate()`:
+The data lives in Rust, so `ev.params`, `coco.dataset`, `ev.coco_gt`, and
+`ev.coco_dt` return **copies** on each access. Attribute assignment
+(`ev.params.cat_ids = [...]`) works — the setter routes the change back to Rust —
+but mutating a *container inside* a copy is a no-op:
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
-ev.params.cat_ids = [1, 2, 3]      # Modify before evaluate()
-ev.params.max_dets = [1, 10, 100]
-ev.evaluate()
-ev.accumulate()
-ev.summarize()
+ev.params.cat_ids = [1, 2, 3]       # applied — attribute assignment works
+ev.params.maxDets.append(200)       # no-op — mutates a temporary list
+
+md = ev.params.maxDets              # instead: pull, edit, assign back
+md.append(200)
+ev.params.maxDets = md
+```
+
+The same idiom applies to the dataset dict. pycocotools' in-memory construction
+flow works because assigning `coco.dataset` re-indexes:
+
+```python
+d = coco.dataset
+d["annotations"].append(new_ann)
+coco.dataset = d                    # replaces contents and rebuilds the index
+coco.createIndex()                  # supported, but a formality after assignment
 ```
 
 ## Known differences
 
 | Behavior | pycocotools | hotcoco |
 |----------|-------------|-----------|
-| Print on load | Prints "loading annotations..." to stdout | Silent |
+| Print on load | Prints "loading annotations..." to stdout | Silent (warnings collected on `coco.load_warnings`) |
 | `COCO()` with no args | Creates empty instance with print statements | Creates empty instance silently |
 | Annotation IDs | Requires unique positive integers | Also accepts 0-based IDs |
+| `getAnnIds(areaRng=...)` on annotations missing `area` | Raises `KeyError` | Excludes them from the query |
+| Mutating `coco.dataset` / `ev.params` internals in place | Mutates shared state | No-op on a copy — assign back to apply (see above) |
 | Performance | Single-threaded C + Python | Multi-threaded Rust |
-
-## Verify it yourself
-
-You do not have to take the parity numbers on faith, and you should not have to
-clone the repo to check them. Install both libraries and run your own ground truth
-and detections through each:
-
-```python
-import contextlib, io
-import numpy as np
-from pycocotools.coco import COCO as PyCOCO
-from pycocotools.cocoeval import COCOeval as PyCOCOeval
-import hotcoco
-
-GT, DT, IOU_TYPE = "instances_val2017.json", "my_detections.json", "bbox"
-
-def run(coco_cls, eval_cls):
-    with contextlib.redirect_stdout(io.StringIO()):   # both print a lot
-        gt = coco_cls(GT)
-        dt = gt.loadRes(DT)
-        e = eval_cls(gt, dt, IOU_TYPE)
-        e.evaluate(); e.accumulate(); e.summarize()
-    return np.asarray(e.stats)
-
-ref = run(PyCOCO, PyCOCOeval)
-got = run(hotcoco.COCO, hotcoco.COCOeval)
-
-for i, (a, b) in enumerate(zip(ref, got)):
-    print(f"[{i:2}] pycocotools={a:.8f}  hotcoco={b:.8f}  diff={abs(a - b):.2e}")
-print("max diff:", np.abs(ref - got).max())
-```
-
-On COCO val2017 the maximum difference is 3.7e-14. Anything above ~1e-12 on your
-data is worth [opening an issue](https://github.com/derekallman/hotcoco/issues) —
-that is the threshold the project's own parity gate uses.
-
-The same shape works for `hotcoco.mask` against `pycocotools.mask`; the repo's
-`scripts/parity_mask.py` does exactly that, operation by operation.
 
 ## Metric parity
 
-All 34 COCO metrics match pycocotools to floating-point precision — your AP and AR scores don't change. Verified on COCO val2017: worst difference across bbox, segmentation, and keypoints is 3.7e-14, the last few bits of a `float64`.
+All 34 COCO metrics match pycocotools to floating-point precision — your AP and AR scores don't change. Verified on COCO val2017 across bbox, segmentation, and keypoints.
 
-See [Benchmarks](../benchmarks.md) for detailed parity verification.
+You don't have to take that on faith. [Benchmarks](../benchmarks.md#verify-it-yourself) has a short script that runs your own ground truth and detections through both libraries and prints the per-metric difference.
+
+## Rust: module paths renamed in 1.0
+
+For Rust users upgrading from 0.x, these module paths moved (crate-root re-exports
+like `hotcoco::COCOeval` and `hotcoco::Hierarchy` are unchanged, so most code
+needs no edits):
+
+| Pre-1.0 module path | 1.0 |
+|---|---|
+| `hotcoco::eval` | `hotcoco::detection` |
+| `hotcoco::hierarchy` | `hotcoco::detection::hierarchy` |
+| `hotcoco::healthcheck` | `hotcoco::quality::healthcheck` |
+| `hotcoco::types::{SummaryStats, CategoryStats, DatasetStats}` | `hotcoco::quality` |
+| `hotcoco::primitives::counts` | `hotcoco::metrics::counts` |
+
+There are no compatibility aliases for the old module paths. The Python API is
+unaffected.
