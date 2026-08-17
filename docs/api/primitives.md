@@ -140,8 +140,9 @@ Same crowd convention as `bbox_iou`. Inputs are RLE dicts as produced by
 
 ## Rust-only
 
-**Greedy matching** (`primitives::greedy::greedy_match`) is COCO's rank-ordered
-assignment — the reason hotcoco matches pycocotools detection-for-detection. Its
-signature carries the crowd and ignore semantics that parity depends on.
-`COCOeval.evaluate()` uses it today; a Python binding is on the
+**Greedy matching** (`primitives::greedy::greedy_match_masked`) is COCO's
+rank-ordered assignment — the reason hotcoco matches pycocotools
+detection-for-detection. Its `GtMasks` argument carries the crowd and ignore
+semantics that parity depends on. `COCOeval.evaluate()` uses it today; a Python
+binding is on the
 [roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md).

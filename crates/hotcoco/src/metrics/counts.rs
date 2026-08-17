@@ -18,9 +18,8 @@
 
 /// One sampled point on a precision-recall curve.
 ///
-/// Named fields instead of the former `(usize, f64, usize)` tuple: two
-/// same-typed indices with different meanings were one transposition away from
-/// a silent bug at every call site.
+/// Named fields rather than a `(usize, f64, usize)` tuple: the two `usize` are
+/// different indices, and nothing would stop a call site transposing them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrPoint {
     /// Index into the `rec_thrs` grid this point samples.
@@ -89,14 +88,14 @@ pub struct PrCurveScratch {
 /// plain tuple so the hot accumulator's reusable buffer stays a flat `Vec`. The
 /// return value is `final_recall`.
 ///
+/// This is the form the hot path wants: `detection::accumulate` runs it `T` times
+/// per (category, area range, max_det) cell — ~10,000 calls per `accumulate()` on
+/// COCO val, several hundred thousand across a bootstrap comparison — and each
+/// would otherwise allocate and drop three vectors.
+///
 /// # Panics
 ///
 /// If `tp_cum` and `fp_cum` have different lengths.
-///
-/// `detection::accumulate` runs this `T` times per (category, area range,
-/// max_det) cell — on COCO val that is ~10,000 calls per `accumulate()` and
-/// several hundred thousand across a bootstrap comparison, each of which was
-/// allocating and dropping three vectors.
 pub fn precision_recall_curve_into(
     tp_cum: &[f64],
     fp_cum: &[f64],
@@ -165,9 +164,7 @@ pub fn precision_recall_curve_into(
 /// the cumulative arrays line up with the score ordering the curve is read at.
 ///
 /// `tp_cum` and `fp_cum` are cleared and refilled to `order`'s length, so a
-/// caller sweeping IoU thresholds reuses one pair of buffers. The classification
-/// rule lived in both [`average_precision`] here and `detection::accumulate`'s
-/// inner loop — the same three-way branch written twice, in two layers.
+/// caller sweeping IoU thresholds reuses one pair of buffers.
 pub fn cumulative_tp_fp(
     order: impl IntoIterator<Item = usize>,
     matched: &[bool],
@@ -198,9 +195,9 @@ fn mean_precision(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize, rec_thrs: &[f64
     curve.iter().map(|p| p.precision).sum::<f64>() / rec_thrs.len() as f64
 }
 
-/// AP of one explicit ranking — the body [`average_precision`] and
-/// [`average_precision_ranked`] shared line-for-line before deduplication.
-/// `order` visits indices into `matched`/`ignored` score-descending.
+/// AP of one explicit ranking — the shared body of [`average_precision`] and
+/// [`average_precision_ranked`]. `order` visits indices into `matched`/`ignored`
+/// score-descending.
 fn average_precision_of_order(
     order: impl IntoIterator<Item = usize>,
     nd: usize,
@@ -525,7 +522,7 @@ mod tests {
     ///
     /// Each case is small enough to integrate on paper, which is the point: the
     /// end-to-end check against TensorFlow lives in `scripts/parity_oid.py`, and
-    /// this pins the arithmetic so a failure there localises to the reference
+    /// this pins the arithmetic so a failure there localizes to the reference
     /// rather than to this function.
     #[test]
     fn all_points_ap_matches_hand_derived_values() {
@@ -549,7 +546,7 @@ mod tests {
             0.5
         );
 
-        // The quantisation this function exists to avoid: the 101-point grid
+        // The quantization this function exists to avoid: the 101-point grid
         // reports 51/101 for the first case above, not 0.5.
         let grid = average_precision(&[0.9], &[true], None, 2, &crate::params::default_rec_thrs());
         assert!((grid - 51.0 / 101.0).abs() < 1e-12);

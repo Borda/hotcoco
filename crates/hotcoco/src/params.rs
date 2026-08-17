@@ -198,28 +198,24 @@ impl Params {
     ///
     /// The value-side twin of [`all_area_idx`](Self::all_area_idx), for the
     /// consumers that compare against an [`EvalImg`](crate::EvalImg)'s stored
-    /// `area_rng` rather than indexing an axis. Every one of them spelled
-    /// `params.area_ranges[params.all_area_idx()].range` out by hand, which is two
-    /// lookups a reader has to check agree.
+    /// `area_rng` rather than indexing an axis.
     ///
-    /// Panics on empty `area_ranges`, exactly as the hand-written form did — an
-    /// evaluator with no area ranges has no cells to filter and every caller
-    /// indexes the axis anyway.
+    /// # Panics
+    ///
+    /// On empty `area_ranges` — an evaluator with no area ranges has no cells to
+    /// filter, and every caller indexes the axis anyway.
     pub fn all_area_range(&self) -> [f64; 2] {
         self.area_ranges[self.all_area_idx()].range
     }
 
     /// The per-image detection cap: the largest entry in `max_dets`, or 100 if empty.
     ///
-    /// The one owner of this lookup. Five sites derived it independently — four
-    /// took `max_dets.last()` and one took the maximum, which agree on the sorted
-    /// default `[1, 10, 100]` and diverge on unsorted input. The divergence was
-    /// observable: `evaluate()` stamped every eval_img with `.last()` while
-    /// `image_diagnostics` filtered on the maximum, so `max_dets = [100, 10, 1]`
-    /// produced empty diagnostics. pycocotools sidesteps the question by sorting
-    /// `maxDets` inside `evaluate()`; hotcoco does not mutate caller params (the
-    /// accumulated M axis follows the caller's order), so the cap is the maximum
-    /// taken directly — the same value pycocotools ends up with.
+    /// The one owner of this lookup — the maximum, never `max_dets.last()`. The
+    /// two agree on the sorted default `[1, 10, 100]` and diverge on unsorted
+    /// input, and a run where `evaluate()` stamps cells with one and an analysis
+    /// filters on the other silently matches nothing. pycocotools sidesteps the
+    /// question by sorting `maxDets` inside `evaluate()`; hotcoco does not mutate
+    /// caller params, because the accumulated M axis follows the caller's order.
     pub fn max_det(&self) -> usize {
         self.max_dets.iter().copied().max().unwrap_or(100)
     }
@@ -227,17 +223,15 @@ impl Params {
     /// Position of [`max_det`](Self::max_det)'s value in `max_dets` — the M-axis
     /// slot every headline metric is read from.
     ///
-    /// The index-side twin of `max_det()`, and it exists for the same reason:
-    /// three sites took `shape.m - 1` (the *last* slot) instead of the slot
-    /// holding the cap. Those agree on the sorted default `[1, 10, 100]` and
-    /// diverge on anything else — with `max_dets = [100, 10, 1]`, per-class AP,
-    /// the F-scores and `report()`'s PR curves were all read at `max_det = 1`
-    /// while the headline `AP` was read at 100, so a single `report()` disagreed
-    /// with itself (measured: per-class 0.63 against a headline 0.91).
+    /// The index-side twin of [`max_det`](Self::max_det), and required for the
+    /// same reason: `shape.m - 1` is the *last* slot, not the slot holding the
+    /// cap. The two agree on the sorted default `[1, 10, 100]` and diverge on
+    /// anything else — under `max_dets = [100, 10, 1]` the last slot is
+    /// `max_det = 1`, so per-class AP, the F-scores and `report()`'s PR curves
+    /// would all be read at a cap the headline `AP` was not computed at.
     ///
     /// Falls back to `0` when the cap is not in the list, which only happens for
-    /// an empty `max_dets` — the same degenerate slot the callers' `unwrap_or(0)`
-    /// already produced.
+    /// an empty `max_dets`.
     pub fn max_det_idx(&self) -> usize {
         let cap = self.max_det();
         self.max_dets.iter().position(|&d| d == cap).unwrap_or(0)

@@ -39,18 +39,16 @@
 //! let ap = average_precision(&[0.9, 0.8, 0.3], &[true, false, true], None, 3, &[0.0, 0.5, 1.0]);
 //! ```
 //!
-//! The two split by what a function *produces*: [`primitives`] produces matches
-//! (which detection pairs with which ground truth), [`metrics`] produces numbers
-//! from matches. Nothing in `primitives` scores; nothing in `metrics` matches.
+//! The two split by what a function *produces*: [`primitives`] produces matches,
+//! [`metrics`] produces numbers from matches (see [`metrics`] for the full
+//! split). Between them they hold *the* implementation of every similarity,
+//! matching and accumulation rule in the crate — exactly one of each, with
+//! `tests/architecture.rs` failing the build if a second appears. That is what
+//! makes them the place for an auditor to look.
 //!
 //! [`COCOeval`] is the stateful driver on top — it owns the pycocotools-compatible
 //! `evaluate`/`accumulate`/`summarize` lifecycle, and its analysis methods are
 //! adapters that marshal `eval_imgs` into arrays and call the functions above.
-//!
-//! Between them, [`primitives`] and [`metrics`] are where an auditor should look
-//! to answer "how is similarity computed?", "how are detections matched?", "how is
-//! AP accumulated?" — there is exactly one implementation of each, and
-//! `tests/architecture.rs` fails the build if a second appears.
 //!
 //! # Coming from 0.x
 //!

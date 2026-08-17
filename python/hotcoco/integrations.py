@@ -164,13 +164,11 @@ class CocoEvaluator:
             dist.all_gather(sizes, local_size)
             max_size = int(max(s.item() for s in sizes))
 
-            # Pad to uniform size
             padded = torch.zeros(max_size, dtype=torch.uint8)
             padded[: len(local_data)] = local_tensor
             gathered = [torch.zeros(max_size, dtype=torch.uint8) for _ in range(world_size)]
             dist.all_gather(gathered, padded)
 
-            # Unpack on all ranks
             all_results = []
             for buf, size in zip(gathered, sizes):
                 data = bytes(buf[: size.item()].tolist())
@@ -225,7 +223,6 @@ def _prepare_for_coco(predictions, iou_type):
         if isinstance(img_id, int):
             original_id = img_id
         else:
-            # Handle tensor image IDs
             original_id = int(img_id)
 
         if len(prediction.get("scores", [])) == 0:

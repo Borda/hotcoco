@@ -21,28 +21,25 @@ impl COCOeval {
     /// Ways this run's parameters depart from the reference configuration.
     ///
     /// Public because [`Provenance`] is a single bit and the *reason* is what a
-    /// caller can act on: "extension" alone leaves someone re-deriving which of
-    /// half a dozen conditions fired. The Python bindings turn each entry into a
-    /// `warnings.warn`, which is also how these reach a notebook — `summarize()`
+    /// caller can act on. The Python bindings turn each entry into a
+    /// `warnings.warn`, which is how these reach a notebook — `summarize()`
     /// writes them to fd 2, and that bypasses `sys.stderr` entirely.
     ///
     /// Empty means the numbers are directly comparable to the reference
-    /// implementation's published output. Non-empty means they are not, and it is
-    /// the *same* fact that drives both the `summarize()` warnings and
-    /// [`Provenance`]: a report claiming `ParityVerified` on custom `iou_thrs` is
-    /// claiming a check nobody ran.
+    /// implementation's published output. Non-empty means they are not, and the
+    /// same fact drives both the `summarize()` warnings and [`Provenance`]: a
+    /// report claiming `ParityVerified` on custom `iou_thrs` is claiming a check
+    /// nobody ran.
     ///
-    /// This is the *whole* comparability predicate, not part of one. An earlier
-    /// version checked only the parameters here and tested geometry and eval mode
-    /// separately at the `report()` call site — so an OBB run with default params,
-    /// and every Open Images run, were downgraded to `Extension` while `summarize()`
-    /// printed no warning at all. Those are the two *largest* comparability breaks,
-    /// and they were the silent ones. Anything that can make a run incomparable
-    /// belongs in this list.
+    /// This is the *whole* comparability predicate, not part of one — geometry,
+    /// eval mode and parameters all. Anything that can make a run incomparable
+    /// belongs in this list; testing a condition at the `report()` call site
+    /// instead downgrades the run silently, with no matching `summarize()`
+    /// warning.
     pub fn reference_deviations(&self) -> Vec<String> {
         let mut out = Vec::new();
 
-        // No reference implementation exists for these at all, at any parameters.
+        // Incomparable whatever the parameters, so these are checked first.
         if self.params.iou_type == IouType::Obb {
             out.push(
                 "oriented-box evaluation has no reference implementation to check against; \
@@ -54,7 +51,7 @@ impl COCOeval {
             // `scripts/parity_oid.py` matches the TensorFlow reference on group-of
             // handling, IoA containment and all-points AP. What remains unimplemented
             // is the Challenge's non-exhaustive image-level-label rule — detections
-            // of an unverified class are ignored, and of a negatively-labelled class
+            // of an unverified class are ignored, and of a negatively-labeled class
             // are false positives — which needs per-image label data COCO JSON
             // cannot carry. So a real challenge submission would still differ.
             out.push(
@@ -68,11 +65,9 @@ impl COCOeval {
         // Parameter deviations only mean something where there is a reference to
         // deviate *from*: `scripts/parity.py` (pycocotools) and `parity_lvis.py`.
         //
-        // Default-deny, not default-allow: a mode with no checked reference is a
-        // reason to say so, not a reason to skip the parameter checks and stay
-        // silent. `EvalMode` has three variants today, so the only way to reach
-        // this is to add a fourth — and the failure mode of the old early return
-        // was that such a mode inherited `parity_verified` for free.
+        // Exhaustive rather than an early return, so a fourth `EvalMode` cannot
+        // inherit `parity_verified` for free — a mode with no checked reference
+        // must say so, not skip the checks and stay silent.
         match self.eval_mode {
             EvalMode::Coco | EvalMode::Lvis => {}
             EvalMode::OpenImages => return out, // already flagged above
@@ -117,11 +112,10 @@ impl COCOeval {
             ));
         }
 
-        // Area-range *bounds*, not just labels. Comparing labels alone made this
-        // check structurally blind to the one path a Python caller actually takes:
-        // the `params.areaRng` setter deliberately preserves the existing labels,
-        // so redefining "small" as [0, 100] kept the name, passed the label check,
-        // and reported different APs/APm/APl as parity_verified.
+        // Area-range *bounds*, not just labels. The `params.areaRng` setter
+        // deliberately preserves the existing labels, so redefining "small" as
+        // [0, 100] passes the label check above while measuring a different
+        // object-size bucket — the one path a Python caller actually takes.
         if !self
             .params
             .area_ranges
@@ -173,11 +167,10 @@ impl COCOeval {
     /// Whether this run's numbers may be presented as leaderboard-comparable.
     ///
     /// The single mapping from [`reference_deviations`](Self::reference_deviations)
-    /// to a [`Provenance`] bit. It exists as a named method rather than an
-    /// expression inside [`report`](Self::report) because renderers need the bit
-    /// without paying for a whole report — and a renderer that recomputes it from
-    /// `iou_type` or `eval_mode` is exactly the silent downgrade `Provenance`
-    /// exists to prevent. Read it; never re-derive it.
+    /// to a [`Provenance`] bit, exposed separately so a renderer can have the bit
+    /// without building a whole report. Read it; never re-derive it from
+    /// `iou_type` or `eval_mode` — that is the silent downgrade [`Provenance`]
+    /// exists to prevent.
     pub fn provenance(&self) -> Provenance {
         if self.reference_deviations().is_empty() {
             Provenance::ParityVerified
@@ -203,7 +196,6 @@ impl COCOeval {
             eprintln!("Warning: {}", w);
         }
 
-        // Delegate the actual computation to the free function.
         let metrics = self.metric_defs();
         let stats = summarize_impl(
             eval,
@@ -257,12 +249,10 @@ impl COCOeval {
 
     /// Format a metric value with three decimal places.
     ///
-    /// The `-1.0` "not computed" sentinel naturally prints as `-1.000`, the
-    /// same string pycocotools prints. No other value is coerced: the previous
-    /// form collapsed *every* negative value to `-1.000`, so an out-of-range
-    /// negative — which would be a defect, since no metric here can be
-    /// negative — masqueraded as the sentinel on every printed surface. A
-    /// defect must print as itself to stay visible.
+    /// The `-1.0` "not computed" sentinel prints as `-1.000` on its own, the
+    /// same string pycocotools prints. No other value is coerced onto it: no
+    /// metric here can legitimately be negative, so any other negative is a
+    /// defect and must print as itself to stay visible.
     pub(super) fn format_metric(val: f64) -> String {
         format!("{:0.3}", val)
     }
@@ -303,12 +293,10 @@ impl COCOeval {
 
     /// Per-category AP keyed by category *name*, in `params.cat_ids` order.
     ///
-    /// The one place the name→AP table is derived. Categories reporting the
-    /// `-1.0` "not computed" sentinel, and ids with no category record to name
-    /// them, are dropped — and both [`report`](Self::report) and
-    /// [`get_results`](Self::get_results) drop exactly the same ones, which is
-    /// the point: they were two independent filters over the same data, free to
-    /// disagree about which classes exist.
+    /// The one place the name→AP table is derived, so [`report`](Self::report)
+    /// and [`get_results`](Self::get_results) agree on which classes exist.
+    /// Categories reporting the `-1.0` "not computed" sentinel, and ids with no
+    /// category record to name them, are dropped.
     fn per_class_ap_named(&self, eval: &AccumulatedEval) -> Vec<(String, f64)> {
         self.per_cat_ap(eval)
             .iter()
@@ -434,9 +422,8 @@ impl COCOeval {
         }
 
         // `f64`'s `Display` prints the minimal digits: `1.0` → "F1", `2.0` →
-        // "F2", `0.5` → "F0.5". One rule for every beta — the previous `{:.1}`
-        // decorated integer betas ("F2.0") while the beta-1 special case did
-        // not, so the key spelling depended on which branch you hit.
+        // "F2", `0.5` → "F0.5". One rule for every beta, so the key spelling
+        // never depends on which branch produced it.
         let prefix = format!("F{}", beta);
 
         let names = [
@@ -456,10 +443,9 @@ impl COCOeval {
     /// Must be called after [`summarize`](COCOeval::summarize). Prints nothing if
     /// `summarize` has not been run (emits a warning to stderr instead).
     pub fn print_results(&self) {
-        // Zipped straight against `stats`, which is what `metric_keys()` is
-        // parallel to. Building a `BTreeMap` and then looking every key back out
-        // of it needed an `unwrap_or(-1.0)` for a miss that cannot happen, and
-        // that unreachable default is indistinguishable from a real `-1.000`.
+        // Zipped straight against `stats`, which `metric_keys()` is parallel to.
+        // Round-tripping through a map would need an `unwrap_or(-1.0)` default
+        // that is indistinguishable from a real `-1.000`.
         let keys = self.metric_keys();
         let stats = self.stats.as_deref().unwrap_or(&[]);
 
@@ -583,9 +569,9 @@ impl COCOeval {
         // from, so it reads the same M slot — `max_det_idx`, not the last one.
         let m_idx = self.params.max_det_idx();
         for (t_idx, &thr) in self.params.iou_thrs.iter().enumerate() {
-            // Folded in place rather than collected: this runs T×R times (10×101
-            // on COCO), and collecting a throwaway Vec per recall threshold cost
-            // ~1000 heap allocations per `report()` call to compute a mean.
+            // The inner mean folds its iterator rather than collecting: this runs
+            // T×R times (10×101 on COCO), so a throwaway Vec per recall threshold
+            // would be ~1000 heap allocations per `report()` call.
             let curve: Vec<f64> = (0..eval.shape.r)
                 .map(|r_idx| {
                     mean_of_valid((0..eval.shape.k).map(|k_idx| {

@@ -17,9 +17,8 @@ use super::matching::EvalImg;
 /// loop of [`accumulate_impl`].
 ///
 /// It carries the evaluator it was built from rather than leaving the caller to
-/// pass a matching `params`/`eval_mode` alongside it — a grouping bucketed under
-/// one evaluator's category list and accumulated under another's is a wrong number
-/// with nothing to catch it, and this makes that unspellable.
+/// pass a matching `params`/`eval_mode` alongside it, so a grouping bucketed
+/// under one evaluator's category list cannot be accumulated under another's.
 pub(super) struct EvalGrouping<'a> {
     ev: &'a COCOeval,
     /// Indexed `k_idx * a + a_idx`, each bucket in `eval_imgs` order. Each cell

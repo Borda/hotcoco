@@ -630,7 +630,7 @@ def test_report_curves_are_plottable():
 
 
 # ---------------------------------------------------------------------------
-# Drop-in behaviours that are not about metric values
+# Drop-in behaviors that are not about metric values
 # ---------------------------------------------------------------------------
 
 

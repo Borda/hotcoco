@@ -3398,10 +3398,10 @@ fn test_hierarchy_from_categories_supercategory() {
     assert_eq!(h.parent(2), None);
 
     // Dog ancestors: [Dog, Animal]
-    let dog_anc = h.ancestors(1);
-    assert_eq!(dog_anc.len(), 2);
-    assert_eq!(dog_anc[0], 1);
-    assert_eq!(dog_anc[1], 2);
+    let dog_ancestors = h.ancestors(1);
+    assert_eq!(dog_ancestors.len(), 2);
+    assert_eq!(dog_ancestors[0], 1);
+    assert_eq!(dog_ancestors[1], 2);
 }
 
 #[test]
@@ -3476,11 +3476,11 @@ fn test_hierarchy_from_oid_json() {
     assert_eq!(h.parent(200), Some(100));
     assert_eq!(h.parent(100), None);
 
-    let dog_anc = h.ancestors(300);
-    assert_eq!(dog_anc.len(), 3);
-    assert_eq!(dog_anc[0], 300);
-    assert_eq!(dog_anc[1], 200);
-    assert_eq!(dog_anc[2], 100);
+    let dog_ancestors = h.ancestors(300);
+    assert_eq!(dog_ancestors.len(), 3);
+    assert_eq!(dog_ancestors[0], 300);
+    assert_eq!(dog_ancestors[1], 200);
+    assert_eq!(dog_ancestors[2], 100);
 }
 
 #[test]
@@ -5437,7 +5437,7 @@ fn evaluation_is_independent_of_thread_count() {
 ///
 /// Only reachable programmatically. Loading from a *file* never gets here —
 /// `sanitize_non_finite` rewrites bare `NaN` to `null` first, which is the
-/// pycocotools-compatible behaviour and is covered by
+/// pycocotools-compatible behavior and is covered by
 /// `test_load_gt_tolerates_non_finite_floats`.
 #[test]
 fn nan_detection_score_is_rejected() {

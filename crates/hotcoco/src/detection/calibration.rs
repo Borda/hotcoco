@@ -88,9 +88,7 @@ impl COCOeval {
         let mut per_cat: HashMap<u64, ScoredOutcomes> = HashMap::new();
 
         // `default_cells` owns the (area = "all", default max_det) predicate that
-        // TIDE and per-image diagnostics also select on. This site used to test the
-        // area range only — inert, because `evaluate()` stamps one `max_det` on
-        // every cell, but inert by coincidence rather than by construction.
+        // TIDE and per-image diagnostics also select on.
         for eval_img in self.default_cells() {
             let matched = eval_img.dt_matched.row(t_idx);
             let ignored = eval_img.dt_ignore.row(t_idx);

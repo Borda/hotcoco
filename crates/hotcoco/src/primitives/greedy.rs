@@ -32,7 +32,7 @@
 //!
 //! pycocotools starts each detection's search at `min(t, 1 - 1e-10)`
 //! (`evaluateImg`: `iou = min([t, 1-1e-10])`). That clamp is **the caller's to
-//! apply**: [`greedy_match`] compares against exactly the `iou_thrs` it is
+//! apply**: [`greedy_match_masked`] compares against exactly the `iou_thrs` it is
 //! handed, so a family whose thresholds mean something other than COCO's is not
 //! silently given COCO's fudge factor. The clamp is inert below `t == 1.0` and
 //! observable only there. Callers that claim pycocotools matching semantics
@@ -58,7 +58,7 @@
 /// The canonical definition of the clamp described in the [module
 /// docs][self#threshold-epsilon-policy-caller-owned-with-one-canonical-clamp].
 /// It exists so the detection lineage has **one** spelling of the epsilon rather
-/// than a literal repeated at each call site; [`greedy_match`] deliberately does
+/// than a literal repeated at each call site; the matcher deliberately does
 /// not apply it for you.
 ///
 /// ```
@@ -81,19 +81,18 @@ pub fn coco_match_floor(iou_thr: f64) -> f64 {
 /// at 1.0 for *any* fully-contained box, so a detection inside two overlapping
 /// regions ties by construction rather than by coincidence.
 ///
-/// This exists as a shared function rather than a loop at the call site because
-/// the tie-break is observable public contract through `evalImgs`, and a second
-/// copy is exactly how two callers come to disagree about it. `parity_oid.py`
-/// caught precisely that bug: picking the later of two tied group-of boxes left
-/// the earlier one permanently unmatched, turning a true positive into a miss.
+/// The tie-break is observable public contract through `evalImgs`, so it lives
+/// in one function rather than at each call site. `parity_oid.py` catches the
+/// failure: picking the later of two tied group-of boxes leaves the earlier one
+/// permanently unmatched, turning a true positive into a miss.
 ///
-/// Unlike [`greedy_match`] this performs no assignment and no exclusion — it
+/// Unlike [`greedy_match_masked`] this performs no assignment and no exclusion — it
 /// answers "which candidate is best for this one row", and repeated calls may
 /// return the same index. `eligible` masks out candidates the caller does not want
 /// considered; it must be at least as long as `sims`.
 ///
 /// **This module now hosts two opposite tie-break rules, deliberately.**
-/// [`greedy_match`] compares with `>=`, so the *last* tied ground truth wins —
+/// [`greedy_match_masked`] compares with `>=`, so the *last* tied ground truth wins —
 /// that is pycocotools, and it is observable through `evalImgs`. This function
 /// compares with `>`, so the *first* wins, which is numpy. Neither can adopt the
 /// other without breaking parity with its own reference. Do not "unify" them.
@@ -123,12 +122,10 @@ pub fn best_above_floor(sims: &[f64], eligible: &[bool], floor: f64) -> Option<u
 /// Dense per-threshold matrix: `rows` thresholds × `row_len` items, one allocation.
 ///
 /// Everything the matcher reports is T parallel answers to the same question,
-/// one row per IoU threshold. Stored as `Vec<Vec<T>>`, that shape costs T heap
-/// allocations per field per evaluated cell; with five such fields in every
-/// `EvalImg` over ~150k val2017 cells, the profiler attributed the majority of
-/// bbox evaluation to the resulting malloc traffic (and its lock contention
-/// across the rayon fan-out). One strided buffer keeps the `[t][i]` indexing
-/// and drops the cost.
+/// one row per IoU threshold. As `Vec<Vec<T>>` that costs T heap allocations per
+/// field per evaluated cell — five such fields in every `EvalImg` over ~150k
+/// val2017 cells, which the profiler attributed the majority of bbox evaluation
+/// to. One strided buffer keeps the `[t][i]` indexing and drops the cost.
 ///
 /// Rows are addressed as `m.row(t)` / `m.row_mut(t)`, single cells as
 /// `m[(t, i)]`.
@@ -225,9 +222,9 @@ pub struct GreedyMatches {
 /// `GtMasks::default()` for the uniform case) so the mix-up cannot compile.
 ///
 /// `None` is the **uniform** case: no GT is rematchable, and every GT is
-/// phase-2 eligible. Those are the values every non-crowd, non-OID caller would
-/// otherwise have to materialize — two `vec![_; g]` per matched cell, which on
-/// a COCO run is ~800k allocations per `evaluate()` to say "the usual".
+/// phase-2 eligible. Every non-crowd, non-OID caller would otherwise materialize
+/// two `vec![_; g]` per matched cell — ~800k allocations per COCO `evaluate()`
+/// to restate the default.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GtMasks<'a> {
     /// Per-GT: may this ground truth be matched by more than one detection?
@@ -240,8 +237,7 @@ pub struct GtMasks<'a> {
 
 /// Greedy-match detections to ground-truths, pycocotools-exact.
 ///
-/// [`greedy_match`] with the two per-GT policy masks as the named fields of
-/// [`GtMasks`], so a call site cannot transpose them.
+/// The canonical entry point; every caller in the crate uses this one.
 ///
 /// # Caller ordering contract
 /// - Detections are ordered **score-descending** — matching iterates in this order.
@@ -275,8 +271,9 @@ pub struct GtMasks<'a> {
 /// # Panics
 ///
 /// If `iou_flat.len() != d * g`, if `num_gt_not_ignored > g`, or if a supplied
-/// mask is not exactly length `g`. (A short mask used to degrade to the uniform
-/// default from its end onward in release builds — a hybrid nothing intended.)
+/// mask is not exactly length `g`. The mask length is asserted rather than
+/// tolerated: a short mask would otherwise degrade to the uniform default from
+/// its end onward, giving a hybrid policy no caller intended.
 pub fn greedy_match_masked(
     iou_flat: &[f64],
     d: usize,
@@ -373,10 +370,10 @@ pub fn greedy_match_masked(
 
 /// [`greedy_match_masked`] with the two policy masks as positional parameters.
 ///
-/// A thin delegating form kept so existing call sites keep compiling; the two
-/// adjacent `Option<&[bool]>` parameters are transposable, which is what
-/// [`GtMasks`] exists to prevent — prefer [`greedy_match_masked`] in new code.
-/// Same algorithm, same results, same panics.
+/// Same algorithm, same results, same panics — it delegates. Prefer
+/// [`greedy_match_masked`]: the two adjacent `Option<&[bool]>` here are
+/// transposable, which is what [`GtMasks`] exists to prevent. Retained only
+/// because removing it is a breaking change; nothing in the crate calls it.
 ///
 /// # Panics
 ///
@@ -413,12 +410,12 @@ mod tests {
     ///
     /// Each detection family reaches its numbers through this function, so a
     /// violation here is a wrong metric everywhere at once — and the fixtures
-    /// above are all 2x1 and 2x2. Randomising the shape, the crowd flags, the
+    /// above are all 2x1 and 2x2. Randomizing the shape, the crowd flags, the
     /// phase-2 mask and the threshold list is what exercises the interactions
     /// between them.
     ///
     /// The IoU grid deliberately mixes continuous values with a coarse
-    /// quantised set: exact ties are where the `>=` update rule (later GT index
+    /// quantized set: exact ties are where the `>=` update rule (later GT index
     /// wins) is observable, and they essentially never occur under pure
     /// continuous sampling.
     #[test]
@@ -430,10 +427,10 @@ mod tests {
             let g = rng.random_range(1..=6);
             let num_ni = rng.random_range(0..=g);
 
-            let quantised = rng.random_bool(0.5);
+            let quantized = rng.random_bool(0.5);
             let iou_flat: Vec<f64> = (0..d * g)
                 .map(|_| {
-                    if quantised {
+                    if quantized {
                         // 0.0, 0.25, 0.5, 0.75, 1.0 — collides constantly.
                         rng.random_range(0..=4) as f64 / 4.0
                     } else {
@@ -487,7 +484,7 @@ mod tests {
                         iou_flat[di * g + gi]
                     );
 
-                    // Phase 2 is the only route to an ignored GT, and it honours
+                    // Phase 2 is the only route to an ignored GT, and it honors
                     // the eligibility mask.
                     if gi >= num_ni {
                         assert!(
@@ -554,10 +551,10 @@ mod tests {
             let d = rng.random_range(1..=5);
             let g = rng.random_range(1..=5);
             let num_ni = rng.random_range(0..=g);
-            let quantised = rng.random_bool(0.5);
+            let quantized = rng.random_bool(0.5);
             let iou: Vec<f64> = (0..d * g)
                 .map(|_| {
-                    if quantised {
+                    if quantized {
                         rng.random_range(0..=4) as f64 / 4.0
                     } else {
                         rng.random_range(0.0..=1.0)

@@ -3,6 +3,12 @@ extend-exclude = [
     "data/",
     "*.json",
     "scripts/fixtures/",
+    # Minified bundles and font binaries: mangled identifiers and packed bytes,
+    # ~850 hits between them. By extension, not by directory — `static/` also
+    # holds our own dashboard.js/gallery.js/overlay.js/style.css, which excluding
+    # the directory would take 3.5k lines of first-party code out of the check.
+    "*.min.js",
+    "*.ttf",
 ]
 
 [default]
@@ -38,3 +44,17 @@ iscrowd = "iscrowd"
 dota = "dota"
 ded = "ded"
 nd = "nd"
+
+# `extend-identifiers`, not `extend-words`: this still flags `fo` as a *sub-word*
+# of a compound identifier, where `extend-words` would allowlist it everywhere.
+# Prefer renaming over listing — everything else that tripped the checker was
+# renamed instead: `ab`/`ba` -> `iou_fwd`/`iou_rev`, `hc_gti` -> `hc_gt_ignore`,
+# `dog_anc` -> `dog_ancestors`, `mis-copied` -> `miscopied`.
+[default.extend-identifiers]
+fo = "fo"      # `import fiftyone as fo` — the library's own documented alias
+
+# The CHANGELOG entry recording an earlier spelling pass quotes the British
+# spellings it replaced; correcting them there yields `behavior` → `behavior`.
+# Markdown-scoped, so the pattern cannot suppress a real typo in Rust or Python.
+[type.md]
+extend-ignore-re = ["American English spelling throughout \\([^)]*\\)"]

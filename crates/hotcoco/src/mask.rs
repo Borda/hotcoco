@@ -20,8 +20,8 @@ pub use crate::primitives::sim::{bbox_iou, mask_iou as iou};
 ///
 /// RLE run counts are 32-bit (matching the C `maskApi`), so a mask with more
 /// than `u32::MAX` pixels is unrepresentable. Dimensions arrive here straight
-/// from untrusted JSON, where computing `h * w` in `u32` used to overflow —
-/// a debug panic, silently wrapped garbage in release.
+/// from untrusted JSON, so the product is taken in `u64` and checked: `h * w` in
+/// `u32` overflows to a debug panic and to wrapped garbage in release.
 fn checked_hw(h: u32, w: u32) -> crate::error::Result<u32> {
     let hw = h as u64 * w as u64;
     u32::try_from(hw).map_err(|_| {
@@ -690,9 +690,9 @@ pub fn rle_from_string(s: &str, h: u32, w: u32) -> crate::error::Result<Rle> {
             }
             // Bound the LEB-style shift: any valid u32 run length — even
             // delta-encoded, hence possibly negative — fits well within 11
-            // five-bit groups. Untrusted strings with endless continuation
-            // bits used to grow `shift` past 63 and overflow the `<<` below
-            // (a debug panic, a masked shift in release).
+            // five-bit groups. Unbounded, an untrusted string of continuation
+            // bits grows `shift` past 63 and overflows the `<<` below (a debug
+            // panic, a masked shift in release).
             if shift > 55 {
                 return Err(format!(
                     "invalid RLE: run length at byte {i} has too many continuation characters"

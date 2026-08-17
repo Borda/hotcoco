@@ -190,12 +190,13 @@ impl COCOeval {
             })
             .collect();
 
-        // Replaces the cache wholesale: `collect` sizes the map from the vec's
-        // exact length, where clear/reserve/insert kept the old table's capacity.
+        // Replaces the cache wholesale, so `collect` sizes the map from the vec's
+        // exact length rather than inheriting the previous run's capacity.
         self.ious = iou_results.into_iter().collect();
 
-        // Evaluate each (image, category, area_range) combination in parallel.
-        // sparse_pairs × area_ranges replaces the old cat_ids × area_ranges × img_ids product.
+        // Evaluate each (image, category, area_range) combination in parallel,
+        // over sparse_pairs × area_ranges rather than the full
+        // cat_ids × area_ranges × img_ids product.
         //
         // Empty `max_dets` is degraded, not panicked on: `Params::max_det()`
         // owns the fallback cap (100), matching how every other degenerate

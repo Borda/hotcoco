@@ -76,7 +76,7 @@ MODULES = (
 
 
 def _install_reference(root: Path):
-    """Materialise a minimal `object_detection` package and import the evaluator.
+    """Materialize a minimal `object_detection` package and import the evaluator.
 
     Two imports are stubbed rather than downloaded. `tensorflow.compat.v1` is
     imported at module scope but only *used* by the estimator helpers, so a bare
@@ -122,7 +122,7 @@ def _xywh_to_yxyx(b):
 
 
 # --- scenarios -------------------------------------------------------------
-# Curated cases first, each aimed at one rule of the protocol, then randomised
+# Curated cases first, each aimed at one rule of the protocol, then randomized
 # ones so the comparison is not limited to situations we thought to write down.
 
 
@@ -192,7 +192,7 @@ def curated_cases():
 
 
 def random_cases(n, seed=20260729):
-    """Randomised cases whose detections are *derived from* the ground truth.
+    """Randomized cases whose detections are *derived from* the ground truth.
 
     Independently random boxes almost never overlap: the first version of this
     generator produced 56 vacuous cases out of 60, every one scoring mAP 0.0 and

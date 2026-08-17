@@ -14,7 +14,7 @@
 //! for the same answer.
 //!
 //! The assignment algorithm itself is not here either: that is
-//! [`crate::primitives::greedy::greedy_match`]. What lives here is everything
+//! [`crate::primitives::greedy::greedy_match_masked`]. What lives here is everything
 //! COCO-specific *around* it — deciding which ground truths are ignored, ordering
 //! detections by score, reordering the IoU matrix to match, and translating the
 //! matcher's indices back into annotation ids. The matcher's contract requires the
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use crate::coco::COCO;
 use crate::params::{IouType, Params};
-use crate::primitives::greedy::ThreshMatrix;
+use crate::primitives::greedy::{GtMasks, ThreshMatrix};
 use crate::types::Annotation;
 
 use super::EvalMode;
@@ -36,12 +36,11 @@ use super::EvalMode;
 /// the area range: the resolved annotations, the detection score order, and the
 /// pair's similarity matrix.
 ///
-/// `evaluate()` runs every pair once per area range — four times, by default —
-/// and only the ignore/area flags differ between those runs. Resolving each
-/// annotation id through [`COCO::get_ann`], re-sorting the detections by score
-/// and re-hashing the `(img, cat)` key inside each run repeated all of that work
-/// verbatim; this is that work, hoisted so the ranges share it. Everything
-/// derived from an area range lives in [`GtView`]/[`DtView`] instead.
+/// This is the range-invariant work the module docs describe, hoisted so the
+/// four default area ranges share one resolution pass: resolving every
+/// annotation id, sorting the detections by score, and the `(img, cat)` lookup
+/// into the IoU cache. Everything that *does* vary by range lives in
+/// [`GtView`]/[`DtView`] instead.
 pub(super) struct PairCell<'a> {
     img_id: u64,
     cat_id: u64,
@@ -77,9 +76,8 @@ struct GtView<'a> {
     /// Index into `anns` -> column in the cell's IoU matrix.
     iou_indices: &'a [usize],
     ignore_sorted: Vec<bool>,
-    /// Whether each GT counts toward the recall denominator. Differs from
-    /// `!ignore_sorted` only for Open Images group-of boxes, which are held out
-    /// of matching but still counted. See `partition_gt`.
+    /// Whether each GT counts toward the recall denominator — see
+    /// [`EvalImg::gt_in_denominator`].
     in_denominator_sorted: Vec<bool>,
     iscrowd_sorted: Vec<bool>,
     /// Open Images only; empty otherwise. Guarded by `is_oid` at every use.
@@ -192,7 +190,7 @@ pub(super) fn gather_pair<'a>(
 ///
 /// Ignore rules are mode-dependent: Open Images ignores group-of boxes and does
 /// not care about `iscrowd`; COCO/LVIS ignore crowds, and keypoint evaluation
-/// additionally ignores annotations with no labelled keypoints.
+/// additionally ignores annotations with no labeled keypoints.
 fn partition_gt<'a>(
     pair: &'a PairCell<'a>,
     area_rng: [f64; 2],
@@ -202,12 +200,10 @@ fn partition_gt<'a>(
     let anns = pair.gt_anns.as_slice();
 
     // `ignore` governs *matching*; `in_denominator` governs the *recall
-    // denominator*. They are complements of each other in every mode but Open
-    // Images, where a group-of box is held out of matching (the second pass in
-    // `match_cell` absorbs it instead) yet still counts as one ground truth,
-    // because the protocol scores an undetected group-of box as a single false
-    // negative. COCO's single `gtIgnore` cannot express "not matchable here" and
-    // "counted" at once, so the two are computed together and kept apart.
+    // denominator*. COCO's single `gtIgnore` cannot express "not matchable here"
+    // and "counted" at once, which Open Images group-of boxes need: they are
+    // held out of matching (the second pass in `match_cell` absorbs them) yet
+    // still count as one ground truth. See `EvalImg::gt_in_denominator`.
     let (ignore, in_denominator): (Vec<bool>, Vec<bool>) = anns
         .iter()
         .map(|ann| {
@@ -278,9 +274,6 @@ fn area_filter_dt<'a>(pair: &'a PairCell<'a>, area_rng: [f64; 2]) -> DtView<'a> 
 
 /// Reorder the cell's IoU matrix into the flat row-major `[D*G]` layout the
 /// matcher expects, with rows in score order and columns non-ignored-first.
-///
-/// This reorder step is exactly where the matcher's flat layout is produced —
-/// the `sim` kernels' nested `[D][G]` output is never fed in directly.
 fn reordered_iou(iou_mat: &IouMatrix, dt: &DtView<'_>, gt: &GtView<'_>) -> Vec<f64> {
     let (d, g) = (dt.len(), gt.len());
     let mut flat = vec![0.0_f64; d * g];
@@ -343,13 +336,15 @@ fn match_cell(
 
     // Both matching phases share `ctx.match_floors` — pycocotools' clamped
     // thresholds. See the policy table in `primitives::greedy`.
-    let m = crate::primitives::greedy::greedy_match(
+    let m = crate::primitives::greedy::greedy_match_masked(
         &iou_flat,
         d,
         g,
         gt.num_not_ignored,
-        (!is_oid).then_some(gt.iscrowd_sorted.as_slice()),
-        phase2_eligible.as_deref(),
+        GtMasks {
+            rematchable: (!is_oid).then_some(gt.iscrowd_sorted.as_slice()),
+            phase2_eligible: phase2_eligible.as_deref(),
+        },
         ctx.match_floors,
     );
 
@@ -427,9 +422,7 @@ fn match_cell(
                 dt_matched[(t_idx, di)] = true;
                 // `gt_matched` *is* the "already credited" flag: group-of boxes are
                 // excluded from both greedy phases, so it is false on entry here and
-                // only this loop ever sets it. A separate `credited` vector would be
-                // a second copy of the same bit, free to drift from the one
-                // `EvalImg` reports.
+                // only this loop ever sets it — no separate `credited` vector.
                 if gt_matched[(t_idx, gi)] {
                     // The box already has its true positive; absorb this one.
                     dt_ignore[(t_idx, di)] = true;
@@ -473,8 +466,8 @@ pub(super) fn evaluate_cell(
 
     let mut outcome = match_cell(ctx, &gt, &dt, pair.iou_matrix, is_oid);
 
-    // LVIS: on a not-exhaustively-labelled category, unmatched detections are
-    // ignored instead of penalised as false positives.
+    // LVIS: on a not-exhaustively-labeled category, unmatched detections are
+    // ignored instead of penalized as false positives.
     if not_exhaustive_cat {
         for t_idx in 0..ctx.params.iou_thrs.len() {
             for di in 0..dt.len() {
@@ -564,31 +557,25 @@ pub struct EvalImg {
 impl EvalImg {
     /// How many ground truths in this cell count toward recall.
     ///
-    /// Use this rather than counting `!gt_ignore`. The two agree in every mode but
-    /// Open Images, where a group-of box is excluded from matching yet still counts
-    /// as one ground truth — see [`gt_in_denominator`](Self::gt_in_denominator).
-    /// Having the rule in a method rather than repeated at each call site is what
-    /// stops the next consumer from reaching for the wrong field.
+    /// Use this rather than counting `!gt_ignore` — see
+    /// [`gt_in_denominator`](Self::gt_in_denominator) for when the two differ.
     pub fn num_gt_in_denominator(&self) -> usize {
         self.gt_in_denominator.iter().filter(|&&x| x).count()
     }
 
     /// Whether ground truth `gi` is a *scored* miss when unmatched.
     ///
-    /// The false-negative counterpart of [`num_gt_in_denominator`](Self::num_gt_in_denominator):
-    /// a ground truth that counts in the denominator and went unmatched is a miss.
-    /// Consumers tallying false negatives should ask this instead of `!gt_ignore`,
-    /// or they will disagree with the recall the same evaluation reports.
+    /// The false-negative counterpart of
+    /// [`num_gt_in_denominator`](Self::num_gt_in_denominator). Tallying false
+    /// negatives from `!gt_ignore` instead disagrees with the recall the same
+    /// evaluation reports.
     pub fn counts_as_miss(&self, gi: usize) -> bool {
         self.gt_in_denominator.get(gi).copied().unwrap_or(false)
     }
 }
 
 /// Read-only context shared across all [`gather_pair`]/[`evaluate_cell`] calls
-/// within a single [`COCOeval::evaluate`] invocation.
-///
-/// Grouping these shared references avoids passing them individually to every
-/// call and removes the `#[allow(clippy::too_many_arguments)]` suppressor.
+/// within a single [`COCOeval::evaluate`](super::COCOeval::evaluate) invocation.
 pub(super) struct EvalImgContext<'a> {
     pub(super) coco_gt: &'a COCO,
     pub(super) coco_dt: &'a COCO,

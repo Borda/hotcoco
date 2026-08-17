@@ -32,7 +32,7 @@ impl COCOeval {
     ///
     /// Returns a **flat** row-major `[D × G]` buffer (`iou[di * g + gi]`), empty
     /// when either side is empty. Flat is what both callers want — the confusion
-    /// matrix hands it straight to `greedy_match`, which takes flat, and TIDE
+    /// matrix hands it straight to `greedy_match_masked`, which takes flat, and TIDE
     /// scans one detection's row at a time — so producing it here saves each of
     /// them re-flattening a D·G buffer of their own.
     ///
@@ -44,23 +44,20 @@ impl COCOeval {
     /// bbox fallback fires only if that guarantee is ever broken.
     ///
     /// Dispatch is on [`SimKind`] — the sanctioned projection from an `IouType`
-    /// to a geometry kernel — and the three arms are the same marshaling helpers
-    /// `evaluate()` uses. A second copy of "pull the bboxes out, pull the RLEs
-    /// out, call `sim`" is exactly the duplication `detection/iou.rs` was made
-    /// the owner of.
+    /// to a geometry kernel — through the same marshaling helpers `evaluate()`
+    /// uses, which `detection/iou.rs` owns.
     ///
-    /// `SimKind::Oks` routes to the bbox arm on purpose. There is no
-    /// cross-category OKS — the ground truths in a cross-category matrix belong
-    /// to *other* categories, so their keypoint schemas do not line up — so both
-    /// callers compare boxes on a keypoint run, which is what the previous
-    /// `Bbox | Keypoints` arm did.
+    /// `SimKind::Oks` routes to the bbox arm on purpose: there is no
+    /// cross-category OKS, because the ground truths in a cross-category matrix
+    /// belong to *other* categories and their keypoint schemas do not line up.
+    /// Both callers therefore compare boxes on a keypoint run.
     ///
     /// `EvalMode::Coco` in every call, regardless of the evaluator's own mode:
     /// the helpers derive each ground truth's crowd flag from its annotation,
     /// and both callers drop `iscrowd` ground truths before getting here, so the
-    /// flags come out uniformly false — the all-false vector this used to build
-    /// by hand. Passing the real mode would *not* be equivalent, because under
-    /// Open Images `uses_ioa` reads `is_group_of`, which nothing here filters.
+    /// flags come out uniformly false. Passing the real mode would *not* be
+    /// equivalent, because under Open Images `uses_ioa` reads `is_group_of`,
+    /// which nothing here filters.
     pub(super) fn cross_category_iou(
         dt_ann_ids: &[u64],
         gt_ann_ids: &[u64],
@@ -135,7 +132,7 @@ impl COCOeval {
     ///
     /// `dt_rank` is what differs between the callers. `Some` — the confusion
     /// matrix — drops detections below `min_score`, orders the rest
-    /// score-descending, and caps them at `max_det`, ready for `greedy_match`.
+    /// score-descending, and caps them at `max_det`, ready for the matcher.
     /// `None` — TIDE — keeps every detection in index order.
     ///
     /// Walks `get_ann_ids_for_img` rather than sweeping `cat_ids`, keeping the
@@ -267,7 +264,7 @@ impl COCOeval {
             .par_iter()
             .fold(LabelPairs::default, |mut acc: LabelPairs, &img_id| {
                 // Detections arrive score-descending and capped, which is
-                // what `greedy_match` below assumes of its row order.
+                // what the matcher below assumes of its row order.
                 let (gt_pairs, dt_pairs) = Self::cross_category_pairs(
                     coco_gt,
                     coco_dt,
@@ -301,17 +298,18 @@ impl COCOeval {
                 // through **unclamped** — hotcoco-native analysis does not inherit
                 // pycocotools' `min(t, 1-1e-10)` match floor; see the policy table
                 // in `primitives::greedy`.
-                let matches = primitives::greedy::greedy_match(
+                let matches = primitives::greedy::greedy_match_masked(
                     &iou_flat,
                     d,
                     g,
                     g, // all GTs non-ignored
-                    None,
-                    None,
+                    primitives::greedy::GtMasks::default(),
                     &[iou_thr],
                 );
-                // Read both halves of the result — recomputing `gt_matched` from
-                // `dt_gt` would be a second source of truth for the same fact.
+                // Both halves of the matcher's result. Deriving `gt_matched`
+                // from `dt_gt` here would be a second answer to a question the
+                // matcher already answered, free to drift from the one `EvalImg`
+                // reports.
                 let matched = matches.dt_gt.row(0);
                 let gt_matched = matches.gt_matched.row(0);
 

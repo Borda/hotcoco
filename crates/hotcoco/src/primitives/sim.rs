@@ -445,19 +445,19 @@ mod tests {
             let a = rand_box(&mut rng);
             let b = rand_box(&mut rng);
 
-            let ab = bbox_iou_pair(a, b, false);
-            let ba = bbox_iou_pair(b, a, false);
+            let iou_fwd = bbox_iou_pair(a, b, false);
+            let iou_rev = bbox_iou_pair(b, a, false);
 
             // Not `<= 1.0`: the intersection is computed from differences of
             // coordinates, so a near-identical pair can round marginally above
             // the union. See the self-IoU note below for the mechanism.
             assert!(
-                (0.0..=1.0 + 1e-12).contains(&ab),
-                "case {case}: IoU {ab} outside [0,1] for {a:?} vs {b:?}"
+                (0.0..=1.0 + 1e-12).contains(&iou_fwd),
+                "case {case}: IoU {iou_fwd} outside [0,1] for {a:?} vs {b:?}"
             );
             assert!(
-                (ab - ba).abs() < 1e-12,
-                "case {case}: asymmetric, {ab} vs {ba} for {a:?} vs {b:?}"
+                (iou_fwd - iou_rev).abs() < 1e-12,
+                "case {case}: asymmetric, {iou_fwd} vs {iou_rev} for {a:?} vs {b:?}"
             );
 
             // Self-IoU is 1.0 to within a few ulp, but *not* exactly 1.0. The

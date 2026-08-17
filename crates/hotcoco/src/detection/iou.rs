@@ -273,10 +273,9 @@ impl COCOeval {
         // The OKS math lives in the shared `primitives::sim::oks_matrix` kernel
         // (COCO-decoupled, matrix-shaped). Here we only marshal the annotations
         // into the kernel's flat-slice form. A missing `keypoints` field maps to
-        // an empty slice, which the kernel skips — matching the previous
-        // `None => continue` behavior that left that row/column zero. Only an
-        // id with no annotation record at all goes through `scatter_full`'s
-        // zero-fill.
+        // an empty slice, which the kernel skips, leaving that row/column zero.
+        // Only an id with no annotation record at all goes through
+        // `scatter_full`'s zero-fill.
         let (gt_cols, gt_anns): (Vec<usize>, Vec<_>) = gt_ids
             .iter()
             .enumerate()

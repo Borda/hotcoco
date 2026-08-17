@@ -319,7 +319,7 @@ fn greedy_matching_only_in_primitives() {
 
     assert!(
         violations.is_empty(),
-        "greedy matching belongs to `primitives::greedy::greedy_match`.\n\
+        "greedy matching belongs to `primitives::greedy`.\n\
          Hand-rolled matcher found at:\n  {}",
         violations.join("\n  ")
     );

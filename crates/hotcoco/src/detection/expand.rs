@@ -17,8 +17,7 @@ use crate::{COCO, Hierarchy};
 ///
 /// One function for both sides: Open Images expands ground truth always and
 /// detections when `params.expand_dt` is set, with the identical
-/// ancestor-propagation strategy — the former `expand_gt`/`expand_dt` pair
-/// were byte-identical wrappers around this.
+/// ancestor-propagation strategy.
 pub fn expand_annotations(coco: &COCO, hierarchy: &Hierarchy) -> COCO {
     let mut seen: HashSet<(u64, [u64; 4], u64)> = HashSet::new();
     let mut expanded_anns: Vec<Annotation> = Vec::new();

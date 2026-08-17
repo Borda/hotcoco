@@ -193,7 +193,7 @@ pub fn coco_to_cvat(
 /// Returns [`ConvertError::XmlError`] on malformed XML or
 /// [`ConvertError::ParseError`] if a required attribute (an image's `name`,
 /// `width`, or `height`; a shape's `label` or coordinates) is missing or
-/// unparseable. Errors name the file and the byte position where available.
+/// unparsable. Errors name the file and the byte position where available.
 pub fn cvat_to_coco(
     cvat_path: &std::path::Path,
 ) -> Result<(Dataset, CvatImportStats), ConvertError> {

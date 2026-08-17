@@ -261,5 +261,5 @@ stray label can't take down an evaluation run.
 **Bootstrap confidence intervals** (`metrics::bootstrap::bootstrap_ci`) take the
 statistic as a closure. `compare()` uses them internally and returns the intervals.
 
-**Greedy matching** (`primitives::greedy::greedy_match`) is used by
-`COCOeval.evaluate()`. A Python binding is on the [roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md).
+**Greedy matching** lives one layer down — see
+[Primitives](primitives.md#rust-only).

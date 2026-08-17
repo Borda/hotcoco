@@ -95,7 +95,7 @@ def _metric_desc(defn: dict, data: PlotData) -> str:
     if iou_thr is not None:
         return f"IoU {iou_thr:.2f}"
 
-    # A digit in the name says this recall row is *labelled* by its detection
+    # A digit in the name says this recall row is *labeled* by its detection
     # cap — AR1, AR10, AR100, AR@300 — while a bare "AR" (keypoints' only
     # recall row) is the IoU sweep, like "AP". The cap itself comes from the
     # definition either way; the name is only asked which axis it names.

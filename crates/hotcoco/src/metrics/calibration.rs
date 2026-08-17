@@ -110,8 +110,9 @@ pub fn scores_in_unit_interval(scores: &[f64]) -> Result<(), String> {
 ///
 /// # Panics
 ///
-/// If `scores` and `matched` have different lengths. (They used to truncate to
-/// the shorter silently — a curve quietly missing predictions.)
+/// If `scores` and `matched` have different lengths. Asserted rather than
+/// truncated to the shorter, which would return a curve quietly missing
+/// predictions.
 pub fn calibration_curve(scores: &[f64], matched: &[bool], n_bins: usize) -> Vec<CalibrationBin> {
     assert_eq!(
         scores.len(),
@@ -236,7 +237,7 @@ mod tests {
         println!("ECE worst deviation from netcal: {worst:.3e}");
     }
 
-    /// The binning contract, over scores that honour the documented `[0, 1]`
+    /// The binning contract, over scores that honor the documented `[0, 1]`
     /// precondition.
     ///
     /// Every existing quantitative test in this module puts all its mass in a

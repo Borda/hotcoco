@@ -43,9 +43,9 @@ fn spinner(message: &str) -> ProgressBar {
 )]
 // `subcommand_negates_reqs` is what lets the eval args be *required* while still
 // allowing `coco-eval completions <shell>` to parse with no dataset: naming a
-// subcommand drops the top-level requirements. Without it the requiredness has to
-// be re-implemented by hand, which loses the `required` markers in `--help` and
-// the per-scope usage line in errors.
+// subcommand drops the top-level requirements. Enforcing this manually instead
+// loses the `required` markers in `--help` and the per-scope usage line in
+// errors.
 #[command(subcommand_negates_reqs = true)]
 struct Cli {
     #[command(subcommand)]

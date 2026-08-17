@@ -87,10 +87,8 @@ pub struct BootstrapCI {
 /// same order.
 ///
 /// `statistic` receives the sampled units themselves, deduplicated. Generic over
-/// the unit type rather than handing back indices: an index set would force every
-/// caller to build a *second* set to map indices onto its own units, which for
-/// detection meant ~0.63·n extra hash inserts per sample on top of the ones this
-/// function already paid.
+/// the unit type rather than handing back indices, which would make every caller
+/// build a second set to map indices onto its own units.
 ///
 /// Bounds are raw percentiles: `floor(α/2 · n)` and `ceil((1-α/2) · n)` into the
 /// sorted samples, clamped to the last index. No BCa correction — the intervals
@@ -102,9 +100,9 @@ pub struct BootstrapCI {
 ///
 /// # Panics
 ///
-/// If `confidence` is not strictly inside `(0, 1)`. A `confidence` of `95`
-/// (percent instead of fraction) used to silently produce the `[min, max]` of
-/// the samples — a plausible-looking interval computed at the wrong level.
+/// If `confidence` is not strictly inside `(0, 1)`. Pass a fraction such as
+/// `0.95`, not a percentage — `95` would otherwise clamp to the `[min, max]` of
+/// the samples, a plausible-looking interval computed at the wrong level.
 pub fn bootstrap_ci<T, F>(
     units: &[T],
     n_samples: usize,

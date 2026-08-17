@@ -65,9 +65,7 @@ pub struct EvalResults {
     /// Carried here, and not only on [`EvalReport`](crate::EvalReport), because
     /// this is the struct that gets archived: `save()` writes it, the CLI's
     /// `--json` emits it, and the PDF report renders from it. Provenance that
-    /// exists only inside a live process is provenance nobody can audit later —
-    /// and a saved metrics file whose comparability has to be reconstructed from
-    /// memory is the exact situation the marker exists to prevent.
+    /// exists only inside a live process cannot be audited afterwards.
     pub provenance: Provenance,
     /// Evaluation parameters used to produce these metrics.
     pub params: EvalParams,
@@ -96,11 +94,10 @@ impl EvalResults {
 impl EvalParams {
     /// Archive an evaluator's configuration.
     ///
-    /// Takes the whole evaluator rather than a bare [`Params`] because the
-    /// deviation strings come from
-    /// [`reference_deviations`](super::COCOeval::reference_deviations) — the
-    /// single comparability predicate — and re-deriving them here would be a
-    /// second copy free to drift from the one that drives `Provenance`.
+    /// Takes the whole evaluator rather than a bare [`Params`] so the deviation
+    /// strings come from
+    /// [`reference_deviations`](super::COCOeval::reference_deviations), the same
+    /// predicate that drives `Provenance`, instead of being re-derived here.
     pub(in crate::detection) fn from_eval(ev: &super::COCOeval) -> Self {
         let params: &Params = &ev.params;
         let area_ranges: BTreeMap<String, [f64; 2]> = params

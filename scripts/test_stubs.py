@@ -303,7 +303,7 @@ def test_metric_functions_accept_numpy_arrays():
     # Fallback path: float32 still works, at the old per-element cost.
     assert metrics.average_precision(np_scores.astype(np.float32), np_matched, num_gt=4) == expected_ap
 
-    # Strided views must be read honestly, not rejected or mis-copied.
+    # Strided views must be read honestly, not rejected or miscopied.
     every_other = metrics.average_precision(np_scores[::2], np_matched[::2], num_gt=2)
     assert every_other == metrics.average_precision(scores[::2], matched[::2], num_gt=2)
 

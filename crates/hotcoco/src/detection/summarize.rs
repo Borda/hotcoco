@@ -13,33 +13,24 @@ use super::accumulate::{AccumulatedEval, EvalGrouping, accumulate_impl};
 use super::catalog::MetricDef;
 use super::mode::FreqGroups;
 
-/// Per-category mean AP as a free function (for use by `summarize_impl` and `slice_by`).
 /// Mean of `count` values summing to `sum`, or the `-1.0` "not computed" sentinel.
 ///
-/// The crate's most load-bearing convention, in one place. `-1.0` means a metric
-/// was not computable for this configuration — no ground truth in an area range,
-/// a category absent from the split — and it is *not* a low score: `report()`
-/// filters on it before emitting a per-class metric, and
-/// [`max_f_beta`](crate::metrics::counts::max_f_beta) skips it. It was spelled out
-/// at five sites across two modules; change the sentinel or the validity test at
-/// four of them and a category silently reports `-1.0` as a real score.
+/// The sole producer of the sentinel documented on
+/// [`metrics::is_computed`](crate::metrics::is_computed), which is how every
+/// consumer reads it back.
 pub(super) fn mean_or_missing(sum: f64, count: usize) -> f64 {
     if count == 0 { -1.0 } else { sum / count as f64 }
 }
 
 /// Mean of the values that were actually computed, or the `-1.0` sentinel.
 ///
-/// [`mean_or_missing`]'s companion, and the other half of the same convention:
-/// that function owns what an empty mean *is*, this one owns **which values are
-/// allowed into it**. Five sites spelled the pair out by hand — per-category AP,
-/// both branches of `summarize_stat`, the LVIS frequency buckets, and
-/// `report()`'s PR curves — and each was one edit away from averaging a `-1.0`
-/// in as if it were a real score of minus one.
+/// [`mean_or_missing`]'s companion: that function owns what an empty mean *is*,
+/// this one owns **which values are allowed into it** — averaging a `-1.0` in
+/// treats "not computed" as a real score of minus one.
 ///
-/// Takes an iterator and folds `(sum, count)` in visit order rather than
-/// collecting: the caller's iteration order *is* the summation order, so the last
-/// bit of every AP is whatever the hand-written loop produced. The filter is
-/// [`metrics::is_computed`](crate::metrics), the crate's one sentinel predicate.
+/// Folds `(sum, count)` in visit order rather than collecting, so the caller's
+/// iteration order is the summation order and the last bit of every AP is
+/// reproducible.
 pub(super) fn mean_of_valid(values: impl Iterator<Item = f64>) -> f64 {
     let (sum, count) = values
         .filter(|&v| crate::metrics::is_computed(v))
@@ -49,12 +40,10 @@ pub(super) fn mean_of_valid(values: impl Iterator<Item = f64>) -> f64 {
 
 /// B minus A, treating a metric missing from either side as no evidence.
 ///
-/// The subtraction counterpart of [`mean_or_missing`], and it lives beside it for
-/// the same reason: `-1.0` is "not computed for this configuration", so
-/// subtracting it manufactures a swing of up to 1.0 out of missing data. The
-/// comparison point estimate, its bootstrap CIs, and the per-slice deltas must all
-/// agree on that, which is why it is one function — the slice path had its own
-/// inlined copy, free to drift from the one `compare()` uses.
+/// The subtraction counterpart of [`mean_or_missing`]: `-1.0` is "not computed",
+/// so subtracting it manufactures a swing of up to 1.0 out of missing data. The
+/// comparison point estimate, its bootstrap CIs, and the per-slice deltas all
+/// route through here so they agree on that.
 #[inline]
 pub(super) fn metric_delta(a: f64, b: f64) -> f64 {
     if a >= 0.0 && b >= 0.0 { b - a } else { 0.0 }
@@ -75,20 +64,15 @@ pub(super) fn stats_to_map(metric_keys: &[&str], stats: &[f64]) -> BTreeMap<Stri
 
 /// Re-accumulate an evaluated `COCOeval` over an image subset and summarize it.
 ///
-/// The `accumulate_impl` → `summarize_impl` pair takes six arguments across the
-/// two calls, five of which are fields of the same evaluator; it was spelled out
-/// at every re-summarization site (`compare`, its bootstrap statistic, and both
-/// halves of `slice_by`). One of those forgetting `freq_groups` or passing the
-/// *other* evaluator's params is a wrong number with nothing to catch it.
+/// The single entry point for re-summarization — `compare`, its bootstrap
+/// statistic, and both halves of `slice_by`. `img_filter` of `None` means the
+/// full dataset. Both halves of the result are returned because callers need
+/// different parts: comparison reads the accumulated eval for per-category AP,
+/// slicing and bootstrapping only the stats.
 ///
-/// `img_filter` of `None` means the full dataset. Both halves of the result are
-/// returned because callers need different parts: comparison reads the
-/// accumulated eval for per-category AP, slicing and bootstrapping only the stats.
-///
-/// The evaluator arrives inside the [`EvalGrouping`] rather than beside it: every
-/// caller here re-summarizes the *same* evaluator many times over different image
-/// subsets, the grouping is invariant across those, and pairing it with a
-/// different evaluator's params would be a wrong number with nothing to catch it.
+/// The evaluator arrives inside the [`EvalGrouping`] rather than beside it, so a
+/// grouping bucketed under one evaluator's categories cannot be accumulated under
+/// another's params.
 pub(super) fn accumulate_and_summarize(
     grouping: &EvalGrouping<'_>,
     img_filter: Option<&HashSet<u64>>,
@@ -105,9 +89,8 @@ pub(super) fn accumulate_and_summarize(
 /// Which integration applies is a property of the *mode*, not of the caller. COCO
 /// and LVIS average the precision envelope over the 101 recall thresholds, so a
 /// cell yields `r` samples; Open Images takes the exact area under that same
-/// envelope, so it yields one. Every AP path routes through here — `summarize_impl`
-/// and `per_cat_ap_static`, the latter also serving `report` and `compare` — so a
-/// mode check at only some of them cannot silently split the two integrations.
+/// envelope, so it yields one. Every AP path routes through here, so the two
+/// integrations cannot split.
 ///
 /// Returns an iterator rather than filling an out-param so callers keep the shape
 /// that suits them: `summarize_impl` extends a shared `Vec`, `per_cat_ap_static`
@@ -139,11 +122,7 @@ pub(super) fn per_cat_ap_static(
     eval_mode: EvalMode,
 ) -> Vec<f64> {
     let a_idx = params.all_area_idx();
-    // `max_det_idx`, not `shape.m - 1`. The two agree on the sorted default
-    // `[1, 10, 100]` and diverge on anything else, and this vector feeds
-    // per-class AP in `report()`, `get_results(per_class = true)` and
-    // `compare()` — so `max_dets = [100, 10, 1]` reported every class at
-    // `max_det = 1` beside a headline `AP` computed at 100.
+    // `max_det_idx`, not `shape.m - 1` — see `Params::max_det_idx`.
     let m_idx = params.max_det_idx();
     (0..eval.shape.k)
         .map(|k_idx| {
@@ -168,10 +147,9 @@ pub(super) fn summarize_impl(
 ) -> Vec<f64> {
     let summarize_stat = |ap: bool, iou_thr: Option<f64>, area_lbl: &str, max_det: usize| -> f64 {
         // A missing area label or max-det setting degrades to the `-1.0` "not
-        // computed" sentinel, exactly like the missing-IoU-threshold branch
-        // below. Falling back to index 0 instead reported the "all" slice (or
-        // an arbitrary M slot) under a per-size metric's name — a plausible
-        // wrong number with nothing to flag it.
+        // computed" sentinel, like the missing-IoU-threshold branch below.
+        // Falling back to index 0 would report the "all" slice under a per-size
+        // metric's name — a plausible wrong number with nothing to flag it.
         let Some(a_idx) = params.area_range_idx(area_lbl) else {
             return -1.0;
         };
@@ -180,23 +158,20 @@ pub(super) fn summarize_impl(
         };
 
         let t_indices: Vec<usize> = if let Some(thr) = iou_thr {
-            // `Params::iou_thr_idx` owns this lookup — a single-threshold metric
-            // like AP50 means one slice of the IoU axis, and taking every
-            // threshold within tolerance silently reported their average.
+            // `Params::iou_thr_idx` owns this lookup: a single-threshold metric
+            // like AP50 means exactly one slice of the IoU axis, never the
+            // average of every threshold within tolerance.
             params.iou_thr_idx(thr).map(|i| vec![i]).unwrap_or_default()
         } else {
             (0..eval.shape.t).collect()
         };
 
-        // Folded rather than collected, in the same (t, k, r) visit order the Vec
-        // was filled and summed in — so the addition sequence, and therefore the
-        // last bit of every AP, is unchanged. The Vec held up to T×K×R f64
-        // (~646 KB on COCO) purely to take its mean, twice per bootstrap resample.
-        //
-        // The two branches are separate iterators rather than one loop with an
-        // `if` inside, because the AP branch yields R samples per (t, k) cell and
-        // the AR branch yields one. Both visit (t, k) in the same order the loop
-        // did.
+        // Folded rather than collected: materializing the samples costs up to
+        // T×K×R f64 (~646 KB on COCO) purely to take their mean, twice per
+        // bootstrap resample. The two branches are separate iterators because the
+        // AP branch yields R samples per (t, k) cell and the AR branch yields one;
+        // both visit (t, k) in the same order, so the summation sequence — and
+        // therefore the last bit of every AP — is fixed.
         if ap {
             mean_of_valid(t_indices.iter().flat_map(|&t_idx| {
                 (0..eval.shape.k)
@@ -210,10 +185,8 @@ pub(super) fn summarize_impl(
         }
     };
 
-    // LVIS only. Open Images computed this vector and threw it away — its single
-    // metric has no frequency group — and the `unwrap_or(&[])` fallback below
-    // then indexed an empty slice, so any future mode with a frequency metric and
-    // no per-category AP would have panicked rather than degraded.
+    // LVIS only — it is the one mode with frequency-group metrics. Other modes
+    // leave this empty and the `freq_group` arm below never fires for them.
     let per_cat_ap: Vec<f64> = if eval_mode == EvalMode::Lvis {
         per_cat_ap_static(eval, params, eval_mode)
     } else {

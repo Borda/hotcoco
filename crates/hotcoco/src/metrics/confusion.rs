@@ -79,8 +79,9 @@ pub fn confusion_matrix(
 /// # Panics
 ///
 /// If `matrix` is not exactly `(num_classes + 1)²` elements, or if `gt_labels`
-/// and `dt_labels` have different lengths. (An undersized matrix used to be a
-/// silent no-op — an all-zero confusion matrix with no error.)
+/// and `dt_labels` have different lengths. Both are asserted rather than
+/// degraded: an undersized matrix would otherwise come back all-zero with no
+/// error.
 pub fn accumulate_confusion(
     matrix: &mut [u64],
     gt_labels: &[Option<usize>],

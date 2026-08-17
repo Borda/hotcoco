@@ -565,6 +565,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   times and parallelizes across categories. All verified bit-identical on val2017
   and Objects365.
 
+- **In-code documentation is contract, not changelog.** A pass over every comment
+  and doc comment in the crate removed the refactor-history narration the 1.0 cycle
+  accumulated ("spelled out at five sites", "free to drift from", 64 sites across
+  `src/`), keeping the mechanism and contract explanations and cutting facts that
+  were restated at three to five call sites down to one owner plus links. Net −100
+  comment lines with no code change. `detection`'s module docs now describe LVIS,
+  Open Images and TIDE rather than calling the module a port of `cocoeval.py`; the
+  two `COCOeval` examples changed from ```` ```rust,ignore ```` to `no_run`, so
+  rustdoc compiles them (8 → 10 doctests); and a paragraph stranded under a
+  `# Panics` heading in `metrics::counts`, a broken intra-doc link, and a reference
+  to a file under gitignored `plans/` are gone. `cargo doc` is warning-free.
+
+- **American English throughout, and `typos` is a usable gate.** 39 spellings
+  corrected in comments, docstrings, scripts, the 101 notebook, and the CHANGELOG.
+  `_typos.toml` excluded `python/hotcoco/static/` wholesale to silence the vendored
+  Plotly bundle, which also hid 3,492 lines of first-party browse-UI JS and CSS —
+  now `*.min.js` / `*.ttf` by extension. Four abbreviated identifiers in tests and
+  scripts that the checker read as misspellings were renamed rather than
+  allowlisted — they are now `iou_fwd`/`iou_rev`, `hc_gt_ignore`, `dog_ancestors`,
+  and `miscopied` — leaving one entry, under `extend-identifiers` rather than
+  `extend-words` so it cannot suppress a word in prose. `typos .` exits clean
+  repo-wide.
+
+- **`COCOeval::evaluate` and the confusion matrix call
+  `primitives::greedy::greedy_match_masked`**, whose `GtMasks` names the two
+  per-GT policy masks. Both sites previously used the positional `greedy_match`,
+  where the adjacent `Option<&[bool]>` arguments transpose silently — so the type
+  that exists to prevent that mix-up had no callers. `greedy_match` remains public
+  and delegates; it is a wrapper, so the switch is allocation- and
+  result-identical, verified by val2017 parity.
+
 ### Fixed
 
 - **Result files carrying both `segmentation` and `keypoints` are typed as
@@ -1228,7 +1259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Internal: added `IouMatrix` type alias for `Vec<Vec<f64>>` in eval module, removed `#[allow(clippy::type_complexity)]`
 - Internal: pre-allocated `Vec`s in `accumulate()` with capacity hints based on total detection count, eliminating repeated reallocations
 - Internal: added `#[inline]` to hot mask functions (`area`, `to_bbox`, `intersection_area`)
-- `examples/coco_evaluation_101.ipynb` — restructured and expanded: 5-act narrative (Getting Started → Understand Your Model → Compare & Slice → Dataset Tools → Integration); added sections for confusion matrix, calibration, per-image diagnostics, model comparison, sliced evaluation, dataset operations, interactive browse, and publication plots with inline visualisations; richer 4-image synthetic dataset for diagnostic demos
+- `examples/coco_evaluation_101.ipynb` — restructured and expanded: 5-act narrative (Getting Started → Understand Your Model → Compare & Slice → Dataset Tools → Integration); added sections for confusion matrix, calibration, per-image diagnostics, model comparison, sliced evaluation, dataset operations, interactive browse, and publication plots with inline visualizations; richer 4-image synthetic dataset for diagnostic demos
 - `docs/getting-started/quickstart.md` — updated notebook description to reflect new content
 - `coco --help` and subcommand help: new description and epilog examples on top-level parser and `eval`/`healthcheck` subparsers; `--gt`/`--dt`/`--slices` help text improved; `stats` one-liner updated
 - `scripts/test_parity.py` renamed to `scripts/fuzz_parity.py` — clarifies that this is the slow hypothesis-based fuzzer (`just fuzz`), distinct from `scripts/test_parity.py` (the fast CI regression suite, `just test`)
@@ -1277,10 +1308,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Internal: replaced `is_lvis: bool` with `eval_mode: EvalMode` enum (`Coco | Lvis | OpenImages`) across all evaluation branch points; `EvalParams.is_lvis` serialized field renamed to `eval_mode` (string: `"coco"`, `"lvis"`, `"openimages"`); no behavior change — prepares for Open Images evaluation support
-- `hotcoco.plot` internal refactor: new `PlotData` dataclass (`python/hotcoco/plot/data.py`) centralises eval extraction from `COCOeval`, exposes `area_idx`, `max_det_idx`, `nearest_iou_idx` helpers and cat-name lookup; all plot functions now consume `PlotData` instead of reaching into `COCOeval` internals directly
+- `hotcoco.plot` internal refactor: new `PlotData` dataclass (`python/hotcoco/plot/data.py`) centralizes eval extraction from `COCOeval`, exposes `area_idx`, `max_det_idx`, `nearest_iou_idx` helpers and cat-name lookup; all plot functions now consume `PlotData` instead of reaching into `COCOeval` internals directly
 - `hotcoco.plot` figure saving: increased output DPI from 150 to 200; added `bbox_inches="tight"` to prevent label clipping on save
 - `hotcoco.plot.confusion_matrix`: colorbar now uses `make_axes_locatable` for proportional sizing; normalized matrix clamped to `[0, 1]` with `vmax=1.0`; PR-curve plots switched to `layout="compressed"` for tighter axis packing
-- `_annotate_bars` internal helper removed in favour of native `ax.bar_label`
+- `_annotate_bars` internal helper removed in favor of native `ax.bar_label`
 
 ### Added
 
@@ -1377,7 +1408,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `docs/benchmarks.md` — "Reproducing the benchmarks" section with step-by-step clone, build, data setup, and benchmark commands
 - CI, PyPI, Crates.io, and MIT license badges in `README.md`
 - `COCO(dict)` — constructor now accepts an in-memory dataset dict in addition to a file path or `None`
-- `COCOeval.f_scores(beta=1.0)` — compute F-beta scores after `accumulate()`; for each (IoU threshold, category) finds the confidence operating point that maximises F-beta, then averages across categories; returns `{"F1": ..., "F150": ..., "F175": ...}` (key prefix reflects beta value); supports arbitrary beta for precision/recall trade-off weighting
+- `COCOeval.f_scores(beta=1.0)` — compute F-beta scores after `accumulate()`; for each (IoU threshold, category) finds the confidence operating point that maximizes F-beta, then averages across categories; returns `{"F1": ..., "F150": ..., "F175": ...}` (key prefix reflects beta value); supports arbitrary beta for precision/recall trade-off weighting
 - `get_results(prefix, per_class)` — optional `prefix` parameter prepends a path to all metric keys (e.g. `"val/bbox/AP"`), and `per_class=True` adds per-category AP entries keyed as `"AP/{cat_name}"`; returns a flat dict ready for `wandb.log()`, `mlflow.log_metrics()`, or any experiment tracker
 - `IouType` now implements `Display` and `FromStr` traits
 - `mask.frPyObjects(seg, h, w)` — pycocotools-compatible unified entry point: accepts a list of polygon coord lists, a single uncompressed RLE dict, or a list of uncompressed RLE dicts; returns the same type as input (single dict or list of dicts)
@@ -1391,7 +1422,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `hotcoco::convert::coco_to_yolo` / `yolo_to_coco` — Rust functions backing the above; `YoloStats` and `ConvertError` types re-exported from crate root
 - `coco convert --from coco --to yolo --input <json> --output <dir>` / `--from yolo --to coco --input <dir> --output <json> [--images-dir <dir>]` — CLI subcommand for format conversion
 - `coco eval --tide` — print TIDE error decomposition after standard metrics; `--tide-pos-thr` and `--tide-bg-thr` control the IoU thresholds (defaults: 0.5 and 0.1)
-- `COCOeval.tide_errors(pos_thr=0.5, bg_thr=0.1)` — TIDE error decomposition (Bolya et al., ECCV 2020); classifies every FP into six mutually exclusive types (Loc, Cls, Dupe, Bkg, Both, Miss) and reports ΔAP — the AP gain from eliminating each type; requires `evaluate()` first; priority order matches tidecv (Loc > Cls > Dupe > Bkg > Both); Bkg/Both/Dupe ΔAP uses suppression (not flip-to-TP) for correct curve behaviour
+- `COCOeval.tide_errors(pos_thr=0.5, bg_thr=0.1)` — TIDE error decomposition (Bolya et al., ECCV 2020); classifies every FP into six mutually exclusive types (Loc, Cls, Dupe, Bkg, Both, Miss) and reports ΔAP — the AP gain from eliminating each type; requires `evaluate()` first; priority order matches tidecv (Loc > Cls > Dupe > Bkg > Both); Bkg/Both/Dupe ΔAP uses suppression (not flip-to-TP) for correct curve behavior
 - `TideErrors` Rust type with `delta_ap`, `counts`, `ap_base`, `pos_thr`, `bg_thr` fields
 - `COCO.load_res()` now accepts three input formats: file path (`str`), list of annotation dicts (`list[dict]`), or a numpy float64 array of shape `(N, 6)` or `(N, 7)` with columns `[image_id, x, y, w, h, score[, category_id]]` — matches pycocotools `loadNumpyAnnotations` convention
 - `COCO::load_res_anns(Vec<Annotation>)` — new Rust method for in-memory result loading without a filesystem round-trip

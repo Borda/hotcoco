@@ -175,7 +175,7 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
 ///
 /// Returns [`ConvertError::XmlError`] on malformed XML or
 /// [`ConvertError::ParseError`] if required elements are missing or a value is
-/// unparseable. Errors name the file and the byte position where available.
+/// unparsable. Errors name the file and the byte position where available.
 pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
     let ann_dir = {
         let sub = voc_dir.join("Annotations");

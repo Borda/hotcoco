@@ -232,7 +232,7 @@ pub fn compare(
             }
             // `COCO::cat_name` owns the unnamed-category fallback, so a category
             // neither side has a record for renders as `cat_7` here and in the
-            // confusion matrix alike — this site used to print a bare `7`.
+            // confusion matrix alike, rather than as a bare `7`.
             let cat_name = if eval_a.coco_gt.get_cat(cat_id).is_some() {
                 eval_a.coco_gt.cat_name(cat_id)
             } else {

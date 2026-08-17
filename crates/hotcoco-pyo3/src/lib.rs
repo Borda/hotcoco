@@ -101,12 +101,9 @@ fn warn_user(py: Python<'_>, msg: &str) -> PyResult<()> {
 ///
 /// The bindings return plain Python containers rather than wrapped Rust
 /// structs, and the cheapest way to get there for a whole report tree is
-/// serialize-then-`json.loads`. Three methods (`healthcheck`, `report`,
-/// `results`) each wrote that dance by hand, and they disagreed about
-/// failures: one mapped a serialization error to `PyValueError` directly,
-/// the others went through `to_pyerr`. One helper, one convention — a
-/// serialization failure is `Error::Json`, so `to_pyerr` decides its Python
-/// type here as it does everywhere else.
+/// serialize-then-`json.loads`. Used by `healthcheck`, `report` and `results`,
+/// so all three agree on the failure type: a serialization failure is
+/// `Error::Json`, and `to_pyerr` maps it as it does everywhere else.
 fn serde_to_py<T: serde::Serialize + ?Sized>(py: Python<'_>, value: &T) -> PyResult<Py<PyAny>> {
     let json_str =
         serde_json::to_string(value).map_err(|e| to_pyerr(hotcoco_core::Error::Json(e)))?;
@@ -1947,7 +1944,7 @@ str
         let prov = self.with_params(py, |ev| ev.provenance());
         // Serialized rather than matched, so this and ``report()['provenance']``
         // cannot spell the same variant two ways. Falls back to the *non*-verified
-        // side: an unrecognised provenance is a reason to caveat, not to certify.
+        // side: an unrecognized provenance is a reason to caveat, not to certify.
         let value = serde_json::to_value(prov)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(value.as_str().unwrap_or("extension").to_string())
@@ -2351,9 +2348,8 @@ Example\n\
         }
 
         // Map category IDs to names for per_category. Through `COCO::cat_name`,
-        // so the fallback for an id the ground truth does not carry reads the
-        // same here as everywhere else — this site used to spell it `cat_{id}`
-        // while `image_diagnostics` spelled it `?`.
+        // so an id the ground truth does not carry gets the same fallback name
+        // here as in `image_diagnostics` and the confusion matrix.
         let per_cat = map_to_dict(
             py,
             cal.per_category

@@ -1021,9 +1021,9 @@ def main():
         help="save a PDF evaluation report to this path (requires hotcoco[plot])",
     )
     eval_parser.add_argument(
-        # None, not a literal: report() derives the title from the eval mode, so
-        # a default here made every LVIS, keypoints, and Open Images PDF claim to
-        # be a "COCO Evaluation Report".
+        # None, not a literal: report() derives the title from the eval mode. A
+        # default here would title every LVIS, keypoints and Open Images PDF
+        # "COCO Evaluation Report".
         "--title",
         default=None,
         help="report title (default: derived from eval mode)",

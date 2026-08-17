@@ -24,21 +24,18 @@
 //! | [`primitives`](crate::primitives) | matches and similarities | `sim`, `greedy`, `assign` |
 //! | `metrics` | numbers from matches | `counts`, `calibration`, `confusion`, `bootstrap` |
 //!
-//! `primitives::greedy::greedy_match` decides *which detection pairs with which
-//! ground truth*. `metrics::counts::average_precision` turns that decision into a
-//! number. Nothing here matches; nothing there scores.
+//! `primitives::greedy::greedy_match_masked` decides *which detection pairs
+//! with which ground truth*. `metrics::counts::average_precision` turns that
+//! decision into a number. Nothing here matches; nothing there scores.
 //!
 //! `tests/architecture.rs` enforces the direction of the dependency: `metrics`
 //! may not import from a family driver such as [`detection`](crate::detection),
 //! and `primitives` may not import from `metrics`.
 //!
-//! # Why these functions take flat arrays
-//!
 //! Taking `(scores, matched)` rather than a family-specific struct is what makes
-//! them reusable. Detection produces those arrays from `eval_imgs`; tracking and
-//! panoptic will produce them from their own match records. The function does not
-//! know or care which family called it — that adapter is a dozen lines in the
-//! driver, and it is the only detection-shaped code involved.
+//! these reusable across families: detection produces those arrays from
+//! `eval_imgs`, tracking and panoptic will produce them from their own match
+//! records, and the function does not know which called it.
 //!
 //! # Degenerate-input convention
 //!
@@ -69,20 +66,17 @@ pub mod counts;
 ///
 /// The sentinel is public contract: evaluation output uses `-1.0` for an area
 /// range with no ground truth or a category absent from the split — never for a
-/// genuinely low score. Callers filtering evaluation arrays should use this
-/// predicate rather than re-deriving `v >= 0.0` by hand.
+/// genuinely low score. Filter evaluation arrays with this rather than an
+/// open-coded comparison.
 ///
-/// The predicate half of the sentinel convention whose *producer* is
-/// [`detection::summarize::mean_or_missing`](crate::detection). It lives here
-/// rather than beside the producer because the lower layer has to read it too:
-/// [`counts::max_f_beta`] skips sentinel precisions, and `metrics` may not import
-/// a family driver (`tests/architecture.rs` enforces that). Detection reaches
-/// down; the dependency runs one way.
+/// The predicate half of the convention whose *producer* is
+/// `detection::summarize::mean_or_missing`. It lives here rather than beside the
+/// producer because the lower layer reads it too — [`counts::max_f_beta`] skips
+/// sentinel precisions — and `metrics` may not import a family driver.
 ///
-/// Spelled `v >= 0.0` rather than `!(v < 0.0)` so it is the exact test the five
-/// hand-written sites used — the two differ only on `NaN`, which none of the
-/// accumulated arrays can hold, and matching the old spelling keeps the fold
-/// bit-identical without anyone having to prove that.
+/// The test is `v >= 0.0`, so `NaN` reads as **not** computed. Deliberate, and
+/// not interchangeable with `!(v < 0.0)`: the two agree everywhere except `NaN`,
+/// and swapping them would flip every sentinel-filtered fold on a `NaN` input.
 #[inline]
 pub fn is_computed(v: f64) -> bool {
     v >= 0.0

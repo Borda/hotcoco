@@ -100,7 +100,7 @@ class PlotData:
         Raises
         ------
         ValueError
-            If ``run()`` has not been called, the eval mode is unrecognised,
+            If ``run()`` has not been called, the eval mode is unrecognized,
             or the precision array does not have the expected 5D shape.
         """
         if coco_eval.eval is None:
@@ -122,7 +122,7 @@ class PlotData:
 
         # The recall axis is the evaluator's own grid, never a fresh linspace:
         # `rec_thrs` is configurable, and fabricating 0..1 silently mislabels
-        # every x coordinate on a run that customised it.
+        # every x coordinate on a run that customized it.
         recall_pts = np.asarray(coco_eval.params.rec_thrs, dtype=float)
         if recall_pts.shape[0] != precision.shape[1]:
             raise ValueError(

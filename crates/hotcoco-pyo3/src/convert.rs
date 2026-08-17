@@ -558,12 +558,12 @@ where
 /// list path.
 ///
 /// The metrics docstrings advertise "lists or numpy arrays", but PyO3's
-/// `Vec<f64>` fast path fires only for list/tuple — a numpy array fell through
-/// to per-element iteration, one boxed `extract` per element (~500K calls per
-/// argument on a full val2017 run). `PyReadonlyArray1` is a dtype check plus a
+/// `Vec<f64>` fast path fires only for list/tuple, leaving a numpy array to
+/// per-element iteration — one boxed `extract` per element, ~500K calls per
+/// argument on a full val2017 run. `PyReadonlyArray1` is a dtype check plus a
 /// memcpy; `to_vec` goes through ndarray, so strided views (`scores[::2]`)
 /// copy correctly instead of being rejected. Other dtypes (`float32`, object
-/// arrays) still work through the fallback at the old per-element cost.
+/// arrays) still work through the fallback, at per-element cost.
 pub fn f64_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<f64>> {
     if let Ok(arr) = obj.extract::<numpy::PyReadonlyArray1<f64>>() {
         return Ok(arr.as_array().to_vec());

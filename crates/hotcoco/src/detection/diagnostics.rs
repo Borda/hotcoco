@@ -195,8 +195,8 @@ struct FnGt {
 /// Everything in one image that the label-error scan compares against.
 ///
 /// One map keyed by image rather than three: the FP list, the FN list and the
-/// all-GT list are always read together for the same image, and keeping them in
-/// step was previously the caller's problem.
+/// all-GT list are always read together for the same image, so keeping them in
+/// step is this type's job rather than the caller's.
 #[derive(Default)]
 struct ImageCandidates {
     fps: Vec<FpDt>,

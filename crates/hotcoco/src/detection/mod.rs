@@ -1,6 +1,17 @@
-//! COCO evaluation engine — faithful port of `pycocotools/cocoeval.py`.
+//! The detection metric family.
 //!
-//! Implements evaluate, accumulate, and summarize for bbox, segm, and keypoint evaluation.
+//! [`COCOeval`] is the driver: a faithful port of `pycocotools/cocoeval.py`'s
+//! `evaluate` → `accumulate` → `summarize` lifecycle for bbox, segm, keypoint
+//! and oriented-box geometry, plus the two protocol variants that share it —
+//! LVIS federated evaluation ([`COCOeval::new_lvis`]) and Open Images
+//! ([`COCOeval::new_oid`]).
+//!
+//! Layered on the same evaluated cells are the analysis methods, which are
+//! adapters rather than metric implementations: they decide which detections
+//! count, marshal them into flat arrays, and call
+//! [`crate::metrics`]. TIDE's error taxonomy ([`TideErrors`]) and per-image
+//! diagnostics ([`ImageDiagnostics`]) are the exceptions that stay here, being
+//! genuinely detection-shaped.
 
 mod accumulate;
 mod calibration;
@@ -50,19 +61,31 @@ use mode::FreqGroups;
 ///
 /// The standard workflow is three steps:
 ///
-/// ```rust,ignore
+/// ```no_run
+/// # use hotcoco::{COCO, COCOeval, params::IouType};
+/// # fn main() -> hotcoco::error::Result<()> {
+/// # let coco_gt = COCO::new(std::path::Path::new("gt.json"))?;
+/// # let coco_dt = coco_gt.load_res(std::path::Path::new("dt.json"))?;
 /// let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
 /// ev.evaluate();   // per-image IoU matching
 /// ev.accumulate(); // aggregate into precision/recall curves
 /// ev.summarize();  // print + store the summary metrics in ev.stats
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// For LVIS, use [`run`](COCOeval::run) as a convenience:
 ///
-/// ```rust,ignore
+/// ```no_run
+/// # use hotcoco::{COCO, COCOeval, params::IouType};
+/// # fn main() -> hotcoco::error::Result<()> {
+/// # let coco_gt = COCO::new(std::path::Path::new("gt.json"))?;
+/// # let coco_dt = coco_gt.load_res(std::path::Path::new("dt.json"))?;
 /// let mut ev = COCOeval::new_lvis(coco_gt, coco_dt, IouType::Segm);
 /// ev.run();
 /// let results = ev.get_results(None, false); // BTreeMap<metric_name, f64>
+/// # Ok(())
+/// # }
 /// ```
 pub struct COCOeval {
     pub coco_gt: COCO,
@@ -85,10 +108,9 @@ pub struct COCOeval {
 }
 
 impl COCOeval {
-    /// The one struct literal. Everything the three public constructors differ
-    /// in is a parameter here; everything else is the same empty pre-`evaluate()`
-    /// state, and writing it out per constructor is how a field added later gets
-    /// initialized differently in two of the three.
+    /// The one struct literal behind all three public constructors. What they
+    /// differ in is a parameter here; everything else is the same empty
+    /// pre-`evaluate()` state, so a field added later is initialized once.
     fn with_mode(
         coco_gt: COCO,
         coco_dt: COCO,
@@ -142,19 +164,18 @@ impl COCOeval {
     ///
     /// # Deliberately one cell at a time
     ///
-    /// `self.ious` is a **whole-dataset** similarity cache, and the 0.5 primitives
-    /// contract review flagged it as the single most likely route by which retention
-    /// leaks into a shared contract. If it ever became a primitive-level or
-    /// `EvalReport`-level "similarity cache" type, it would foreclose the memory lever
-    /// the tracking family depends on — HOTA's second pass must be free to *recompute*
-    /// similarity rather than retain it, because at MOT20 scale retention costs
-    /// hundreds of megabytes per sequence per thread.
+    /// `self.ious` is a **whole-dataset** similarity cache. Exposing it as one
+    /// would foreclose the memory lever the tracking family depends on: HOTA's
+    /// second pass must be free to *recompute* similarity rather than retain it,
+    /// because at MOT20 scale retention costs hundreds of megabytes per sequence
+    /// per thread.
     ///
     /// So this accessor hands out one cell, never the map. The detection driver may
     /// cache as much as it likes; nothing outside it may learn that a whole-dataset
     /// cache exists. **Keep this driver-private** — it must not gain a `pub` variant,
-    /// and it must not return `&HashMap<..>`. See CRATE-STRUCTURE.md item 13.
-    /// `pub(in crate::detection)`, not `pub(super)`: the visibility is the enforcement.
+    /// and it must not return `&HashMap<..>`. `pub(in crate::detection)`, not
+    /// `pub(super)`: the visibility is the enforcement. `tests/architecture.rs`
+    /// separately bans direct `.ious` access outside this module.
     pub(in crate::detection) fn cell_ious(
         &self,
         img_id: u64,
@@ -166,18 +187,14 @@ impl COCOeval {
     /// The evaluated cells every whole-dataset analysis reads: `area = "all"` at
     /// the default per-image detection cap.
     ///
-    /// TIDE, calibration and per-image diagnostics each want exactly this subset
-    /// of `eval_imgs`, and each wrote the filter out by hand — with calibration
-    /// testing only the area range. That leg is inert today (`evaluate()` stamps
-    /// one `max_det` on every cell, taken from
-    /// [`Params::max_det`](crate::Params::max_det)), so adding it changes no
-    /// number; but "inert today" is what the missing leg was too, right up until
-    /// a second cap per cell would have made calibration silently double-count
-    /// every detection.
+    /// TIDE, calibration and per-image diagnostics all want exactly this subset
+    /// of `eval_imgs`. The `max_det` leg is inert today — `evaluate()` stamps one
+    /// cap on every cell, taken from [`Params::max_det`](crate::Params::max_det)
+    /// — but it is what keeps a future second cap per cell from making these
+    /// analyses double-count every detection.
     ///
     /// Both legs come from `params`, so an evaluator re-configured after
-    /// `evaluate()` yields nothing rather than a partial mixture — which is the
-    /// honest answer, and the same one the hand-written filters gave.
+    /// `evaluate()` yields nothing rather than a partial mixture.
     pub(in crate::detection) fn default_cells(&self) -> impl Iterator<Item = &EvalImg> {
         let area_rng = self.params.all_area_range();
         let max_det = self.params.max_det();
@@ -194,12 +211,10 @@ impl COCOeval {
     /// evaluation is keyed on. Borrowed when `params` already holds them, so the
     /// common path allocates nothing.
     ///
-    /// This is the **non-mutating** form on purpose, because it has two callers
-    /// with different needs: `evaluate()` writes the answer back into `params`,
-    /// while `confusion_matrix()` is a `&self` method that must cover the same
-    /// ids without a prior `evaluate()` and without touching state. They were two
-    /// independent derivations of one fact, free to disagree about which ids a
-    /// standalone confusion matrix spans.
+    /// **Non-mutating** on purpose, because its two callers differ: `evaluate()`
+    /// writes the answer back into `params`, while `confusion_matrix()` is a
+    /// `&self` method that must cover the same ids without a prior `evaluate()`
+    /// and without touching state.
     pub(in crate::detection) fn resolved_ids(&self) -> (Cow<'_, [u64]>, Cow<'_, [u64]>) {
         let img_ids = if self.params.img_ids.is_empty() {
             Cow::Owned(self.coco_gt.get_img_ids(&[], &[]))
@@ -229,7 +244,7 @@ impl COCOeval {
     /// federated filtering so unmatched detections on unlabeled or unchecked categories
     /// are not penalized as false positives.
     ///
-    /// Behaviour controlled by per-image GT fields:
+    /// Behavior controlled by per-image GT fields:
     /// - `neg_category_ids`: categories confirmed absent → unmatched DTs count as FP.
     /// - `not_exhaustive_category_ids`: categories not fully checked → unmatched DTs ignored.
     ///

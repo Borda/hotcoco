@@ -142,15 +142,15 @@ def _check_pair(key, hc_ei, py_ei):
     py_dti = _to_array(py_ei["dtIgnore"])  # (T, D) bool
 
     # gtIgnore: (G,) bool
-    hc_gti = _to_array(hc_ei["gtIgnore"])
-    py_gti = _to_array(py_ei["gtIgnore"])
+    hc_gt_ignore = _to_array(hc_ei["gtIgnore"])
+    py_gt_ignore = _to_array(py_ei["gtIgnore"])
 
     # --- gtIgnore divergence ---
     for gt_id in gt_ids:
         hi = hc_gt_idx[gt_id]
         pi = py_gt_idx[gt_id]
-        hc_v = bool(hc_gti[hi])
-        py_v = bool(py_gti[pi])
+        hc_v = bool(hc_gt_ignore[hi])
+        py_v = bool(py_gt_ignore[pi])
         if hc_v != py_v:
             issues.append(f"    GT ann_id={gt_id}: gtIgnore hotcoco={hc_v}, pycocotools={py_v}")
 
@@ -222,7 +222,7 @@ def _is_inert(ei):
         return True
 
     # pycocotools hands back numpy arrays here, so `or []` and bare truthiness
-    # both raise "truth value of an empty array is ambiguous". Normalise first.
+    # both raise "truth value of an empty array is ambiguous". Normalize first.
     def flatten(value):
         if value is None:
             return []

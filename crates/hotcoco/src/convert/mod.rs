@@ -5,7 +5,7 @@
 //!
 //! # Malformed input is an error; inexpressible input is a counted skip
 //!
-//! A record that is *wrong* — an unparseable number, a missing required
+//! A record that is *wrong* — an unparsable number, a missing required
 //! attribute or column, the wrong field count — fails the conversion with a
 //! [`ConvertError`] naming the file and, where one exists, the line or byte
 //! position. A record the target format simply *cannot express* — an

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from .hotcoco import COCO, COCOeval, Hierarchy, Params, compare, init_as_lvis, init_as_pycocotools, mask  # noqa: F401
 
-# `COCO` is the Rust class itself, including `browse()` (a Rust method that
-# forwards to `hotcoco.browse.browse_coco`). It used to be a Python subclass
-# adding `browse`, but every dataset the Rust core returns — `split()`,
-# `filter()`, `load_res()`, `sample()`, `merge()` — is constructed by Rust as
-# the base class, so the subclass's methods silently vanished from derived
-# datasets (`coco.split()[0].browse()` raised `AttributeError`).
+# `COCO` is the Rust class itself, `browse()` included (a Rust method that
+# forwards to `hotcoco.browse.browse_coco`). Do not wrap it in a Python
+# subclass: every dataset the Rust core returns — `split()`, `filter()`,
+# `load_res()`, `sample()`, `merge()` — is constructed as the base class, so a
+# subclass's methods vanish from derived datasets.
 
 
 class LVISeval:
@@ -62,8 +61,6 @@ from . import detection, metrics, primitives  # noqa: E402, F401
 # attribute but `import hotcoco.mask` does not — the import system looks in
 # sys.modules, and PyO3's add_submodule does not register there. Anyone migrating
 # from `import pycocotools.mask` writes the second form, so register it.
-# (`init_as_pycocotools()` already does the equivalent for `pycocotools.mask`,
-# which is why that path worked while the hotcoco one did not.)
 _sys.modules.setdefault("hotcoco.mask", mask)
 from .integrations import CocoDetection, CocoEvaluator  # noqa: E402, F401
 

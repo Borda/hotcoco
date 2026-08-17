@@ -121,7 +121,7 @@ pub fn coco_to_dota(dataset: &Dataset, output_dir: &Path) -> Result<DotaStats, C
 /// # Errors
 ///
 /// Returns [`ConvertError::ParseError`] — naming the file and line — for a
-/// line with fewer than 9 or more than 10 fields, an unparseable corner
+/// line with fewer than 9 or more than 10 fields, an unparsable corner
 /// coordinate or difficulty, or a label file with a non-UTF-8 name.
 pub fn dota_to_coco(
     label_dir: &Path,

@@ -130,10 +130,9 @@ impl EvalReport {
 
     /// Add headline metrics.
     ///
-    /// **Extends** the map rather than replacing it, like every other
-    /// `with_*` builder here — chaining two calls keeps both sets (it used to
-    /// silently discard the first). A repeated key takes the later value, the
-    /// usual map-insert rule.
+    /// **Extends** the map rather than replacing it, like every other `with_*`
+    /// builder here, so chaining two calls keeps both sets. A repeated key takes
+    /// the later value, the usual map-insert rule.
     #[must_use]
     pub fn with_metrics<K: Into<String>>(
         mut self,

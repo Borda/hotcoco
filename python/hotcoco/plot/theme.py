@@ -115,10 +115,8 @@ def _build_rc(theme_name: str = "cold-brew", paper_mode: bool = False) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Public palette constants (cold-brew defaults, kept for backwards compat)
-# ---------------------------------------------------------------------------
-
+# Public palette constants — the Cold Brew defaults, for callers styling a
+# surface matplotlib does not own.
 _DEFAULT_THEME = _THEMES["cold-brew"]
 
 SERIES_COLORS: list[str] = _DEFAULT_THEME["series"]
@@ -128,11 +126,6 @@ CHROME: dict[str, str] = {
     "plot_bg": _DEFAULT_THEME["plot_bg"],
 }
 SEQUENTIAL: list[str] = _DEFAULT_THEME["sequential"]
-
-
-# ---------------------------------------------------------------------------
-# Style context manager
-# ---------------------------------------------------------------------------
 
 
 @contextmanager

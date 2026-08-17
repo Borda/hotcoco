@@ -263,7 +263,7 @@ def assert_hotcoco_invariants(rs_ev, iou_type):
     exactly the surfaces `report()` marks `Provenance::Extension` *because* no
     reference exists. Invariants are the only check available there.
 
-    Cheap to run on every case, and they generalise: the same assertions hold for
+    Cheap to run on every case, and they generalize: the same assertions hold for
     a family that has no reference at all.
     """
     stats = rs_ev.stats

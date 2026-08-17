@@ -88,7 +88,7 @@ def hotcoco_eval_obb(obb_gt, obb_dt):
 def obb_strategy(draw):
     """Generate a random OBB as (cx, cy, w, h, angle).
 
-    Centres land within +/-500 of the origin and both side lengths in
+    Centers land within +/-500 of the origin and both side lengths in
     [MIN_SIZE, MAX_SIZE], so the two boxes overlap often enough for the 0.5
     threshold to be the interesting question.
     """

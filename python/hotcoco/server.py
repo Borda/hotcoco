@@ -95,14 +95,12 @@ def create_app(
     has_dt = dt_coco is not None
     has_eval = coco_eval is not None
 
-    # Category data
     all_cats = coco.load_cats(coco.get_cat_ids())
     cat_name_to_id = {c["name"]: c["id"] for c in all_cats}
     cat_colors = _browse._assign_cat_colors([c["id"] for c in all_cats])
     cat_tree = _build_cat_tree(all_cats)
     has_hierarchy = len(cat_tree) > 0
 
-    # Slices
     has_slices = bool(slices)
     slice_img_sets: dict[str, set[int]] = {}
     slice_metrics: dict[str, dict] = {}
@@ -140,7 +138,6 @@ def create_app(
     _MAX_CACHE = 500
     thumbnail_cache: collections.OrderedDict[tuple[int, float], bytes] = collections.OrderedDict()
 
-    # Jinja2 environment
     env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)), autoescape=True)
     env.filters["number_format"] = lambda v: f"{v:,}"
     env.filters["metric_fmt"] = _metric_fmt
@@ -187,7 +184,6 @@ def create_app(
         else:
             base_ids = all_img_ids
 
-        # Category filter
         if not categories:
             img_ids = list(base_ids)
         else:
@@ -199,7 +195,6 @@ def create_app(
             cat_img_ids = set(coco.get_img_ids(cat_ids=cat_ids)) if cat_ids else set(base_ids)
             img_ids = [i for i in base_ids if i in cat_img_ids]
 
-        # Eval filter
         if has_eval and eval_filter and eval_filter != "none":
             eval_index = _get_eval_index(iou_thr)
             img_summary = eval_index["img_summary"] if eval_index else {}
@@ -274,7 +269,6 @@ def create_app(
     async def index():
         template = env.get_template("index.html")
         cat_choices = [c["name"] for c in all_cats]
-        # Build slice info for template
         slice_info = []
         if has_slices:
             for name in sorted(slice_img_sets):
@@ -323,7 +317,6 @@ def create_app(
             categories, shuffle_seed, min_score, sort=sort, eval_filter=eval_filter, iou_thr=iou_thr, slice_name=slice
         )
 
-        # Get per-image eval summaries for gallery badges
         img_summaries = None
         if has_eval:
             eval_index = _get_eval_index(iou_thr)

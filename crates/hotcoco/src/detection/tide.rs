@@ -135,11 +135,10 @@ impl CatData {
     /// Permute every parallel array into score-descending order, once.
     ///
     /// Each category is scored eight ways in [`COCOeval::category_deltas`] (a
-    /// baseline, five per-error-type fixes, and the FP/FN oracles), and every one
-    /// of them used to re-sort the same detections inside
-    /// [`average_precision`](crate::metrics::counts::average_precision) — 3285
-    /// sorts of up to 22k elements on Objects365. Ranking once here lets those
-    /// calls use the presorted entry point.
+    /// baseline, five per-error-type fixes, and the FP/FN oracles) over the same
+    /// detections. Ranking once here lets all eight use
+    /// [`average_precision_ranked`](crate::metrics::counts::average_precision_ranked)
+    /// instead of re-sorting — 3285 sorts of up to 22k elements on Objects365.
     ///
     /// Bit-identical because the comparator and the stability are the same: this
     /// is exactly the permutation `average_precision` computes, and stably sorting
@@ -162,9 +161,9 @@ impl CatData {
 struct Classified {
     /// Score-ranked, keyed by category id.
     cat_data: HashMap<u64, CatData>,
-    /// Tallied by `err as usize`, so indexed like [`FP_TYPES`]. Integers rather
-    /// than a keyed map: the previous form allocated a `String` per false positive
-    /// purely to look up a counter, on a path that runs over every detection.
+    /// Tallied by `err as usize`, so indexed like [`FP_TYPES`]. A fixed array
+    /// rather than a keyed map: this runs over every detection, and a keyed map
+    /// costs a `String` allocation per false positive just to reach a counter.
     fp_counts: [u64; FP_TYPES.len()],
     /// GTs with a `Loc` or `Cls` FP detection "targeting" them — these are not
     /// Miss errors. A `Loc` detection targets the same-class GT with highest IoU
