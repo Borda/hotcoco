@@ -14,6 +14,18 @@ from .theme import CHROME, SERIES_COLORS
 # ---------------------------------------------------------------------------
 
 
+def _fmt_metric(value, *, digits: int = 3) -> str:
+    """Format one metric value; ``-1.0`` (and any negative) renders as ``n/a``.
+
+    ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a
+    low score — the same rule ``cli._fmt_metric`` applies, so the PDF and the
+    CLI render the same run the same way.
+    """
+    if value is None or value < 0:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
 def _metric_math(key: str) -> str:
     """Return a LaTeX display string for a metric key.
 
@@ -227,7 +239,7 @@ def _draw_table_caption(ax, label: str) -> None:
 def _draw_metrics_table(ax, rows, metrics) -> None:
     ax.set_axis_off()
     ax.set_facecolor("none")
-    cell_text = [[_metric_math(name_key), desc, f"{metrics.get(mkey, 0.0):.3f}"] for name_key, desc, mkey in rows]
+    cell_text = [[_metric_math(name_key), desc, _fmt_metric(metrics.get(mkey))] for name_key, desc, mkey in rows]
     tbl = ax.table(cellText=cell_text, colWidths=[0.19, 0.59, 0.22], bbox=[0, 0, 1, 1], cellLoc="left", edges="open")
     tbl.auto_set_font_size(False)
     n = len(rows)
@@ -303,12 +315,12 @@ def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, f1_peak_
     ax.set_ylabel("Precision", fontsize=6, color=_RC["muted"], labelpad=3)
 
     if is_oid:
-        handles = [_L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{metrics.get('AP', 0):.3f}  AP50")]
+        handles = [_L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{_fmt_metric(metrics.get('AP'))}  AP50")]
     else:
         handles = [
-            _L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{metrics.get('AP50', 0):.3f}  AP50"),
-            _L2D([0], [0], color=_RC["pr_75"], lw=1.2, label=f"{metrics.get('AP75', 0):.3f}  AP75"),
-            _L2D([0], [0], color=_RC["pr_mean"], lw=0.9, ls="--", label=f"{metrics.get('AP', 0):.3f}  AP"),
+            _L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{_fmt_metric(metrics.get('AP50'))}  AP50"),
+            _L2D([0], [0], color=_RC["pr_75"], lw=1.2, label=f"{_fmt_metric(metrics.get('AP75'))}  AP75"),
+            _L2D([0], [0], color=_RC["pr_mean"], lw=0.9, ls="--", label=f"{_fmt_metric(metrics.get('AP'))}  AP"),
         ]
     leg = ax.legend(
         handles=handles,
@@ -499,14 +511,14 @@ def _draw_metrics_block(
 
     f1_peak = f1_peak_pt[1] if f1_peak_pt is not None else 0.0
     if is_oid:
-        kpi_data = [(f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_50"]), (f"{f1_peak:.3f}", "F1", _RC["text"])]
+        kpi_data = [(_fmt_metric(metrics.get("AP")), "AP", _RC["pr_50"]), (f"{f1_peak:.3f}", "F1", _RC["text"])]
     else:
         kpi_data = [
-            (f"{metrics.get('AP', 0):.3f}", "AP", _RC["pr_mean"]),
-            (f"{metrics.get('AP50', 0):.3f}", "AP50", _RC["pr_50"]),
+            (_fmt_metric(metrics.get("AP")), "AP", _RC["pr_mean"]),
+            (_fmt_metric(metrics.get("AP50")), "AP50", _RC["pr_50"]),
         ]
         if ar_kpi_key:
-            kpi_data.append((f"{metrics.get(ar_kpi_key, 0):.3f}", ar_kpi_key, _RC["pr_75"]))
+            kpi_data.append((_fmt_metric(metrics.get(ar_kpi_key)), ar_kpi_key, _RC["pr_75"]))
         kpi_data.append((f"{f1_peak:.3f}", "F1", _RC["text"]))
     gs_kpi = gs_met[2].subgridspec(len(kpi_data), 1, hspace=0.15)
     for i, (val, lbl, vc) in enumerate(kpi_data):
@@ -535,7 +547,10 @@ def _draw_category_section(
         ax_hdr.set_axis_off()
         cumx = 0.0
         for hci, (hlbl, ha) in enumerate(zip(hdr_labels, data_aligns)):
-            fx = cumx + (col_fracs[hci] / 2 if ha == "center" else col_fracs[hci] if ha == "right" else 0)
+            # Anchor the header at the same point within its column that the
+            # data cells below it use.
+            anchor = {"center": col_fracs[hci] / 2, "right": col_fracs[hci]}.get(ha, 0.0)
+            fx = cumx + anchor
             ax_hdr.text(
                 fx,
                 0.45,
@@ -631,11 +646,9 @@ def _draw_category_section(
 def _draw_footer(fig, page_h: float, version: str) -> None:
     from matplotlib.lines import Line2D
 
-    # The version comes from the extension that produced the numbers
-    # (CARGO_PKG_VERSION, carried on PlotData), not from importlib.metadata \u2014
-    # that reports the *installed distribution*, which is a different thing when
-    # a development build is on the path, and it was swallowing failures into a
-    # silently version-less footer.
+    # Version comes from the extension that produced the numbers (CARGO_PKG_VERSION,
+    # carried on PlotData), not importlib.metadata \u2014 that reports the installed
+    # distribution, which differs when a development build is on the path.
     footer_text = f"hotcoco v{version}  \u00b7  github.com/derekallman/hotcoco"
 
     lx = _MARGIN_H / _PAGE_W
@@ -703,10 +716,9 @@ def report(
     metrics = data.metrics
     per_class = data.per_class or {}
 
-    # The slice this panel draws — categories averaged at area="all" and the
-    # full detection cap — is exactly what `report()["curves"]` exists to hand a
-    # renderer. Re-deriving it from the 5-D tensor here made a second place that
-    # had to agree with Rust about which slice is "the" one and what -1 means.
+    # `report()["curves"]` is the one place that decides which slice a renderer
+    # draws — categories averaged at area="all", full detection cap — and what -1
+    # means in it. Never re-derive that slice from the 5-D tensor here.
     curves = coco_eval.report()["curves"]
     recall_pts, curve_iou_thrs, all_prec = _report_curves(curves)
 
@@ -779,20 +791,20 @@ def report(
     prov_h = (1 + len(_provenance_lines(data)[1])) * _PROV_LINE_H
 
     # Single source of truth: row heights drive both page_h and height_ratios.
-    # Row index names match the unpacked constants below.
+    # Row index names match the unpacked constants below; gap rows are unnamed.
     _row_heights = [
         _HEADER_H,  # _R_HEADER
-        _GAP * 0.5,  # _R_GAP1
+        _GAP * 0.5,  # gap
         _CTX_H,  # _R_CTX
         prov_h,  # _R_PROV
-        _GAP * 0.8,  # _R_GAP2
+        _GAP * 0.8,  # gap
         _SECTION_H,  # _R_SEC1
         block_h,  # _R_METRICS
-        _GAP * 0.6,  # _R_GAP3
+        _GAP * 0.6,  # gap
         _SECTION_H,  # _R_SEC2
         cat_h,  # _R_CATS
     ]
-    (_R_HEADER, _R_GAP1, _R_CTX, _R_PROV, _R_GAP2, _R_SEC1, _R_METRICS, _R_GAP3, _R_SEC2, _R_CATS) = range(10)
+    (_R_HEADER, _, _R_CTX, _R_PROV, _, _R_SEC1, _R_METRICS, _, _R_SEC2, _R_CATS) = range(10)
     page_h = sum(_row_heights) + 2 * _MARGIN_V
 
     fig = plt.figure(figsize=(_PAGE_W, page_h))

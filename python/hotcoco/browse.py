@@ -69,23 +69,98 @@ def _require_browse_deps():
         raise ImportError("Browse dependencies required. Install with: pip install hotcoco[browse]") from None
 
 
+def browse_coco(
+    coco,
+    image_dir: str | None = None,
+    dt=None,
+    iou_type: str = "bbox",
+    iou_thr: float = 0.5,
+    eval=None,  # noqa: A002 — pycocotools-era keyword, kept for compatibility
+    slices: dict[str, list[int]] | str | None = None,
+    batch_size: int = 12,
+    port: int = 7860,
+):
+    """Implementation behind ``COCO.browse()`` — see that docstring for the API.
+
+    Lives here rather than on a Python ``COCO`` subclass so the Rust class can
+    call it: every ``COCO`` the Rust core hands back (``split``, ``filter``,
+    ``load_res``, ...) then carries ``browse()`` without a re-wrapping layer.
+    """
+    from .hotcoco import COCOeval
+
+    _require_browse_deps()
+
+    dt_coco = coco.load_res(dt) if isinstance(dt, str) else dt
+
+    # A caller-supplied eval is used as given — building one only made sense
+    # when `dt` was also passed, so `browse(eval=ev)` (the documented form)
+    # used to fall through with no eval at all and render no dashboard.
+    coco_eval = eval
+    if coco_eval is None and dt_coco is not None:
+        coco_eval = COCOeval(coco, dt_coco, iou_type)
+        coco_eval.evaluate()
+
+    # The overlay draws boxes from `dt_coco`, which an eval already carries;
+    # without this, `browse(eval=ev)` showed a dashboard over ground truth
+    # with no detections on the images.
+    if dt_coco is None and coco_eval is not None:
+        dt_coco = getattr(coco_eval, "coco_dt", None)
+
+    # Load slices from JSON if path given
+    if isinstance(slices, str):
+        import json
+
+        with open(slices) as f:
+            resolved_slices = json.load(f)
+    else:
+        resolved_slices = slices
+
+    from .server import create_app, run_server, start_server_background
+
+    app = create_app(
+        coco,
+        image_dir=image_dir,
+        batch_size=batch_size,
+        dt_coco=dt_coco,
+        coco_eval=coco_eval,
+        slices=resolved_slices,
+        iou_thr=iou_thr,
+    )
+
+    if _is_jupyter():
+        actual_port = start_server_background(app, port=port)
+        # Only reachable inside a Jupyter kernel, where IPython is present.
+        from IPython.display import IFrame, display  # pyright: ignore[reportMissingImports]
+
+        display(IFrame(f"http://127.0.0.1:{actual_port}", width="100%", height=700))
+    else:
+        run_server(app, port=port, open_browser=True)
+
+
 # ---------------------------------------------------------------------------
 # Image I/O
 # ---------------------------------------------------------------------------
 
 
 def _load_image(image_dir: str, file_name: str, img_info: dict | None = None):
-    """Load image from disk; return a gray placeholder if file is missing."""
+    """Load image from disk; return a gray placeholder if it cannot be opened.
+
+    The placeholder covers every way an image fails to open — missing file,
+    directory in its place, permission denied, or a corrupt/unrecognized file
+    (``UnidentifiedImageError`` and truncation errors are ``OSError``
+    subclasses). Catching only ``FileNotFoundError`` turned a corrupt image
+    into a 500 instead of the placeholder built for exactly this.
+    """
     from PIL import Image, ImageDraw
 
     path = os.path.join(image_dir, file_name)
     try:
         return Image.open(path).convert("RGB")
-    except FileNotFoundError:
+    except (OSError, ValueError, Image.DecompressionBombError):
         pass
     # Gray placeholder with filename, sized to match the image metadata
-    w = img_info.get("width", 320) if img_info else 320
-    h = img_info.get("height", 240) if img_info else 240
+    w = (img_info.get("width") if img_info else None) or 320
+    h = (img_info.get("height") if img_info else None) or 240
     img = Image.new("RGB", (w, h), color=(128, 128, 128))
     draw = ImageDraw.Draw(img)
     short = os.path.basename(file_name)
@@ -229,19 +304,22 @@ def prepare_annotation_data(
 ) -> dict:
     """Prepare annotations as a JSON-serializable dict for client-side canvas rendering.
 
-    Returns dict with: image (id/width/height), annotations (list), skeleton (links), nav.
+    Returns dict with: image (id/width/height/file_name), annotations (list),
+    skeleton (links), has_eval, iou_thr.
     Annotations include: id, category, color, bbox, score, source, segmentation (polygon coords),
     keypoints, eval_status, matched_id.
     """
     if img_info is None:
         imgs = coco.load_imgs([img_id])
-        if not imgs:
-            return {
-                "image": {"id": img_id, "width": 0, "height": 0, "file_name": ""},
-                "annotations": [],
-                "skeleton": [],
-            }
-        img_info = imgs[0]
+        img_info = imgs[0] if imgs else None
+    if img_info is None:
+        return {
+            "image": {"id": img_id, "width": 0, "height": 0, "file_name": ""},
+            "annotations": [],
+            "skeleton": [],
+            "has_eval": eval_index is not None,
+            "iou_thr": eval_index["iou_thr"] if eval_index else None,
+        }
 
     annotations = []
     skeleton = []
@@ -272,7 +350,9 @@ def prepare_annotation_data(
                     matched_id = eval_index["dt_match"].get(ann_id)
                 elif source == "gt":
                     gt_st = eval_index["gt_status"].get(ann_id)
-                    eval_status = "fn" if gt_st == "fn" else ("tp" if gt_st == "matched" else None)
+                    # GT statuses are named for the ground truth ("matched"),
+                    # the badge for the detection that found it ("tp").
+                    eval_status = {"fn": "fn", "matched": "tp"}.get(gt_st)
                     matched_id = eval_index["gt_match"].get(ann_id)
 
             entry = {

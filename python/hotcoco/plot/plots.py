@@ -238,16 +238,22 @@ def pr_curve(
     ax=None,
     save_path=None,
 ):
-    """Dispatch to the appropriate named function.
+    """Plot a precision-recall curve, dispatching on the arguments given.
 
-    Prefer calling directly: ``pr_curve_iou_sweep``, ``pr_curve_by_category``,
-    or ``pr_curve_top_n``.
+    ``cat_id=`` plots a single category (``pr_curve_by_category``);
+    ``cat_ids=`` or ``iou_thr=`` plots one curve per category
+    (``pr_curve_top_n``); with neither, one curve per IoU threshold
+    (``pr_curve_iou_sweep``). The named functions take the same keyword
+    arguments and can be called directly.
     """
+    # `iou_thr if ... else 0.5`, not `iou_thr or 0.5`: an explicit 0.0 is a
+    # valid threshold and must not be silently replaced by the default.
+    resolved_iou_thr = iou_thr if iou_thr is not None else 0.5
     if cat_id is not None:
         return pr_curve_by_category(
             coco_eval,
             cat_id,
-            iou_thr=iou_thr or 0.5,
+            iou_thr=resolved_iou_thr,
             area_rng=area_rng,
             max_det=max_det,
             theme=theme,
@@ -260,7 +266,7 @@ def pr_curve(
             coco_eval,
             cat_ids=cat_ids,
             top_n=top_n,
-            iou_thr=iou_thr or 0.5,
+            iou_thr=resolved_iou_thr,
             area_rng=area_rng,
             max_det=max_det,
             theme=theme,
@@ -302,7 +308,7 @@ def confusion_matrix(
         Use row-normalized values (default True).
     top_n : int, optional
         Show only the top N categories by off-diagonal confusion mass.
-        Auto-set to 25 when K > 30 and no explicit value is given.
+        Auto-set to 25 when there are more than 30 categories and no explicit value is given.
     group_by : str, optional
         ``"supercategory"`` to aggregate into COCO supercategory groups.
         Requires ``cat_groups`` mapping.
@@ -328,15 +334,15 @@ def confusion_matrix(
     raw_matrix = np.asarray(cm_dict["matrix"], dtype=float)
     norm_matrix = np.asarray(cm_dict["normalized"], dtype=float)
     cat_names = list(cm_dict["cat_names"])
-    K = len(cat_names)
+    n_cats = len(cat_names)
 
     # ---- Supercategory grouping ----
     if group_by == "supercategory" and cat_groups is not None:
         name_to_idx = {n: i for i, n in enumerate(cat_names)}
         group_names = sorted(cat_groups.keys())
-        G = len(group_names)
+        n_groups = len(group_names)
 
-        grouped = np.zeros((G + 1, G + 1), dtype=float)
+        grouped = np.zeros((n_groups + 1, n_groups + 1), dtype=float)
         group_idx_map = {}
         for gi, gname in enumerate(group_names):
             for cname in cat_groups[gname]:
@@ -352,12 +358,12 @@ def confusion_matrix(
                 if gj is None:
                     continue
                 grouped[gi, gj] += raw_matrix[i, j]
-            grouped[gi, G] += raw_matrix[i, K]
+            grouped[gi, n_groups] += raw_matrix[i, n_cats]
         for j, jname in enumerate(cat_names):
             gj = group_idx_map.get(jname)
             if gj is not None:
-                grouped[G, gj] += raw_matrix[K, j]
-        grouped[G, G] = raw_matrix[K, K]
+                grouped[n_groups, gj] += raw_matrix[n_cats, j]
+        grouped[n_groups, n_groups] = raw_matrix[n_cats, n_cats]
 
         if normalize:
             row_sums = grouped.sum(axis=1, keepdims=True)
@@ -367,16 +373,16 @@ def confusion_matrix(
             data = grouped
 
         labels = group_names + ["BG"]
-        n_cats = G
+        n_plotted = n_groups
     else:
         labels = cat_names + ["BG"]
         data = norm_matrix if normalize else raw_matrix
-        n_cats = K
+        n_plotted = n_cats
 
     # One tail for both branches. When this only ran on the ungrouped branch,
     # `top_n` was silently ignored alongside `group_by` — and a grouped matrix
     # with many supercategories got no auto-subset either.
-    keep = _top_confusion_keep(data, n_cats, top_n)
+    keep = _top_confusion_keep(data, n_plotted, top_n)
     if keep is not None:
         data = data[np.ix_(keep, keep)]
         labels = [labels[i] for i in keep]
@@ -459,12 +465,12 @@ def top_confusions(
 
     matrix = np.asarray(cm_dict["matrix"], dtype=int)
     cat_names = list(cm_dict["cat_names"])
-    K = len(cat_names)
+    n_cats = len(cat_names)
     labels = cat_names + ["BG"]
 
     pairs = []
-    for i in range(K + 1):
-        for j in range(K + 1):
+    for i in range(n_cats + 1):
+        for j in range(n_cats + 1):
             if i == j:
                 continue
             count = int(matrix[i, j])

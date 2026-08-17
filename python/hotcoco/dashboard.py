@@ -18,12 +18,32 @@ _TEXT_TERTIARY = "#6b6259"
 _BORDER_SUBTLE = "#3a3228"
 _ACCENT = "#8694A8"
 
-_EVAL_TP = "#22c55e"
-_EVAL_FP = "#ef4444"
-_EVAL_FN = "#3b82f6"
-
 _FONT_BODY = "DM Sans, -apple-system, BlinkMacSystemFont, sans-serif"
 _FONT_MONO = "JetBrains Mono, ui-monospace, SFMono-Regular, monospace"
+
+
+def _dark_axis(overrides: dict | None = None) -> dict:
+    """Dark-theme axis styling, merged with per-chart *overrides*.
+
+    ``title.font`` (not the plotly<6-only ``titlefont``) is the spelling valid
+    on both plotly 5 and 6. A string ``title`` override is normalized to
+    ``{"text": ...}`` so the themed title font survives the merge.
+    """
+    title_style: dict = {"font": {"color": _TEXT_PRIMARY}}
+    tickfont_style: dict = {"color": _TEXT_SECONDARY}
+    axis: dict = dict(
+        gridcolor=_BORDER_SUBTLE, zerolinecolor=_BORDER_SUBTLE, linecolor=_BORDER_SUBTLE, tickcolor=_TEXT_TERTIARY
+    )
+    if overrides:
+        overrides = dict(overrides)
+        title = overrides.pop("title", None)
+        if title is not None:
+            title_style.update({"text": title} if isinstance(title, str) else title)
+        tickfont_style.update(overrides.pop("tickfont", None) or {})
+        axis.update(overrides)
+    axis["title"] = title_style
+    axis["tickfont"] = tickfont_style
+    return axis
 
 
 def _dark_layout(**overrides):
@@ -34,17 +54,13 @@ def _dark_layout(**overrides):
     defaults for every trace type (scatter3d, scattergeo, mesh3d, etc.).
     The cartesian partial bundle doesn't include those trace modules, so
     Plotly.js errors out trying to register them and nothing renders.
+
+    ``xaxis``/``yaxis`` overrides are merged *into* the themed axis rather
+    than replacing it — a caller that only sets a title and a range must not
+    silently lose the grid, tick, and font colors.
     """
     import plotly.graph_objects as go
 
-    _axis = dict(
-        gridcolor=_BORDER_SUBTLE,
-        zerolinecolor=_BORDER_SUBTLE,
-        linecolor=_BORDER_SUBTLE,
-        tickcolor=_TEXT_TERTIARY,
-        tickfont=dict(color=_TEXT_SECONDARY),
-        titlefont=dict(color=_TEXT_PRIMARY),
-    )
     base = dict(
         template={},
         paper_bgcolor="rgba(0,0,0,0)",
@@ -54,12 +70,32 @@ def _dark_layout(**overrides):
         modebar=dict(bgcolor="rgba(0,0,0,0)", color=_TEXT_TERTIARY, activecolor=_ACCENT),
         colorway=SERIES_COLORS,
         margin=dict(l=60, r=20, t=20, b=40),
-        xaxis=_axis,
-        yaxis=_axis,
+        xaxis=_dark_axis(overrides.pop("xaxis", None)),
+        yaxis=_dark_axis(overrides.pop("yaxis", None)),
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=_TEXT_PRIMARY)),
     )
     base.update(overrides)
     return go.Layout(**base)
+
+
+_jinja_env = None
+
+
+def _get_template(name: str):
+    """Load a Jinja template from the app's templates directory.
+
+    The dashboard renders its native-HTML fragments (the per-category AP
+    leaderboard) from ``templates/partials/`` like the rest of the app,
+    rather than concatenating HTML strings next to a Jinja environment.
+    """
+    global _jinja_env
+    if _jinja_env is None:
+        from pathlib import Path
+
+        from jinja2 import Environment, FileSystemLoader
+
+        _jinja_env = Environment(loader=FileSystemLoader(str(Path(__file__).parent / "templates")), autoescape=True)
+    return _jinja_env.get_template(name)
 
 
 def _to_html(fig, div_id, *, post_script=None):
@@ -154,75 +190,29 @@ def chart_pr_curves(coco_eval) -> str:
 
 def chart_per_category_ap(coco_eval) -> str:
     """Per-category AP as a native HTML leaderboard with expand/collapse."""
-    from html import escape
-
     results = coco_eval.results(per_class=True)
     per_class = results.get("per_class", {})
-    if not per_class:
-        return "<p style='color: #9a918a; text-align: center; padding: 40px;'>No per-class data available.</p>"
 
     items = sorted(per_class.items(), key=lambda x: x[1], reverse=True)
-    mean_ap = sum(v for _, v in items) / len(items) if items else 0
-    max_ap = max(v for _, v in items) if items else 1
+    mean_ap = sum(v for _, v in items) / len(items) if items else 0.0
+    max_ap = max((v for _, v in items), default=1.0)
     total = len(items)
     collapsed_n = 25
 
-    rows = []
-    for rank, (name, ap) in enumerate(items, 1):
-        pct = (ap / max_ap * 100) if max_ap > 0 else 0
-        esc_name = escape(name)
-        above_mean = "above" if ap >= mean_ap else "below"
-        hidden = " hidden" if rank > collapsed_n and total > collapsed_n else ""
-        rows.append(
-            f'<a class="cat-row{hidden}" href="/?categories={esc_name}" data-rank="{rank}">'
-            f'<span class="cat-rank">{rank}</span>'
-            f'<span class="cat-name">{esc_name}</span>'
-            f'<span class="cat-bar-wrap">'
-            f'<span class="cat-bar {above_mean}" style="width:{pct:.1f}%"></span>'
-            f"</span>"
-            f'<span class="cat-ap">{ap:.3f}</span>'
-            f"</a>"
-        )
-
-    toggle_html = ""
-    if total > collapsed_n:
-        toggle_html = (
-            f'<button class="cat-toggle" id="cat-ap-toggle" onclick="toggleCatAP()">'
-            f'<span class="cat-toggle-text">Show all {total} categories</span>'
-            f'<span class="cat-toggle-icon">\u25be</span>'
-            f"</button>"
-        )
-
-    mean_line = (
-        f'<div class="cat-mean">'
-        f'<span class="cat-mean-label">Mean AP</span>'
-        f'<span class="cat-mean-value">{mean_ap:.3f}</span>'
-        f"</div>"
+    rows = [
+        {
+            "rank": rank,
+            "name": name,
+            "ap": ap,
+            "pct": (ap / max_ap * 100) if max_ap > 0 else 0.0,
+            "above_mean": ap >= mean_ap,
+            "hidden": rank > collapsed_n and total > collapsed_n,
+        }
+        for rank, (name, ap) in enumerate(items, 1)
+    ]
+    return _get_template("partials/per_category_ap.html").render(
+        rows=rows, mean_ap=mean_ap, total=total, collapsed_n=collapsed_n
     )
-
-    script = (
-        "<script>"
-        "function toggleCatAP(){"
-        '  var rows=document.querySelectorAll(".cat-row.hidden");'
-        '  var btn=document.getElementById("cat-ap-toggle");'
-        '  var txt=btn.querySelector(".cat-toggle-text");'
-        '  var icon=btn.querySelector(".cat-toggle-icon");'
-        "  if(rows.length>0){"
-        '    document.querySelectorAll(".cat-row").forEach(function(r){r.classList.remove("hidden")});'
-        f'    txt.textContent="Show top {collapsed_n}";'
-        '    icon.textContent="\u25b4";'
-        "  }else{"
-        f'    document.querySelectorAll(".cat-row")'
-        f'.forEach(function(r,i){{if(i>={collapsed_n})r.classList.add("hidden")}});'
-        f'    txt.textContent="Show all {total} categories";'
-        '    icon.textContent="\u25be";'
-        '    document.getElementById("cat-ap-list").scrollIntoView({behavior:"smooth",block:"start"});'
-        "  }"
-        "}"
-        "</script>"
-    )
-
-    return f'{mean_line}<div class="cat-ap-list" id="cat-ap-list">' + "\n".join(rows) + "</div>" + toggle_html + script
 
 
 # ── Confusion Matrix ─────────────────────────────────────────────────
@@ -233,16 +223,13 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
     import plotly.graph_objects as go
 
     cm = coco_eval.confusion_matrix(iou_thr=iou_thr)
-    norm_matrix = np.asarray(cm["normalized"], dtype=float)
-    raw_matrix = np.asarray(cm["matrix"], dtype=float)
     cat_names = list(cm["cat_names"])
-    K = len(cat_names)
     labels = cat_names + ["BG"]
 
-    data = norm_matrix
-    counts = raw_matrix
+    data = np.asarray(cm["normalized"], dtype=float)
+    counts = np.asarray(cm["matrix"], dtype=float)
 
-    keep = _top_confusion_keep(data, K)
+    keep = _top_confusion_keep(data, len(cat_names))
     if keep is not None:
         data = data[np.ix_(keep, keep)]
         counts = counts[np.ix_(keep, keep)]

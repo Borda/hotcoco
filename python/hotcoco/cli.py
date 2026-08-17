@@ -14,6 +14,7 @@ Usage:
     coco compare --gt <gt.json> --dt-a <a.json> --dt-b <b.json> [--bootstrap 1000]
     coco convert --from coco --to yolo --input <file> --output <dir>
     coco convert --from yolo --to coco --input <dir> --output <file> [--images-dir <dir>]
+    coco convert --from oid --to coco --input <csv> --output <file> [--class-descriptions <csv>]
 """
 
 import argparse
@@ -22,6 +23,7 @@ import json as json_mod
 import os
 import sys
 import textwrap
+from typing import NoReturn
 
 from hotcoco._style import Spinner, Timer, dim, error, green, red, section, status, warning, yellow
 
@@ -84,7 +86,7 @@ def _print_findings(findings, *, tag: str, color, show_ids: bool = True, stream=
 
 
 def cmd_stats(args):
-    coco = _load_coco(args.annotation_file)
+    coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
     s = coco.stats()
 
     if args.json:
@@ -135,6 +137,22 @@ def _maybe_spinner(message: str, quiet: bool):
     return contextlib.nullcontext() if quiet else Spinner(message)
 
 
+def _extension_import_failed(e: ImportError) -> NoReturn:
+    """Report a failed ``from hotcoco import ...`` and exit.
+
+    This CLI ships inside the hotcoco package, so the import cannot fail
+    because hotcoco "is not installed" — it fails when the compiled extension
+    is broken: missing from the install, or built for a different Python.
+    """
+    error(f"failed to import the hotcoco extension: {e}")
+    print(
+        f"  {dim('hint')}: the compiled extension is missing or built for a different"
+        " Python/platform; reinstall hotcoco",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _load_coco(path, *, quiet: bool = False, reraise: bool = False):
     """Load a COCO annotation file, printing errors and exiting on failure.
 
@@ -143,11 +161,10 @@ def _load_coco(path, *, quiet: bool = False, reraise: bool = False):
     """
     try:
         from hotcoco import COCO
-    except ImportError:
+    except ImportError as e:
         if reraise:
             raise
-        error("hotcoco is not installed")
-        sys.exit(1)
+        _extension_import_failed(e)
     try:
         with _maybe_spinner(f"Loading {dim(os.path.basename(path))}...", quiet), Timer() as t:
             coco = COCO(path)
@@ -187,7 +204,7 @@ def _load_res(coco, path, *, quiet: bool = False, reraise: bool = False):
 
 
 def cmd_filter(args):
-    coco = _load_coco(args.annotation_file)
+    coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
     n_imgs_before = len(coco.dataset["images"])
     n_anns_before = len(coco.dataset["annotations"])
 
@@ -228,7 +245,7 @@ def cmd_filter(args):
 def cmd_merge(args):
     from hotcoco import COCO
 
-    cocos = [_load_coco(f) for f in args.files]
+    cocos = [_load_coco(f, quiet=args.json, reraise=args.json) for f in args.files]
     n_imgs_total = sum(len(c.dataset["images"]) for c in cocos)
     n_anns_total = sum(len(c.dataset["annotations"]) for c in cocos)
 
@@ -236,6 +253,8 @@ def cmd_merge(args):
         with Timer() as t:
             merged = COCO.merge(cocos)
     except Exception as e:
+        if args.json:
+            raise  # main() renders it as {"error": ...} JSON
         error(str(e))
         sys.exit(1)
 
@@ -258,22 +277,22 @@ def cmd_merge(args):
 
 
 def cmd_split(args):
-    coco = _load_coco(args.annotation_file)
+    coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
     n_imgs = len(coco.dataset["images"])
 
-    test_frac = args.test_frac if args.test_frac else None
+    # `is not None`, not truthiness: an explicit --test-frac 0.0 still asks for
+    # a (possibly empty) three-way split and must not collapse to two-way.
+    test_frac = args.test_frac
     with Timer() as t:
         result = coco.split(val_frac=args.val_frac, test_frac=test_frac, seed=args.seed)
 
-    if test_frac is not None:
-        train, val, test = result
-        splits = [("train", train), ("val", val), ("test", test)]
-    else:
-        train, val = result
-        splits = [("train", train), ("val", val)]
+    # Two-way splits pair with ("train", "val"); three-way adds "test" —
+    # zip stops at the shorter sequence either way.
+    splits = list(zip(("train", "val", "test"), result))
 
     split_results = {}
-    status("Split", f"{dim(os.path.basename(args.annotation_file))} ({n_imgs:,} images)", elapsed=t.elapsed)
+    if not args.json:
+        status("Split", f"{dim(os.path.basename(args.annotation_file))} ({n_imgs:,} images)", elapsed=t.elapsed)
     for name, split in splits:
         out_path = f"{args.output}_{name}.json"
         split.save(out_path)
@@ -290,9 +309,10 @@ def cmd_split(args):
 def cmd_eval(args):
     try:
         from hotcoco import COCOeval
-    except ImportError:
-        error("hotcoco is not installed")
-        sys.exit(1)
+    except ImportError as e:
+        if args.json:
+            raise
+        _extension_import_failed(e)
 
     gt = _load_coco(args.gt, quiet=args.json, reraise=args.json)
     dt = _load_res(gt, args.dt, quiet=args.json, reraise=args.json)
@@ -385,12 +405,16 @@ def cmd_eval(args):
         try:
             from hotcoco.plot import report
         except ImportError as e:
+            if args.json:
+                raise  # main() renders it as {"error": ...} JSON
             error(str(e))
             print(f"  {dim('hint')}: install plot dependencies with:  pip install hotcoco[plot]", file=sys.stderr)
             sys.exit(1)
         try:
             report(ev, save_path=args.report, gt_path=args.gt, dt_path=args.dt, title=args.title)
         except Exception as e:
+            if args.json:
+                raise RuntimeError(f"generating report: {e}") from e
             error(f"generating report: {e}")
             sys.exit(1)
         if not args.json:
@@ -422,8 +446,10 @@ def cmd_eval(args):
 
 
 def _print_tide(te):
-    # Imported here rather than at module scope so the CLI does not pull the
-    # plot package (and numpy) on every invocation.
+    # Imported here rather than at module scope so plain CLI invocations do
+    # not import the plot package. A --tide run still pays for it: importing
+    # `hotcoco.plot.core` runs the package __init__, which pulls numpy (via
+    # plot.data). That is acceptable on the one path that asked for TIDE.
     from hotcoco.plot.core import TIDE_ERROR_ORDER
 
     delta = te["delta_ap"]
@@ -481,6 +507,16 @@ def _print_diagnostics(diag):
     good = sum(1 for f in f1s if f > 0.8)
     print(f"  F1 distribution:  {poor:,} poor (<0.5)  {moderate:,} moderate (0.5–0.8)  {good:,} good (>0.8)")
 
+    # Worst images by F1 — the list the --help text promises, and the same
+    # ordering the --json output ships as "worst_images".
+    worst = sorted(summaries.items(), key=lambda kv: kv[1]["f1"])[:10]
+    if worst:
+        print(f"\n  Worst images {dim('(by F1)')}:")
+        _table(
+            [("Image", ">"), ("F1", ">"), ("TP", ">"), ("FP", ">"), ("FN", ">")],
+            [[str(img_id), f"{s['f1']:.3f}", f"{s['tp']:,}", f"{s['fp']:,}", f"{s['fn']:,}"] for img_id, s in worst],
+        )
+
     # Label error summary
     score_thr = diag.get("score_thr", 0.5)
     print(f"\n  Label errors:     {len(label_errors):,} candidates (score ≥ {score_thr:.2f})")
@@ -506,6 +542,13 @@ _TO_COCO = {
     "yolo": ("YOLO", lambda COCO, args: COCO.from_yolo(args.input, images_dir=args.images_dir)),
     "voc": ("VOC", lambda COCO, args: COCO.from_voc(args.input)),
     "cvat": ("CVAT", lambda COCO, args: COCO.from_cvat(args.input)),
+    "dota": ("DOTA", lambda COCO, args: COCO.from_dota(args.input, images_dir=args.images_dir)),
+    "oid": (
+        "Open Images",
+        lambda COCO, args: COCO.from_oid(
+            args.input, class_descriptions=args.class_descriptions, images_dir=args.images_dir
+        ),
+    ),
 }
 
 # Outbound conversions (COCO → X): display label, the writer method, how to
@@ -533,6 +576,24 @@ _FROM_COCO = {
         False,
         (("skipped (no geometry): ", "skipped_no_geometry"),),
     ),
+    "dota": (
+        "DOTA",
+        "to_dota",
+        lambda s: f"{s['annotations']:,} oriented boxes",
+        True,
+        (("skipped (no obb):  ", "skipped_no_obb"),),
+    ),
+    "oid": (
+        "Open Images",
+        "to_oid",
+        lambda s: f"{s['annotations']:,} annotations",
+        False,
+        (
+            ("group-of boxes:    ", "group_of"),
+            ("skipped (no bbox): ", "missing_bbox"),
+            ("skipped (no dims): ", "missing_dims"),
+        ),
+    ),
 }
 
 
@@ -543,11 +604,13 @@ def cmd_convert(args):
     if from_fmt == "coco" and to_fmt in _FROM_COCO:
         label, method, summarize, show_paths, details = _FROM_COCO[to_fmt]
 
-        coco = _load_coco(args.input, quiet=args.json)
+        coco = _load_coco(args.input, quiet=args.json, reraise=args.json)
         try:
             with Timer() as t:
                 stats = getattr(coco, method)(args.output)
         except Exception as e:
+            if args.json:
+                raise
             error(str(e))
             sys.exit(1)
 
@@ -568,18 +631,23 @@ def cmd_convert(args):
 
         try:
             from hotcoco import COCO
-        except ImportError:
-            error("hotcoco is not installed")
-            sys.exit(1)
+        except ImportError as e:
+            if args.json:
+                raise
+            _extension_import_failed(e)
         try:
             with _maybe_spinner(f"Converting {label} → COCO...", args.json), Timer() as t:
                 coco = load(COCO, args)
         except Exception as e:
+            if args.json:
+                raise
             error(str(e))
             sys.exit(1)
         try:
             coco.save(args.output)
         except Exception as e:
+            if args.json:
+                raise RuntimeError(f"saving {args.output}: {e}") from e
             error(f"saving {args.output}: {e}")
             sys.exit(1)
 
@@ -603,14 +671,19 @@ def cmd_convert(args):
 
 
 def cmd_healthcheck(args):
-    coco = _load_coco(args.annotation_file)
+    coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
 
-    dt_coco = _load_res(coco, args.dt) if args.dt else None
+    dt_coco = _load_res(coco, args.dt, quiet=args.json, reraise=args.json) if args.dt else None
 
     report = coco.healthcheck(dt_coco)
 
+    # CI-gate contract: ERROR findings exit 1 (in both output modes);
+    # warnings alone exit 0. Advertised in the subcommand's --help text.
+    exit_code = 1 if report["errors"] else 0
+
     if args.json:
-        return report
+        print(json_mod.dumps(report, indent=2))
+        sys.exit(exit_code)
 
     _print_findings(report["errors"], tag="ERROR", color=red)
     _print_findings(report["warnings"], tag="WARN", color=yellow)
@@ -634,6 +707,9 @@ def cmd_healthcheck(args):
 
     if not report["errors"] and not report["warnings"]:
         print(f"\n{green('All checks passed.')}")
+
+    if exit_code:
+        sys.exit(exit_code)
 
 
 def cmd_explore(args):
@@ -687,15 +763,14 @@ def cmd_explore(args):
 
     from hotcoco.server import create_app, run_server
 
-    app = create_app(coco, batch_size=args.batch_size, dt_coco=dt_coco, coco_eval=coco_eval, slices=slices)
+    app = create_app(
+        coco, batch_size=args.batch_size, dt_coco=dt_coco, coco_eval=coco_eval, slices=slices, iou_thr=args.iou_thr
+    )
     run_server(app, port=args.port, open_browser=True)
 
 
 def cmd_sample(args):
-    coco = _load_coco(args.annotation_file)
-    n_imgs_before = len(coco.dataset["images"])
-    n_anns_before = len(coco.dataset["annotations"])
-
+    # Validate the flag combination before paying to load the dataset.
     n = args.n
     frac = args.frac
     if n is None and frac is None:
@@ -704,6 +779,10 @@ def cmd_sample(args):
     if n is not None and frac is not None:
         error("provide either --n or --frac, not both")
         sys.exit(1)
+
+    coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
+    n_imgs_before = len(coco.dataset["images"])
+    n_anns_before = len(coco.dataset["annotations"])
 
     result = coco.sample(n=n, frac=frac, seed=args.seed)
     result.save(args.output)
@@ -726,25 +805,28 @@ def cmd_sample(args):
 def cmd_compare(args):
     try:
         from hotcoco import COCOeval, compare
-    except ImportError:
-        error("hotcoco is not installed")
-        sys.exit(1)
+    except ImportError as e:
+        if args.json:
+            raise
+        _extension_import_failed(e)
 
-    gt = _load_coco(args.gt)
-    dt_a = _load_res(gt, args.dt_a)
-    dt_b = _load_res(gt, args.dt_b)
+    gt = _load_coco(args.gt, quiet=args.json, reraise=args.json)
+    dt_a = _load_res(gt, args.dt_a, quiet=args.json, reraise=args.json)
+    dt_b = _load_res(gt, args.dt_b, quiet=args.json, reraise=args.json)
 
     with _maybe_spinner(f"Evaluating {args.iou_type}...", args.json), Timer() as t:
         ev_a = COCOeval(gt, dt_a, args.iou_type, lvis_style=args.lvis)
         ev_a.evaluate()
         ev_b = COCOeval(gt, dt_b, args.iou_type, lvis_style=args.lvis)
         ev_b.evaluate()
-    status("Evaluated", f"both models ({args.iou_type})", elapsed=t.elapsed)
+    if not args.json:
+        status("Evaluated", f"both models ({args.iou_type})", elapsed=t.elapsed)
 
     with _maybe_spinner("Comparing models...", args.json), Timer() as t:
         result = compare(ev_a, ev_b, n_bootstrap=args.bootstrap, seed=args.seed, confidence=args.confidence)
-    bootstrap_note = f", {args.bootstrap:,} bootstrap samples" if args.bootstrap else ""
-    status("Compared", f"{args.name_a} vs {args.name_b}{bootstrap_note}", elapsed=t.elapsed)
+    if not args.json:
+        bootstrap_note = f", {args.bootstrap:,} bootstrap samples" if args.bootstrap else ""
+        status("Compared", f"{args.name_a} vs {args.name_b}{bootstrap_note}", elapsed=t.elapsed)
 
     if args.json:
         result["name_a"] = args.name_a
@@ -828,6 +910,7 @@ def main():
               coco compare --gt ann.json --dt-a a.json --dt-b b.json  compare two models
               coco filter ann.json -o out.json --cat-ids 1,2,3     keep only specific categories
               coco convert --from coco --to yolo --input ann.json --output labels/
+              coco convert --from oid --to coco --input boxes.csv --output ann.json  Open Images CSV
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -894,9 +977,7 @@ def main():
         "--calibration", action="store_true", help="compute confidence calibration (ECE/MCE) after standard metrics"
     )
     eval_parser.add_argument(
-        "--diagnostics",
-        action="store_true",
-        help="per-image diagnostics: worst images by F1/AP, label error candidates",
+        "--diagnostics", action="store_true", help="per-image diagnostics: worst images by F1, label error candidates"
     )
     eval_parser.add_argument(
         "--diag-iou-thr",
@@ -965,13 +1046,19 @@ def main():
         help="validate a COCO dataset for common errors",
         description=(
             "Check a COCO annotation file for common errors and warnings, including duplicate IDs, "
-            "missing references, invalid bounding boxes, and annotation/image mismatches."
+            "missing references, invalid bounding boxes, and annotation/image mismatches. "
+            "Exits 1 when any ERROR-level finding is present (so it can gate CI); "
+            "warnings alone exit 0."
         ),
         epilog=textwrap.dedent("""\
             examples:
               coco healthcheck ann.json
               coco healthcheck ann.json --dt det.json
               coco healthcheck ann.json --json
+
+            exit status:
+              0  no ERROR-level findings (warnings allowed)
+              1  one or more ERROR-level findings
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1027,25 +1114,43 @@ def main():
     sample_parser.add_argument("--seed", type=int, default=42, help="random seed (default 42)")
 
     convert_parser = subparsers.add_parser(
-        "convert", parents=[_json_parent], help="convert between annotation formats (COCO ↔ YOLO/VOC/CVAT)"
+        "convert",
+        parents=[_json_parent],
+        help="convert between annotation formats (COCO ↔ YOLO/VOC/CVAT/DOTA/Open Images)",
     )
     convert_parser.add_argument(
-        "--from", dest="from_fmt", required=True, choices=["coco", "yolo", "voc", "cvat"], help="source format"
+        "--from",
+        dest="from_fmt",
+        required=True,
+        choices=["coco", "yolo", "voc", "cvat", "dota", "oid"],
+        help="source format",
     )
     convert_parser.add_argument(
-        "--to", dest="to_fmt", required=True, choices=["coco", "yolo", "voc", "cvat"], help="target format"
+        "--to",
+        dest="to_fmt",
+        required=True,
+        choices=["coco", "yolo", "voc", "cvat", "dota", "oid"],
+        help="target format",
     )
     convert_parser.add_argument(
-        "--input", required=True, help="input file (COCO JSON) or directory (YOLO labels / VOC Annotations)"
+        "--input", required=True, help="input file (COCO JSON / Open Images CSV) or directory (YOLO, VOC, DOTA labels)"
     )
     convert_parser.add_argument(
-        "--output", required=True, help="output file (COCO JSON) or directory (YOLO labels / VOC Annotations)"
+        "--output",
+        required=True,
+        help="output file (COCO JSON / Open Images CSV) or directory (YOLO, VOC, DOTA labels)",
     )
     convert_parser.add_argument(
         "--images-dir",
         dest="images_dir",
         default=None,
-        help="directory of images (YOLO → COCO only; used to read image dimensions via Pillow)",
+        help="directory of images (YOLO/DOTA/Open Images → COCO; read image dimensions via Pillow)",
+    )
+    convert_parser.add_argument(
+        "--class-descriptions",
+        dest="class_descriptions",
+        default=None,
+        help="Open Images class-descriptions-boxable.csv (oid → COCO; resolves /m/ MIDs to names)",
     )
 
     explore_parser = subparsers.add_parser(
@@ -1069,7 +1174,8 @@ def main():
         type=float,
         default=0.5,
         metavar="THR",
-        help="IoU threshold for TP/FP classification (default: 0.5)",
+        help="initial IoU threshold for TP/FP classification; sets the UI slider's "
+        "starting position, 0.50-0.95 in steps of 0.05 (default: 0.5)",
     )
     explore_parser.add_argument(
         "--no-eval",

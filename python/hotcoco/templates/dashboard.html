@@ -71,8 +71,19 @@
             {% endfor %}
         </section>
 
-        <!-- Plotly.js must load before chart inline scripts execute -->
-        <script src="https://cdn.plot.ly/plotly-cartesian-3.4.0.min.js"></script>
+        <!-- Plotly.js must load before chart inline scripts execute.
+             Vendored in static/ so the dashboard renders offline. -->
+        <script src="/static/plotly-cartesian-3.4.0.min.js"></script>
+        <script>
+        if (typeof Plotly === "undefined") {
+            document.addEventListener("DOMContentLoaded", function () {
+                document.querySelectorAll(".js-plotly-plot").forEach(function (el) {
+                    el.innerHTML = '<p style="color: #9a918a; text-align: center; padding: 40px;">' +
+                        'Charts unavailable: plotly.js failed to load.</p>';
+                });
+            });
+        }
+        </script>
 
         <!-- Chart grid -->
         <section class="chart-grid">

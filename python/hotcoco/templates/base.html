@@ -5,9 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>hotcoco — dataset browser</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥥</text></svg>">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=DM+Serif+Display&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+    /* DM Sans is vendored in python/hotcoco/_fonts and served at /fonts — the
+       browser UI must render offline, with no CDN dependency. DM Serif Display
+       and JetBrains Mono fall back to the system serif/mono stacks that
+       style.css already declares. */
+    @font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans-Regular.ttf') format('truetype'); font-weight: 300 400; font-style: normal; font-display: swap; }
+    @font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+    @font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans-Bold.ttf') format('truetype'); font-weight: 600 700; font-style: normal; font-display: swap; }
+    </style>
     <link rel="stylesheet" href="/static/style.css">
     <script src="/static/htmx.min.js"></script>
 </head>

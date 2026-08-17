@@ -1,4 +1,9 @@
-"""Tests for hotcoco.browse PIL renderer.
+"""Tests for the hotcoco browse stack: PIL rendering helpers in
+``hotcoco.browse`` and the FastAPI app factory in ``hotcoco.server``.
+
+The server tests drive the app through its ASGI interface directly (a
+20-line ``_asgi_get``) rather than ``fastapi.testclient``, because the
+test client requires ``httpx``, which is not a project dependency.
 
 Run with:
     uv run pytest scripts/test_browse.py -v
@@ -11,6 +16,45 @@ import numpy as np
 import pytest
 from hotcoco import COCO
 from PIL import Image
+
+
+def _asgi_get(app, path: str, query: str = ""):
+    """Issue a GET against an ASGI app; return (status, headers, body)."""
+    import asyncio
+
+    async def run():
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": query.encode(),
+            "root_path": "",
+            "headers": [(b"host", b"testserver")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        out = {"status": None, "headers": {}, "chunks": []}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                out["status"] = message["status"]
+                out["headers"] = {k.decode(): v.decode() for k, v in message.get("headers", [])}
+            elif message["type"] == "http.response.body":
+                out["chunks"].append(message.get("body", b""))
+
+        await app(scope, receive, send)
+        return out["status"], out["headers"], b"".join(out["chunks"])
+
+    return asyncio.run(run())
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -143,104 +187,99 @@ def test_render_thumbnail_respects_max_size():
 
 
 # ---------------------------------------------------------------------------
-# render_annotated_image
+# prepare_annotation_data (the client-side canvas payload — successor to the
+# gradio-era render_annotated_image)
 # ---------------------------------------------------------------------------
 
 
-def test_render_annotated_image_returns_tuple():
-    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+def _payload(with_segm=False, with_kpts=False, **kwargs):
+    from hotcoco.browse import _assign_cat_colors, prepare_annotation_data
 
-    dataset, tmpdir = _minimal_dataset(with_segm=True)
+    dataset, _ = _minimal_dataset(with_segm=with_segm, with_kpts=with_kpts)
     coco = COCO(dataset)
     cat_colors = _assign_cat_colors([1])
-    result = render_annotated_image(coco, 1, tmpdir, ["bbox", "segm"], cat_colors)
-    assert isinstance(result, tuple) and len(result) == 2
-    img, sections = result
-    assert isinstance(img, Image.Image)
-    assert isinstance(sections, list)
+    return prepare_annotation_data(coco, 1, cat_colors, **kwargs)
 
 
-def test_render_annotated_image_full_resolution():
-    from hotcoco.browse import _assign_cat_colors, render_annotated_image
-
-    dataset, tmpdir = _minimal_dataset()
-    coco = COCO(dataset)
-    cat_colors = _assign_cat_colors([1])
-    img, sections = render_annotated_image(coco, 1, tmpdir, ["bbox"], cat_colors)
-    assert img.size == (100, 80)
+def test_prepare_annotation_data_returns_payload():
+    data = _payload(with_segm=True)
+    assert set(data) == {"image", "annotations", "skeleton", "has_eval", "iou_thr"}
+    assert isinstance(data["annotations"], list) and len(data["annotations"]) == 1
+    assert data["has_eval"] is False
+    assert data["iou_thr"] is None
 
 
-def test_render_annotated_image_segm_returns_bool_mask():
-    from hotcoco.browse import _assign_cat_colors, render_annotated_image
-
-    dataset, tmpdir = _minimal_dataset(with_segm=True)
-    coco = COCO(dataset)
-    cat_colors = _assign_cat_colors([1])
-    img, sections = render_annotated_image(coco, 1, tmpdir, ["segm"], cat_colors)
-    assert len(sections) >= 1
-    mask, label = sections[0]
-    assert isinstance(mask, np.ndarray) and mask.dtype == bool
+def test_prepare_annotation_data_full_resolution():
+    # The payload carries original pixel dimensions — scaling is the canvas's
+    # job, so nothing here may be thumbnailed.
+    data = _payload()
+    assert data["image"]["id"] == 1
+    assert data["image"]["width"] == 100
+    assert data["image"]["height"] == 80
+    assert data["image"]["file_name"] == "img001.jpg"
 
 
-def test_render_annotated_image_bbox_returns_tuple():
-    from hotcoco.browse import _assign_cat_colors, render_annotated_image
-
-    dataset, tmpdir = _minimal_dataset()
-    coco = COCO(dataset)
-    cat_colors = _assign_cat_colors([1])
-    img, sections = render_annotated_image(coco, 1, tmpdir, ["bbox"], cat_colors)
-    assert len(sections) >= 1
-    bbox, label = sections[0]
-    assert isinstance(bbox, tuple) and len(bbox) == 4  # (x1, y1, x2, y2)
+def test_prepare_annotation_data_segmentation_polygons():
+    data = _payload(with_segm=True)
+    entry = data["annotations"][0]
+    assert entry["segmentation"] == [[10, 10, 40, 10, 40, 30, 10, 30]]
 
 
-def test_render_annotated_image_with_keypoints():
-    from hotcoco.browse import _assign_cat_colors, render_annotated_image
+def test_prepare_annotation_data_bbox_entry():
+    data = _payload()
+    entry = data["annotations"][0]
+    assert entry["bbox"] == [10, 10, 30, 20]  # COCO [x, y, w, h], unscaled
+    assert entry["source"] == "gt"
+    assert entry["category"] == "cat"
+    assert isinstance(entry["color"], list) and len(entry["color"]) == 3
+    assert all(0 <= v <= 255 for v in entry["color"])
+    assert entry["score"] is None  # ground truth carries no score
 
-    dataset, tmpdir = _minimal_dataset(with_segm=True, with_kpts=True)
-    coco = COCO(dataset)
-    cat_colors = _assign_cat_colors([1])
-    img, sections = render_annotated_image(coco, 1, tmpdir, ["bbox", "segm", "keypoints"], cat_colors)
-    assert isinstance(img, Image.Image)
+
+def test_prepare_annotation_data_keypoints_and_skeleton():
+    data = _payload(with_segm=True, with_kpts=True)
+    entry = data["annotations"][0]
+    assert entry["keypoints"] == [25, 20, 2, 0, 0, 0]
+    assert data["skeleton"] == [[1, 2]]
 
 
 # ---------------------------------------------------------------------------
-# build_app
+# create_app (FastAPI app factory in hotcoco.server)
 # ---------------------------------------------------------------------------
 
 
-def test_build_app_returns_blocks():
-    pytest.importorskip("gradio")
-    from hotcoco.browse import build_app
+def test_create_app_returns_fastapi_and_serves_index():
+    from fastapi import FastAPI
+    from hotcoco.server import create_app
 
     dataset, tmpdir = _minimal_dataset()
     coco = COCO(dataset)
-    app = build_app(coco, image_dir=tmpdir)
-    import gradio as gr
+    app = create_app(coco, image_dir=tmpdir)
+    assert isinstance(app, FastAPI)
 
-    assert isinstance(app, gr.Blocks)
+    status, headers, body = _asgi_get(app, "/")
+    assert status == 200
+    assert "text/html" in headers.get("content-type", "")
+    assert b"img001.jpg" in body or b"hotcoco" in body.lower()
 
 
-def test_build_app_raises_without_image_dir():
-    pytest.importorskip("gradio")
-    from hotcoco.browse import build_app
+def test_create_app_raises_without_image_dir():
+    from hotcoco.server import create_app
 
-    dataset, tmpdir = _minimal_dataset()
+    dataset, _ = _minimal_dataset()
     coco = COCO(dataset)
     with pytest.raises(ValueError, match="image_dir is required"):
-        build_app(coco)
+        create_app(coco)
 
 
-def test_build_app_falls_back_to_coco_image_dir():
-    pytest.importorskip("gradio")
-    from hotcoco.browse import build_app
+def test_create_app_falls_back_to_coco_image_dir():
+    from fastapi import FastAPI
+    from hotcoco.server import create_app
 
     dataset, tmpdir = _minimal_dataset()
     coco = COCO(dataset, image_dir=tmpdir)
-    import gradio as gr
-
-    app = build_app(coco)  # no explicit image_dir
-    assert isinstance(app, gr.Blocks)
+    app = create_app(coco)  # no explicit image_dir
+    assert isinstance(app, FastAPI)
 
 
 # ---------------------------------------------------------------------------
@@ -267,25 +306,29 @@ def test_coco_image_dir_setter():
 
 
 def test_coco_browse_raises_without_image_dir():
-    pytest.importorskip("gradio")
-
     dataset, _ = _minimal_dataset()
     coco = COCO(dataset)
     with pytest.raises(ValueError, match="image_dir is required"):
         coco.browse()
 
 
-def test_coco_browse_returns_blocks():
-    pytest.importorskip("gradio")
-    import gradio as gr
+def test_create_app_serves_gallery_and_thumbnail():
+    # The request-level path COCO.browse() wires up: build the app (without
+    # launching a server) and hit the endpoints the UI actually loads.
+    from hotcoco.server import create_app
 
     dataset, tmpdir = _minimal_dataset()
     coco = COCO(dataset, image_dir=tmpdir)
-    # Don't actually launch -- just build
-    from hotcoco import browse as _browse
+    app = create_app(coco)
 
-    app = _browse.build_app(coco)
-    assert isinstance(app, gr.Blocks)
+    status, headers, body = _asgi_get(app, "/gallery")
+    assert status == 200, body[:200]
+    assert "text/html" in headers.get("content-type", "")
+
+    status, headers, body = _asgi_get(app, "/thumbnail/1")
+    assert status == 200, body[:200]
+    assert headers.get("content-type", "").startswith("image/")
+    assert body[:8] == b"\x89PNG\r\n\x1a\n", "thumbnail should be a PNG"
 
 
 # ---------------------------------------------------------------------------
@@ -303,27 +346,34 @@ def test_explore_argparse_help():
     assert "--images" in result.stdout
 
 
-def test_explore_missing_gradio_exits_1(tmp_path, monkeypatch):
-    """cmd_explore with no gradio installed exits with code 1."""
+def test_explore_missing_browse_deps_exits_1(tmp_path, monkeypatch, capsys):
+    """cmd_explore without the browse extra (fastapi et al.) exits with code 1.
+
+    The gradio-era version of this test mocked out `gradio`, which is no
+    longer a dependency of anything — it kept passing only because the bogus
+    `x.json` path also exits 1, i.e. it verified nothing about the deps check.
+    """
     import builtins
-    import sys
 
     real_import = builtins.__import__
 
     def mock_import(name, *args, **kwargs):
-        if name == "gradio":
-            raise ImportError("No module named 'gradio'")
+        if name == "fastapi":
+            raise ImportError("No module named 'fastapi'")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", mock_import)
-    # Remove cached gradio from sys.modules if present
-    sys.modules.pop("gradio", None)
 
     import argparse
 
     from hotcoco.cli import cmd_explore
 
-    args = argparse.Namespace(gt="x.json", images=str(tmp_path), batch_size=12, port=7860, share=False)
+    # The deps check runs before any argument is touched, so a minimal
+    # namespace suffices — reaching further than it would be the failure.
+    args = argparse.Namespace(gt="x.json", images=str(tmp_path))
     with pytest.raises(SystemExit) as exc:
         cmd_explore(args)
     assert exc.value.code == 1
+    # Exit 1 alone is ambiguous (the bogus x.json path also exits 1); the
+    # message proves the *deps* branch fired.
+    assert "browse dependencies required" in capsys.readouterr().err.lower()

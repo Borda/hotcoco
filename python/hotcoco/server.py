@@ -12,6 +12,7 @@ import random
 import threading
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -25,6 +26,19 @@ logger = logging.getLogger("hotcoco.server")
 _HERE = Path(__file__).parent
 _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
+
+
+def _metric_fmt(v, fmt: str = "%.3f") -> str:
+    """Jinja filter for metric values.
+
+    ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a
+    low score — render it ``n/a`` the way ``cli._fmt_metric`` does. Only the
+    exact sentinel is caught: this filter also formats signed deltas, where
+    other negative values are meaningful.
+    """
+    if v is None or v == -1.0:
+        return "n/a"
+    return fmt % v
 
 
 def _build_cat_tree(cats: list[dict]) -> list[dict]:
@@ -51,9 +65,24 @@ def _build_cat_tree(cats: list[dict]) -> list[dict]:
 
 
 def create_app(
-    coco, image_dir: str | None = None, batch_size: int = 12, dt_coco=None, coco_eval=None, slices=None
+    coco,
+    image_dir: str | None = None,
+    batch_size: int = 12,
+    dt_coco: Any = None,
+    coco_eval: Any = None,
+    slices: dict[str, list[int]] | None = None,
+    iou_thr: float = 0.5,
 ) -> FastAPI:
-    """Create and return a FastAPI app for browsing a COCO dataset."""
+    """Create and return a FastAPI app for browsing a COCO dataset.
+
+    ``iou_thr`` sets the initial position of the UI's IoU-threshold slider
+    (the TP/FP classification threshold), clamped to the slider's 0.50-0.95
+    range. It is where ``COCO.browse(iou_thr=...)`` and
+    ``coco explore --iou-thr`` land.
+    """
+    # The slider steps 0.50-0.95 by 0.05; snap the initial value onto it so
+    # the displayed number, the slider position, and the query param agree.
+    initial_iou_thr = round(min(0.95, max(0.5, iou_thr)), 2)
     resolved_dir = image_dir if image_dir is not None else getattr(coco, "image_dir", None)
     if resolved_dir is None:
         raise ValueError(
@@ -74,10 +103,10 @@ def create_app(
     has_hierarchy = len(cat_tree) > 0
 
     # Slices
-    has_slices = slices is not None and len(slices) > 0
+    has_slices = bool(slices)
     slice_img_sets: dict[str, set[int]] = {}
     slice_metrics: dict[str, dict] = {}
-    if has_slices:
+    if slices:
         for name, ids in slices.items():
             slice_img_sets[name] = set(ids)
         if has_eval:
@@ -114,10 +143,13 @@ def create_app(
     # Jinja2 environment
     env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)), autoescape=True)
     env.filters["number_format"] = lambda v: f"{v:,}"
-    env.filters["metric_fmt"] = lambda v, fmt="%.3f": fmt % v if v is not None else "—"
+    env.filters["metric_fmt"] = _metric_fmt
 
     app = FastAPI(title="hotcoco browse")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    # Vendored DM Sans (shared with the PDF report) — base.html's @font-face
+    # rules point here so the UI has no font CDN dependency.
+    app.mount("/fonts", StaticFiles(directory=str(_HERE / "_fonts")), name="fonts")
 
     _error_template = env.get_template("partials/error.html")
 
@@ -170,7 +202,7 @@ def create_app(
         # Eval filter
         if has_eval and eval_filter and eval_filter != "none":
             eval_index = _get_eval_index(iou_thr)
-            img_summary = eval_index["img_summary"]
+            img_summary = eval_index["img_summary"] if eval_index else {}
             if eval_filter == "has_fp":
                 img_ids = [i for i in img_ids if img_summary.get(i, {}).get("fp", 0) > 0]
             elif eval_filter == "has_fn":
@@ -189,7 +221,7 @@ def create_app(
         # Sort (applied before shuffle; shuffle overrides if active)
         if has_eval and sort and sort != "default":
             eval_index = _get_eval_index(iou_thr)
-            img_summary = eval_index["img_summary"]
+            img_summary = eval_index["img_summary"] if eval_index else {}
             if sort == "worst":
                 img_ids.sort(key=lambda i: -(img_summary.get(i, {}).get("fp", 0) + img_summary.get(i, {}).get("fn", 0)))
             elif sort == "most_fp":
@@ -262,6 +294,7 @@ def create_app(
             has_slices=has_slices,
             slice_info=slice_info,
             total_images=total_images,
+            iou_thr=initial_iou_thr,
         )
         return HTMLResponse(html)
 
@@ -294,7 +327,7 @@ def create_app(
         img_summaries = None
         if has_eval:
             eval_index = _get_eval_index(iou_thr)
-            img_summaries = eval_index["img_summary"]
+            img_summaries = eval_index["img_summary"] if eval_index else None
 
         template = env.get_template("partials/gallery.html")
         html = template.render(
@@ -377,8 +410,11 @@ def create_app(
 
     @app.get("/images/{filename:path}")
     async def serve_image(filename: str):
-        path = os.path.realpath(os.path.join(resolved_dir, filename))
-        if not path.startswith(os.path.realpath(resolved_dir)):
+        root = os.path.realpath(resolved_dir)
+        path = os.path.realpath(os.path.join(root, filename))
+        # Compare with a trailing separator: a bare prefix check lets a sibling
+        # directory like /data/images-private pass for image root /data/images.
+        if path != root and not path.startswith(root + os.sep):
             return Response(status_code=400, content="Invalid path")
         if not os.path.isfile(path):
             return Response(status_code=404, content="Not found")
@@ -413,21 +449,49 @@ def create_app(
     return app
 
 
+def _find_free_port(port: int, tries: int = 11) -> int:
+    """Return the first port in ``[port, port + tries)`` that can be bound."""
+    import socket
+
+    for attempt_port in range(port, port + tries):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", attempt_port))
+            sock.close()
+        except OSError:
+            continue
+        return attempt_port
+    raise OSError(f"Could not find an available port in range {port}-{port + tries - 1}")
+
+
 def run_server(app: FastAPI, port: int = 7860, open_browser: bool = True):
-    """Run the server (blocks). Opens browser on start."""
+    """Run the server (blocks).
+
+    Probes ``port`` through ``port+10`` for a free port (like
+    :func:`start_server_background`), and opens the browser only once the
+    server reports it has started — not blindly on a timer.
+    """
+    import time
+
     import uvicorn
 
-    if open_browser:
-        # Open browser after a short delay to let the server start
-        def _open():
-            import time
+    actual_port = _find_free_port(port)
+    config = uvicorn.Config(app, host="127.0.0.1", port=actual_port, log_level="warning")
+    server = uvicorn.Server(config)
 
-            time.sleep(0.5)
-            webbrowser.open(f"http://127.0.0.1:{port}")
+    if open_browser:
+
+        def _open():
+            # Wait for startup (or give up quietly after ~10s).
+            for _ in range(100):
+                if server.started:
+                    webbrowser.open(f"http://127.0.0.1:{actual_port}")
+                    return
+                time.sleep(0.1)
 
         threading.Thread(target=_open, daemon=True).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    server.run()
 
 
 def start_server_background(app: FastAPI, port: int = 7860) -> int:
