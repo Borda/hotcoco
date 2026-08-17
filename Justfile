@@ -50,6 +50,10 @@ docs:
     uv tool install zensical --quiet
     zensical serve -o
 
+# Check every internal docs link, heading anchor, and nav entry resolves
+docs-links:
+    uv run python scripts/check_docs_links.py
+
 # Lint (warnings are errors, matches CI)
 lint:
     cargo clippy --workspace --all-targets -- -D warnings

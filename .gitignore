@@ -157,10 +157,9 @@ package-lock.json
 .superpowers/
 # Working papers — plans, spikes, audits, investigation notes. Local by design:
 # they are scratch thinking with a short half-life, not documentation anyone
-# should find in the repo. `docs/plans/` is the one place they go.
-docs/superpowers/
-docs/plans/
-docs/internal/
+# should find in the repo. `plans/` is the one place they go — at the repo root,
+# outside docs/, so the docs builder can never publish them.
+/plans/
 docs/notes/
 
 # Generated reports
