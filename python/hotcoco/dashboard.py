@@ -7,19 +7,26 @@ import numpy as np
 from .plot.core import TIDE_ERROR_ORDER, _report_curves, _top_confusion_keep
 from .plot.data import PlotData
 from .plot.report import _build_metric_rows
-from .plot.theme import SERIES_COLORS
+from .plot.theme import CHROME_DARK, EVAL_COLORS_DARK, SEQUENTIAL_DARK, SERIES_COLORS_DARK
 
-# ── Theme constants matching browse CSS tokens (Cold Brew) ───────────
-_BG_SURFACE = "#28221a"
-_BG_ELEVATED = "#332a20"
-_TEXT_PRIMARY = "#ede8e3"
-_TEXT_SECONDARY = "#9a918a"
-_TEXT_TERTIARY = "#6b6259"
-_BORDER_SUBTLE = "#3a3228"
-_ACCENT = "#8694A8"
+# ── Theme constants (Cyanotype dark) ──
+# Derived from plot/theme.py rather than copied, so a chrome change there cannot
+# leave the dashboard behind. scripts/test_theme.py asserts these against the
+# browse CSS tokens, which are the third copy and cannot import Python.
+_BG_SURFACE = CHROME_DARK["plot_bg"]
+_BG_ELEVATED = "#242427"
+_TEXT_PRIMARY = CHROME_DARK["text"]
+_TEXT_SECONDARY = CHROME_DARK["label"]
+_TEXT_TERTIARY = CHROME_DARK["tick"]
+_BORDER_SUBTLE = CHROME_DARK["grid"]
+_ACCENT = SERIES_COLORS_DARK[0]
 
-_FONT_BODY = "DM Sans, -apple-system, BlinkMacSystemFont, sans-serif"
-_FONT_MONO = "JetBrains Mono, ui-monospace, SFMono-Regular, monospace"
+# Plum, chart palette #5 — the non-leaderboard-comparable flag; see the
+# cyanotype skill. Same slot as plot/report.py's `caveat`, on the dark ground.
+_CAVEAT = SERIES_COLORS_DARK[4]
+
+_FONT_BODY = "'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif"
+_FONT_MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace"
 
 
 def _dark_axis(overrides: dict | None = None) -> dict:
@@ -68,7 +75,7 @@ def _dark_layout(**overrides):
         font=dict(family=_FONT_BODY, color=_TEXT_PRIMARY, size=13),
         hoverlabel=dict(bgcolor=_BG_SURFACE, font_color=_TEXT_PRIMARY, bordercolor=_BORDER_SUBTLE),
         modebar=dict(bgcolor="rgba(0,0,0,0)", color=_TEXT_TERTIARY, activecolor=_ACCENT),
-        colorway=SERIES_COLORS,
+        colorway=SERIES_COLORS_DARK,
         margin=dict(l=60, r=20, t=20, b=40),
         xaxis=_dark_axis(overrides.pop("xaxis", None)),
         yaxis=_dark_axis(overrides.pop("yaxis", None)),
@@ -280,7 +287,7 @@ def chart_confusion_matrix(coco_eval, iou_thr=0.5) -> str:
             textfont=dict(size=max(7, min(11, 200 // n))),
             hovertext=hover_text,
             hoverinfo="text",
-            colorscale=[[0, _BG_ELEVATED], [0.5, "#6A7A90"], [1, _ACCENT]],
+            colorscale=[[0, SEQUENTIAL_DARK[0]], [0.5, SEQUENTIAL_DARK[1]], [1, SEQUENTIAL_DARK[2]]],
             colorbar=dict(title="Rate", tickfont=dict(color=_TEXT_SECONDARY)),
             zmin=0,
             zmax=1,
@@ -438,14 +445,16 @@ def chart_f1_distribution(diag_or_eval, iou_thr=0.5) -> str:
     diag = diag_or_eval if isinstance(diag_or_eval, dict) else diag_or_eval.image_diagnostics(iou_thr=iou_thr)
     img_summary = diag.get("img_summary", {})
     if not img_summary:
-        return "<p style='color: #9a918a; text-align: center; padding: 40px;'>No image diagnostics available.</p>"
+        return "<p class='empty-state'>No image diagnostics available.</p>"
 
     # Desaturated versions of eval status colors for chart readability
+    # The eval semantics, not invented colors: a perfect image reads as TP, an
+    # FP-heavy one as FP, and so on. Plum (series 5) carries "mixed".
     profile_colors = {
-        "perfect": "#2d8a4e",  # muted green
-        "fp_heavy": "#c0392b",  # muted red
-        "fn_heavy": "#2e6da4",  # muted blue
-        "mixed": "#7c6f94",  # muted purple
+        "perfect": EVAL_COLORS_DARK["tp"],
+        "fp_heavy": EVAL_COLORS_DARK["fp"],
+        "fn_heavy": EVAL_COLORS_DARK["fn"],
+        "mixed": SERIES_COLORS_DARK[4],
     }
 
     # Group F1 scores by error profile

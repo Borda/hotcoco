@@ -188,9 +188,9 @@ Internal planning docs live in `plans/` at the repo root (gitignored). Never put
 any page split, rename, or heading change — a moved heading breaks inbound anchors
 silently, and the site build does not catch it.
 
-## Design System ("Cold Brew")
+## Design System ("Cyanotype")
 
-All visual surfaces (browse UI, docs site, matplotlib, Plotly dashboard) share the **Cold Brew** theme. The canonical spec — colors, fonts, the 10-color chart palette, and which file owns each token — is the `cold-brew` skill. Consult it before changing any colors, fonts, or chart palettes, and when adding a new visual surface. Never eyeball new values.
+All visual surfaces (browse UI, docs site, matplotlib, Plotly dashboard) share the **Cyanotype** theme. The canonical spec — colors, fonts, the 10-color chart palette, and which file owns each token — is the `cyanotype` skill. Consult it before changing any colors, fonts, or chart palettes, and when adding a new visual surface. Never eyeball new values.
 
 ## Pre-Commit Checks
 

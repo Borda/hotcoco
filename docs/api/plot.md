@@ -16,7 +16,7 @@ All functions share these common parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `theme` | `str` | Visual theme: `"cold-brew"` (default), `"warm-slate"`, `"scientific-blue"`, or `"ember"`. |
+| `theme` | `str` | Visual theme: `"cyanotype"` (default) or `"cyanotype-dark"`. |
 | `paper_mode` | `bool` | Set both figure and axes background to white. Useful for LaTeX / PowerPoint. Default `False`. |
 | `ax` | <code>Axes &#124; None</code> | Draw on an existing axes. If `None`, creates a new figure. |
 | `save_path` | <code>str &#124; Path &#124; None</code> | Save figure to this path (150 DPI). |
@@ -31,7 +31,7 @@ All functions return `(Figure, Axes)`.
 pr_curve_iou_sweep(
     coco_eval, *,
     iou_thrs=None, area_rng="all", max_det=None,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -52,7 +52,7 @@ Plot one precision-recall curve per IoU threshold, with precision averaged acros
 pr_curve_by_category(
     coco_eval, cat_id, *,
     iou_thr=0.5, area_rng="all", max_det=None,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -74,7 +74,7 @@ Plot the precision-recall curve for a single category at a fixed IoU threshold, 
 pr_curve_top_n(
     coco_eval, *,
     cat_ids=None, top_n=10, iou_thr=0.5, area_rng="all", max_det=None,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -98,7 +98,7 @@ pr_curve(
     coco_eval, *,
     iou_thrs=None, cat_id=None, cat_ids=None,
     iou_thr=None, top_n=10, area_rng="all", max_det=None,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -128,7 +128,7 @@ confusion_matrix(
     cm_dict, *,
     normalize=True, top_n=None,
     group_by=None, cat_groups=None,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -150,7 +150,7 @@ Plot a confusion matrix heatmap.
 top_confusions(
     cm_dict, *,
     top_n=20,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -169,7 +169,7 @@ Plot the top N misclassifications as horizontal bars. Shows "ground truth → pr
 per_category_ap(
     results_dict, *,
     top_n=20, bottom_n=5,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -188,7 +188,7 @@ Plot per-category AP as horizontal bars with a mean AP reference line.
 ```python
 tide_errors(
     tide_dict, *,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -206,7 +206,7 @@ Plot TIDE error breakdown as horizontal bars.
 reliability_diagram(
     cal_or_eval, *,
     n_bins=10, iou_threshold=0.5,
-    theme="cold-brew", paper_mode=False, ax=None, save_path=None,
+    theme="cyanotype", paper_mode=False, ax=None, save_path=None,
 )
 ```
 
@@ -237,7 +237,7 @@ fig, ax = reliability_diagram(ev, n_bins=15)
 ```python
 comparison_bar(
     compare_result: dict, *,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -262,7 +262,7 @@ fig, ax = comparison_bar(result, save_path="comparison.png")
 category_deltas(
     compare_result: dict, *,
     top_k: int = 20,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -324,23 +324,21 @@ Returns `None`. Raises on I/O error or if `run()` was not called first.
 
 ## Themes
 
-Four built-in themes:
+Two built-in themes:
 
 | Theme | Character |
 |-------|-----------|
-| `"cold-brew"` | Default. Warm off-white background, 10-color infographic palette (alternating warm/cool). |
-| `"warm-slate"` | Warm off-white background, terracotta + slate series colors. |
-| `"scientific-blue"` | Cool/academic. Light blue-grey background, navy + red anchor colors. |
-| `"ember"` | Warm/editorial. Parchment background, rust + copper + amber palette. |
+| `"cyanotype"` | Default. Silver-paper background, neutral chrome, 10-color palette led by Prussian blue. |
+| `"cyanotype-dark"` | The same ten hues on a graphite background, lifted to hold against a dark ground. For dark notebooks, dark slides, and dark documentation. |
 
-Pass `paper_mode=True` to set figure and axes backgrounds to white, keeping all other theme colors intact. Useful when embedding plots in LaTeX documents or PowerPoint slides.
+Pass `paper_mode=True` to set figure and axes backgrounds to white, keeping all other theme colors intact. Useful when embedding plots in LaTeX documents or PowerPoint slides. It is rejected on `"cyanotype-dark"` — a white background would erase that theme's chrome and leave unreadable text.
 
 ```python
 # Academic paper
-fig, ax = pr_curve(ev, theme="scientific-blue", paper_mode=True, save_path="pr.pdf")
+fig, ax = pr_curve(ev, paper_mode=True, save_path="pr.pdf")
 
-# Warm editorial style
-fig, ax = per_category_ap(results, theme="ember", save_path="ap.png")
+# Dark ground, for slides and dark docs
+fig, ax = per_category_ap(results, theme="cyanotype-dark", save_path="ap.png")
 ```
 
 Use the `style()` context manager to apply a theme to your own matplotlib code:
@@ -348,7 +346,7 @@ Use the `style()` context manager to apply a theme to your own matplotlib code:
 ```python
 from hotcoco.plot import style
 
-with style(theme="scientific-blue", paper_mode=True):
+with style(paper_mode=True):
     fig, ax = plt.subplots()
     ax.plot(recall, precision)
     fig.savefig("custom.pdf")
@@ -356,12 +354,16 @@ with style(theme="scientific-blue", paper_mode=True):
 
 ## Color palette
 
-The `cold-brew` theme constants are available for custom plots:
+The `cyanotype` theme constants are available for custom plots:
 
 ```python
 from hotcoco.plot import SERIES_COLORS, CHROME, SEQUENTIAL
 ```
 
-- `SERIES_COLORS` — 10 infographic-optimized data series colors (fjord, kiln, fern, maize, plum, patina, rose, moss, slate, sienna)
+- `SERIES_COLORS` — 10 data series colors (Prussian, Madder, Olive, Viridian, Plum, Ochre, Cerulean, Vermilion, Fern, Graphite)
+- `SERIES_COLORS_DARK` — the same ten, lifted for dark grounds
+- `EVAL_COLORS`, `EVAL_COLORS_DARK` — the TP/FP/FN semantics, deliberately outside the series palette
 - `CHROME` — non-data element colors (text, label, tick, grid, spine, background)
-- `SEQUENTIAL` — 3-stop colormap for heatmaps (stone cream → fjord blue → deep navy)
+- `SEQUENTIAL` — 3-stop colormap for heatmaps (silver paper → Prussian → deep navy)
+- `SEQUENTIAL_DARK` — the inverted ramp for dark grounds
+- `CHROME_DARK` — dark-ground text/label/tick/grid/spine values

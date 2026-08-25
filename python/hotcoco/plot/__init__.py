@@ -28,7 +28,17 @@ from .plots import (
     top_confusions,
 )
 from .report import report
-from .theme import CHROME, SEQUENTIAL, SERIES_COLORS, style
+from .theme import (
+    CHROME,
+    CHROME_DARK,
+    EVAL_COLORS,
+    EVAL_COLORS_DARK,
+    SEQUENTIAL,
+    SEQUENTIAL_DARK,
+    SERIES_COLORS,
+    SERIES_COLORS_DARK,
+    style,
+)
 
 __all__ = [
     "style",
@@ -45,6 +55,11 @@ __all__ = [
     "category_deltas",
     "report",
     "SERIES_COLORS",
+    "SERIES_COLORS_DARK",
     "CHROME",
+    "CHROME_DARK",
+    "EVAL_COLORS",
+    "EVAL_COLORS_DARK",
     "SEQUENTIAL",
+    "SEQUENTIAL_DARK",
 ]

@@ -18,7 +18,7 @@ from .core import (
     _top_confusion_keep,
 )
 from .data import PlotData
-from .theme import _build_rc
+from .theme import _build_rc, _get_theme
 
 
 def pr_curve_iou_sweep(
@@ -27,7 +27,7 @@ def pr_curve_iou_sweep(
     iou_thrs: list[float] | None = None,
     area_rng: str = "all",
     max_det: int | None = None,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -48,7 +48,7 @@ def pr_curve_iou_sweep(
     max_det : int, optional
         Max detections. Default: last entry in ``params.max_dets``.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -92,7 +92,7 @@ def pr_curve_by_category(
     iou_thr: float = 0.5,
     area_rng: str = "all",
     max_det: int | None = None,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -112,7 +112,7 @@ def pr_curve_by_category(
     max_det : int, optional
         Max detections. Default: last entry in ``params.max_dets``.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -154,7 +154,7 @@ def pr_curve_top_n(
     iou_thr: float = 0.5,
     area_rng: str = "all",
     max_det: int | None = None,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -176,7 +176,7 @@ def pr_curve_top_n(
     max_det : int, optional
         Max detections. Default: last entry in ``params.max_dets``.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -233,7 +233,7 @@ def pr_curve(
     top_n=10,
     area_rng="all",
     max_det=None,
-    theme="cold-brew",
+    theme="cyanotype",
     paper_mode=False,
     ax=None,
     save_path=None,
@@ -293,7 +293,7 @@ def confusion_matrix(
     top_n: int | None = None,
     group_by: str | None = None,
     cat_groups: dict[str, list[str]] | None = None,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -315,7 +315,7 @@ def confusion_matrix(
     cat_groups : dict[str, list[str]], optional
         Mapping of group name to list of category names for ``group_by``.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -429,7 +429,7 @@ def top_confusions(
     cm_dict: dict[str, Any],
     *,
     top_n: int = 20,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -447,7 +447,7 @@ def top_confusions(
     top_n : int
         Number of top confusions to show. Default 20.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -509,7 +509,7 @@ def per_category_ap(
     *,
     top_n: int = 20,
     bottom_n: int = 5,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -525,7 +525,7 @@ def per_category_ap(
     bottom_n : int
         Number of bottom categories to show.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -580,7 +580,7 @@ def per_category_ap(
 def tide_errors(
     tide_dict: dict[str, Any],
     *,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -592,7 +592,7 @@ def tide_errors(
     tide_dict : dict
         Output of ``coco_eval.tide_errors()``.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -631,7 +631,7 @@ def reliability_diagram(
     *,
     n_bins: int = 10,
     iou_threshold: float = 0.5,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -649,7 +649,7 @@ def reliability_diagram(
     iou_threshold : float
         IoU threshold (only used when ``cal_or_eval`` is a COCOeval).
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -760,7 +760,7 @@ def reliability_diagram(
 def comparison_bar(
     compare_result: dict[str, Any],
     *,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -772,7 +772,7 @@ def comparison_bar(
     compare_result : dict
         Output of ``hotcoco.compare(eval_a, eval_b)``.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -844,7 +844,7 @@ def category_deltas(
     compare_result: dict[str, Any],
     *,
     top_k: int = 20,
-    theme: str = "cold-brew",
+    theme: str = "cyanotype",
     paper_mode: bool = False,
     ax=None,
     save_path: str | Path | None = None,
@@ -859,7 +859,7 @@ def category_deltas(
         Number of categories to show from each end (top improvements + top
         regressions). Default 20.
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure and axes background for PDF/LaTeX inclusion.
     ax : matplotlib.axes.Axes, optional
@@ -887,7 +887,12 @@ def category_deltas(
 
     names = [c["cat_name"] for c in shown]
     deltas = [c["delta"] for c in shown]
-    colors = ["#c0392b" if d < 0 else "#27ae60" for d in deltas]
+    # Madder for a regression, Fern for an improvement — the palette's own two.
+    # Read from the theme rather than rcParams: this runs before the rc_context
+    # below is entered, so rcParams would still hold the caller's palette.
+    series = _get_theme(theme)["series"]
+    down, up = series[1], series[8]
+    colors = [down if d < 0 else up for d in deltas]
     num_bars = len(names)
 
     with mpl.rc_context(_build_rc(theme, paper_mode)):

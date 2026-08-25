@@ -1,51 +1,71 @@
-/* hotcoco dataset browser — Cold Brew */
+/* hotcoco dataset browser — Cyanotype */
 
 /* ── Tokens ── */
 :root {
-    --bg-base: #1e1914;
-    --bg-surface: #28221a;
-    --bg-elevated: #332a20;
-    --bg-hover: #3a3228;
-    --bg-active: #4a3e30;
+    --bg-base: #141415;
+    --bg-surface: #1C1C1E;
+    --bg-elevated: #242427;
+    --bg-hover: #2C2C30;
+    --bg-active: #343438;
 
-    --border-subtle: #3a3228;
-    --border-default: #4a3e30;
-    --border-strong: #5a5040;
+    --border-subtle: #2A2A2D;
+    --border-default: #333337;
+    --border-strong: #3E3E43;
 
-    --text-primary: #ede8e3;
-    --text-secondary: #9a918a;
-    --text-tertiary: #6b6259;
-    --text-inverse: #1e1914;
+    /* The 24px ground grid: --border-strong at reduced strength, so it reads
+       as texture and never as content. Depth in Cyanotype comes from rule
+       weight, which is what the --border-* tier is for. */
+    --grid-line: rgba(62, 62, 67, 0.45);
 
-    --accent: #8694A8;
-    --accent-hover: #96a4b8;
-    --accent-muted: rgba(134, 148, 168, 0.15);
-    --accent-subtle: rgba(134, 148, 168, 0.08);
+    --text-primary: #EAEAEA;
+    --text-secondary: #B0B0B3;
+    --text-tertiary: #8C8C90;
+    --text-inverse: #141415;
 
-    --gt-badge-bg: rgba(168, 128, 110, 0.12);
-    --gt-badge-text: #A8806E;
-    --dt-badge-bg: rgba(134, 148, 168, 0.12);
-    --dt-badge-text: #8694A8;
+    --accent: #8FB3E2;
+    --accent-hover: #A8C4EC;
+    --accent-muted: rgba(143, 179, 226, 0.15);
+    --accent-subtle: rgba(143, 179, 226, 0.08);
 
-    /* Rose, chart palette #7 — the caveat marker on non-leaderboard-comparable
-       numbers. Kept identical to plot/report.py's `caveat` so the dashboard and
-       the PDF flag the same run the same way. */
-    --caveat: #C46070;
-    --caveat-bg: rgba(196, 96, 112, 0.10);
-    --caveat-border: rgba(196, 96, 112, 0.35);
+    --gt-badge-bg: rgba(176, 176, 179, 0.12);
+    --gt-badge-text: #B4B4B8;
+    --dt-badge-bg: rgba(143, 179, 226, 0.12);
+    --dt-badge-text: #8FB3E2;
 
-    --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 14px;
+    /* Plum, chart palette #5 (dark) — the caveat marker on
+       non-leaderboard-comparable numbers. Same palette slot as
+       plot/report.py's `caveat`, taken on the dark ground this surface renders
+       against. Deliberately not red: Cyanotype spends red exclusively on false
+       positives. */
+    --caveat: #B189B3;
+    --caveat-bg: rgba(177, 137, 179, 0.10);
+    --caveat-border: rgba(177, 137, 179, 0.35);
 
-    --font-display: 'DM Serif Display', Georgia, serif;
-    --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    /* Eval semantics. Outside the chart palette on purpose — a chart series
+       that happens to be green does not mean "true positive". */
+    --tp: #7FBC98;
+    --fp: #F0A050;
+    --fn: #9296EE;
+    /* Tints derived from the tokens, so a semantic change is a one-line edit. */
+    --tp-bg: rgba(127, 188, 152, 0.15);
+    --fp-bg: rgba(240, 160, 80, 0.15);
+    --fn-bg: rgba(146, 150, 238, 0.15);
 
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
-    --shadow-md: 0 4px 16px rgba(0,0,0,0.4);
-    --shadow-lg: 0 12px 48px rgba(0,0,0,0.6);
-    --shadow-glow: 0 0 0 1px rgba(134,148,168,0.15), 0 4px 20px rgba(134,148,168,0.08);
+    --radius-sm: 2px;
+    --radius-md: 3px;
+    --radius-lg: 4px;
+
+    --font-display: 'Instrument Serif', 'Times New Roman', Times, serif;
+    /* 'DM Sans' is what _fonts/ actually vendors today; it is the fallback
+       until the IBM Plex Sans TTFs land, then it comes out of the stack. */
+    --font-body: 'IBM Plex Sans', 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+
+    /* Floating surfaces only — dropdown panels, modals. A card in normal flow
+       gets a border, never a shadow, which is why there is no --shadow-sm. */
+    --shadow-md: 0 2px 10px rgba(0,0,0,0.45);
+    --shadow-lg: 0 8px 28px rgba(0,0,0,0.55);
+    --shadow-glow: 0 0 0 1px rgba(143,179,226,0.22);
 }
 
 /* ── Reset ── */
@@ -62,19 +82,6 @@ body {
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-}
-
-/* Subtle noise texture for depth */
-body::after {
-    content: '';
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 999;
-    opacity: 0.025;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    background-repeat: repeat;
-    background-size: 256px 256px;
 }
 
 /* ── Layout ── */
@@ -429,10 +436,19 @@ body::after {
 }
 
 /* ── Gallery Grid ── */
+/* The drafting grid — Cyanotype's surface texture, replacing the old
+   shadow-and-noise treatment. A background layer on the gallery ground, never
+   an overlay: an image browser must not paint on top of the images, so this
+   shows only in the gutters between cards. */
 main {
     overflow-y: auto;
     padding: 16px;
-    background: var(--bg-base);
+    background-color: var(--bg-base);
+    background-image:
+        linear-gradient(var(--grid-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 24px 24px;
+    background-position: -1px -1px;
 }
 
 #gallery {
@@ -460,7 +476,7 @@ main {
     opacity: 0;
     transition: opacity 0.2s;
     pointer-events: none;
-    background: linear-gradient(to top, rgba(30,25,20,0.6) 0%, transparent 50%);
+    background: linear-gradient(to top, rgba(20,20,21,0.65) 0%, transparent 50%);
 }
 
 .thumb-card:hover {
@@ -619,7 +635,7 @@ main {
     transform: translateX(-50%);
     background: var(--bg-elevated);
     color: var(--text-primary);
-    border: 1px solid rgba(239, 68, 68, 0.4);
+    border: 1px solid rgba(240, 160, 80, 0.4);
     padding: 10px 20px;
     border-radius: var(--radius-md);
     font-size: 0.82rem;
@@ -639,9 +655,7 @@ main {
 .lightbox {
     position: fixed;
     inset: 0;
-    background: rgba(10, 8, 6, 0.85);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: rgba(10, 10, 11, 0.94);
     display: none;
     align-items: center;
     justify-content: center;
@@ -998,18 +1012,18 @@ main {
 }
 
 .eval-tp {
-    background: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
+    background: var(--tp-bg);
+    color: var(--tp);
 }
 
 .eval-fp {
-    background: rgba(239, 68, 68, 0.15);
-    color: #ef4444;
+    background: var(--fp-bg);
+    color: var(--fp);
 }
 
 .eval-fn {
-    background: rgba(59, 130, 246, 0.15);
-    color: #3b82f6;
+    background: var(--fn-bg);
+    color: var(--fn);
 }
 
 /* Match highlight in sidebar */
@@ -1051,17 +1065,17 @@ main {
 }
 
 .color-mode-toggle.active {
-    border-color: rgba(34, 197, 94, 0.3);
+    border-color: rgba(127, 188, 152, 0.3);
     color: var(--text-secondary);
 }
 
 .color-mode-toggle.active .color-mode-dot {
-    background: #22c55e;
-    box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+    background: var(--tp);
+    box-shadow: 0 0 6px rgba(127, 188, 152, 0.4);
 }
 
 .color-mode-toggle.active:hover {
-    border-color: rgba(34, 197, 94, 0.5);
+    border-color: rgba(127, 188, 152, 0.5);
     color: var(--text-primary);
 }
 
@@ -1088,18 +1102,18 @@ main {
 }
 
 .badge-tp {
-    background: rgba(34, 197, 94, 0.85);
-    color: #fff;
+    background: rgba(127, 188, 152, 0.9);
+    color: var(--bg-base);
 }
 
 .badge-fp {
-    background: rgba(239, 68, 68, 0.85);
-    color: #fff;
+    background: rgba(240, 160, 80, 0.9);
+    color: var(--bg-base);
 }
 
 .badge-fn {
-    background: rgba(59, 130, 246, 0.85);
-    color: #fff;
+    background: rgba(146, 150, 238, 0.9);
+    color: var(--bg-base);
 }
 
 /* ── Eval Controls ── */
@@ -1811,7 +1825,7 @@ main {
     margin-bottom: 8px;
     border-radius: var(--radius-sm);
     background: var(--accent-subtle);
-    border: 1px solid rgba(134, 148, 168, 0.1);
+    border: 1px solid var(--accent-subtle);
 }
 
 .cat-mean-label {
@@ -2086,13 +2100,13 @@ main {
 }
 
 .error-badge-wrong {
-    background: rgba(239, 68, 68, 0.15);
-    color: #ef4444;
+    background: var(--fp-bg);
+    color: var(--fp);
 }
 
 .error-badge-missing {
-    background: rgba(59, 130, 246, 0.15);
-    color: #3b82f6;
+    background: var(--fn-bg);
+    color: var(--fn);
 }
 
 /* ── Plotly modebar fix: icons invisible on dark bg ── */
@@ -2317,4 +2331,14 @@ main {
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
     }
+}
+
+
+/* ── Empty state ── */
+/* One owner for the "no data" paragraph the dashboard, its partials, and the
+   per-category panel all render. */
+.empty-state {
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 40px;
 }

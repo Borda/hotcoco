@@ -49,7 +49,22 @@ def _resolve_font_family() -> list[str]:
         except Exception:
             pass
 
-    _FONT_FAMILY = ["DM Sans", "Helvetica Neue", "DejaVu Sans"]
+    # Only name families matplotlib can actually resolve. Listing a missing one
+    # emits a `findfont` warning per text object — hundreds per figure — so the
+    # preference order is filtered against what is installed or vendored.
+    #
+    # "IBM Plex Sans" is Cyanotype's body face but is not vendored yet, so today
+    # this resolves to the "DM Sans" still in _fonts/. Remove "DM Sans" from the
+    # list when the Plex TTFs land; scripts/test_theme.py asserts which face
+    # actually wins.
+    preferred = ["IBM Plex Sans", "DM Sans", "Helvetica Neue", "DejaVu Sans"]
+    try:
+        available = {f.name for f in font_manager.fontManager.ttflist}
+    except Exception:
+        available = set()
+    resolved = [name for name in preferred if name in available]
+
+    _FONT_FAMILY = resolved or ["DejaVu Sans"]
     return _FONT_FAMILY
 
 

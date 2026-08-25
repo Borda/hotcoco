@@ -155,19 +155,19 @@ AP deltas sorted by magnitude — green for improvements, red for regressions.
 
 ## Themes
 
-Every plot function accepts a `theme` argument — `"cold-brew"` (the default),
-`"warm-slate"`, `"scientific-blue"`, or `"ember"`. See
+Every plot function accepts a `theme` argument — `"cyanotype"` (the default)
+or `"cyanotype-dark"`. See
 [themes](../api/plot.md#themes) for what each looks like.
 
 ```python
-fig, ax = pr_curve(ev, theme="scientific-blue")
-fig, ax = per_category_ap(results, theme="ember")
+fig, ax = pr_curve(ev, theme="cyanotype-dark")
+fig, ax = per_category_ap(results, theme="cyanotype")
 ```
 
 Add `paper_mode=True` to force white backgrounds — useful when embedding in LaTeX or PowerPoint:
 
 ```python
-fig, ax = pr_curve(ev, theme="scientific-blue", paper_mode=True, save_path="pr.pdf")
+fig, ax = pr_curve(ev, paper_mode=True, save_path="pr.pdf")
 ```
 
 To apply a theme to your own matplotlib code, use the `style()` context manager:
@@ -176,7 +176,7 @@ To apply a theme to your own matplotlib code, use the `style()` context manager:
 from hotcoco.plot import style
 import matplotlib.pyplot as plt
 
-with style(theme="cold-brew", paper_mode=True):
+with style(theme="cyanotype", paper_mode=True):
     fig, ax = plt.subplots()
     ax.plot(recall, precision)
     fig.savefig("custom.pdf")

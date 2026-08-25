@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The Cyanotype design system**, replacing Cold Brew across every visual
+  surface — browse UI, docs site, matplotlib, and the Plotly dashboard. Grounds
+  are true-neutral silver in both modes, the signature is Prussian blue
+  (`#23467E` light, `#8FB3E2` dark), and depth comes from hairline rule weight
+  and a 24px drafting ground grid rather than shadow and noise. Type moves from
+  DM Serif Display / DM Sans / JetBrains Mono to Instrument Serif / IBM Plex
+  Sans / IBM Plex Mono.
+- **`"cyanotype-dark"` plot theme** — the same ten hues on a graphite ground,
+  lifted to hold against a dark background. Every plot function and `style()`
+  accept it. `paper_mode=True` is rejected on it with an explanatory error,
+  since a forced white background erases the theme's chrome.
+- **`SERIES_COLORS_DARK`, `SEQUENTIAL_DARK`, `CHROME_DARK`, `EVAL_COLORS` and
+  `EVAL_COLORS_DARK`** joined the public palette constants in `hotcoco.plot`,
+  for styling a dark surface matplotlib does not own. The Plotly dashboard now
+  derives its chrome and colorway from them instead of holding literal copies.
+- **`scripts/test_theme.py`** asserts the browse CSS tokens, the dashboard
+  constants, and the vendored font files agree with `plot/theme.py`. The design
+  system was previously a markdown convention with nothing enforcing it.
+
 - **`COCO.load_warnings`** — everything the loader tolerated but flagged (duplicate
   annotation ids, non-finite JSON values normalized to `null`, orphaned result ids)
   is collected on the object as well as printed to stderr.
@@ -222,6 +241,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   files reappear, and `just disk` / `just clean` report and reclaim.
 
 ### Changed
+
+- **BREAKING: the plot theme `"cold-brew"` is renamed `"cyanotype"`.** The old
+  name raises `ValueError`. The registered colormap is renamed to match:
+  `hotcoco_coldbrew` → `hotcoco_cyanotype`. Callers passing the old string must
+  update; callers relying on the default argument need no change.
+- **BREAKING: the `"warm-slate"`, `"scientific-blue"`, and `"ember"` plot themes
+  are removed.** All three carried the espresso chrome the reset exists to
+  retire, and keeping them would have meant maintaining three palettes outside
+  the design system. `"cyanotype"` and `"cyanotype-dark"` are the full set.
+- **The caveat marker moved off red.** Cyanotype spends red exclusively on false
+  positives, so the non-leaderboard-comparable flag is now Plum — chart series 5,
+  `#7E5580` on light grounds and `#B189B3` on dark. `plot/report.py` and
+  `dashboard.py` derive it from the palette instead of hardcoding a hex.
+- **Eval semantics are palette-owned.** TP/FP/FN move off the Tailwind primaries
+  to `#47714E`/`#B24A2E`/`#5A5FB0` (light) and `#7FBC98`/`#F0A050`/`#9296EE`
+  (dark), and the browse canvas overlay now reads them from the CSS tokens
+  rather than keeping a second copy — the boxes drawn on an image and the badges
+  beside it can no longer disagree.
 
 - **The five format converters now share one contract.** Malformed input raises an
   error naming the file and line/position; records the target format cannot express

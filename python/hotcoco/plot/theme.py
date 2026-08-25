@@ -7,50 +7,54 @@ from contextlib import contextmanager
 from .core import _import_mpl, _resolve_font_family
 
 _THEMES: dict[str, dict] = {
-    "cold-brew": {
+    # Cyanotype. Series 1 leads with the Prussian signature; series 9 sits a
+    # step brighter than the TP semantic so no series is exactly a state color.
+    "cyanotype": {
         "series": [
-            "#5E81AC",
-            "#C47A52",
-            "#5A9E78",
-            "#D4A03E",
-            "#9673A6",
-            "#3D9B96",
-            "#C46070",
-            "#7B8C42",
-            "#6E6EAA",
-            "#B5694A",
+            "#23467E",
+            "#9E3B39",
+            "#6F7B3A",
+            "#47807B",
+            "#7E5580",
+            "#B08A22",
+            "#3E9AA8",
+            "#CE6B33",
+            "#2E7A56",
+            "#6E6E72",
         ],
-        "chrome": {"text": "#28231F", "label": "#4A3F38", "tick": "#7A6E64", "grid": "#E8E2DA", "spine": "#D4CCC2"},
-        "background": "#FAF7F4",
-        "plot_bg": "#ffffff",
-        "sequential": ["#F4F1EE", "#5E81AC", "#2A4060"],
-        "cmap": "hotcoco_coldbrew",
+        "chrome": {"text": "#18181A", "label": "#52525A", "tick": "#66666A", "grid": "#E4E4E2", "spine": "#DBDBD8"},
+        "background": "#F5F5F4",
+        "plot_bg": "#FFFFFF",
+        "sequential": ["#F5F5F4", "#23467E", "#0A1730"],
+        "cmap": "hotcoco_cyanotype",
     },
-    "warm-slate": {
-        "series": ["#5C7080", "#C46B50", "#2B7A8C", "#C9943E", "#8A5A90", "#5B7F63", "#3A7CA5", "#B07650"],
-        "chrome": {"text": "#2C2420", "label": "#4A3F38", "tick": "#7A6E64", "grid": "#E8E2DA", "spine": "#D4CCC2"},
-        "background": "#FAF7F4",
-        "plot_bg": "#ffffff",
-        "sequential": ["#ffffff", "#A8BFCA", "#5C7080", "#2B3D4A"],
-        "cmap": "hotcoco_seq",
-    },
-    "scientific-blue": {
-        "series": ["#1B4F8A", "#E84855", "#2E86AB", "#F4A261", "#457B9D", "#74C69D"],
-        "chrome": {"text": "#1A2B3C", "label": "#2E3F52", "tick": "#6B7B8E", "grid": "#DDE4EF", "spine": "#C0CCE0"},
-        "background": "#F2F5F9",
-        "plot_bg": "#ffffff",
-        "sequential": ["#ffffff", "#2E86AB", "#1B4F8A", "#0D2240"],
-        "cmap": "hotcoco_sci",
-    },
-    "ember": {
-        "series": ["#BF4E30", "#F2C14E", "#D4915E", "#2D3A3A", "#6B4C3B", "#E8D5B0"],
-        "chrome": {"text": "#2D3A3A", "label": "#4A3520", "tick": "#8B7355", "grid": "#E6D9C5", "spine": "#D4C4A8"},
-        "background": "#F5EFE6",
-        "plot_bg": "#FFFDF8",
-        "sequential": ["#ffffff", "#D4915E", "#BF4E30", "#6B2210"],
-        "cmap": "hotcoco_ember",
+    # The same ten hues lifted until they hold against a dark ground: a chart
+    # embedded in a dark notebook, dark slide, or the dark docs site should not
+    # be the brightest thing there.
+    "cyanotype-dark": {
+        "series": [
+            "#8FB3E2",
+            "#D9736E",
+            "#A3AF6C",
+            "#79B4AE",
+            "#B189B3",
+            "#DDB855",
+            "#74C4D2",
+            "#F0A050",
+            "#8FBC96",
+            "#B4B4B8",
+        ],
+        "chrome": {"text": "#EAEAEA", "label": "#B0B0B3", "tick": "#8C8C90", "grid": "#2A2A2D", "spine": "#3E3E43"},
+        "background": "#141415",
+        "plot_bg": "#1C1C1E",
+        # Inverted against the light theme: low values sink toward the ground,
+        # high values rise toward the light.
+        "sequential": ["#141415", "#2E5A96", "#A8C8F0"],
+        "cmap": "hotcoco_cyanotype_dark",
+        "dark": True,
     },
 }
+
 
 _CMAPS_REGISTERED: set[str] = set()
 
@@ -75,7 +79,7 @@ def _ensure_cmap(theme: dict) -> None:
         _CMAPS_REGISTERED.add(cmap_name)
 
 
-def _build_rc(theme_name: str = "cold-brew", paper_mode: bool = False) -> dict:
+def _build_rc(theme_name: str = "cyanotype", paper_mode: bool = False) -> dict:
     from cycler import cycler
 
     t = _get_theme(theme_name)
@@ -115,9 +119,9 @@ def _build_rc(theme_name: str = "cold-brew", paper_mode: bool = False) -> dict:
     }
 
 
-# Public palette constants — the Cold Brew defaults, for callers styling a
+# Public palette constants — the Cyanotype defaults, for callers styling a
 # surface matplotlib does not own.
-_DEFAULT_THEME = _THEMES["cold-brew"]
+_DEFAULT_THEME = _THEMES["cyanotype"]
 
 SERIES_COLORS: list[str] = _DEFAULT_THEME["series"]
 CHROME: dict[str, str] = {
@@ -127,15 +131,33 @@ CHROME: dict[str, str] = {
 }
 SEQUENTIAL: list[str] = _DEFAULT_THEME["sequential"]
 
+# The dark-lifted counterparts, for dark surfaces matplotlib does not own
+# (the Plotly dashboard). Same ten hues, raised to hold against #141415.
+_DARK_THEME = _THEMES["cyanotype-dark"]
+
+SERIES_COLORS_DARK: list[str] = _DARK_THEME["series"]
+SEQUENTIAL_DARK: list[str] = _DARK_THEME["sequential"]
+CHROME_DARK: dict[str, str] = {
+    **_DARK_THEME["chrome"],
+    "background": _DARK_THEME["background"],
+    "plot_bg": _DARK_THEME["plot_bg"],
+}
+
+# Eval semantics. Deliberately outside the chart palette: a series that happens
+# to be green does not mean "true positive". Cyanotype spends red exclusively on
+# false positives, which is why the signature is blue and the caveat is plum.
+EVAL_COLORS: dict[str, str] = {"tp": "#47714E", "fp": "#B24A2E", "fn": "#5A5FB0"}
+EVAL_COLORS_DARK: dict[str, str] = {"tp": "#7FBC98", "fp": "#F0A050", "fn": "#9296EE"}
+
 
 @contextmanager
-def style(theme: str = "cold-brew", paper_mode: bool = False):
+def style(theme: str = "cyanotype", paper_mode: bool = False):
     """Context manager that applies a hotcoco matplotlib theme.
 
     Parameters
     ----------
     theme : str
-        ``"cold-brew"`` (default), ``"warm-slate"``, ``"scientific-blue"``, or ``"ember"``.
+        ``"cyanotype"`` (default) or ``"cyanotype-dark"``.
     paper_mode : bool
         White figure background with the theme tint on axes. Useful for
         LaTeX inclusion or PowerPoint embedding.
@@ -145,7 +167,7 @@ def style(theme: str = "cold-brew", paper_mode: bool = False):
         with hotcoco.plot.style():
             fig, ax = pr_curve(ev)
 
-        with hotcoco.plot.style(theme="scientific-blue", paper_mode=True):
+        with hotcoco.plot.style(paper_mode=True):
             fig, ax = pr_curve(ev)
 
     All plot functions also accept ``theme`` and ``paper_mode`` directly,

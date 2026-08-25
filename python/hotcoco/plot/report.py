@@ -168,19 +168,19 @@ _PROV_WRAP = 128  # characters per wrapped reason line at 6pt across the text co
 _RC = {
     "text": CHROME["text"],
     "label": CHROME["label"],
-    "muted": "#9A9088",
-    "very_muted": "#A09888",
+    "muted": "#7A7A7E",
+    "very_muted": "#93939A",
     "section": SERIES_COLORS[0],
     "border": CHROME["grid"],
     "border_dk": CHROME["spine"],
-    "block_bdr": "#EDE7DF",
-    "kpi_bg": "#F0EBE4",
-    "legend_edge": "#E4DED7",
-    "pr_tick": "#7A6E64",
-    # Rose, chart palette #7. Cold Brew defines no warning role, and the
-    # eval-semantic red (#ef4444) is scoped to the dashboard on purpose, so the
-    # caveat takes the palette's own red rather than a newly invented one.
-    "caveat": SERIES_COLORS[6],
+    "block_bdr": CHROME["grid"],
+    "kpi_bg": "#EBEBE9",
+    "legend_edge": CHROME["spine"],
+    "pr_tick": CHROME["tick"],
+    # Plum, chart palette #5 — see the cyanotype skill. dashboard.py takes the
+    # same slot from the dark palette; both derive it, so the PDF and the
+    # dashboard cannot disagree about which run is flagged.
+    "caveat": SERIES_COLORS[4],
     "pr_50": SERIES_COLORS[2],
     "pr_75": SERIES_COLORS[0],
     "pr_mean": SERIES_COLORS[1],

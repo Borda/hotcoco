@@ -2,11 +2,24 @@
 
 // ── Constants ──
 
-const EVAL_COLORS = {
-    tp: { r: 34, g: 197, b: 94 },   // green #22c55e
-    fp: { r: 239, g: 68, b: 68 },    // red #ef4444
-    fn: { r: 59, g: 130, b: 246 },   // blue #3b82f6
-};
+// Read from the CSS tokens so style.css stays the single owner of the eval
+// semantics — a second copy here is what made the boxes drawn on an image
+// disagree with the badges beside it. Resolved once, at module load.
+const EVAL_COLORS = (() => {
+    const css = getComputedStyle(document.documentElement);
+    const parse = (name, fallback) => {
+        const hex = css.getPropertyValue(name).trim();
+        const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+        return m
+            ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) }
+            : fallback;
+    };
+    return {
+        tp: parse('--tp', { r: 127, g: 188, b: 152 }),
+        fp: parse('--fp', { r: 240, g: 160, b: 80 }),
+        fn: parse('--fn', { r: 146, g: 150, b: 238 }),
+    };
+})();
 
 const DASH_SEGMENT = 6;
 const DASH_GAP = 3;
@@ -317,6 +330,11 @@ function drawOverlays(canvas, img) {
     ctx.translate(state.imgOffsetX + state.offsetX, state.imgOffsetY + state.offsetY);
     ctx.scale(state.scale, state.scale);
 
+    // Loop-invariant: both depend only on state.scale, and this runs on a
+    // requestAnimationFrame path, so they are hoisted out of the draw loop.
+    const fontSize = Math.max(MIN_FONT_SIZE, BASE_FONT_SIZE / state.scale);
+    ctx.font = `600 ${fontSize}px "IBM Plex Sans", "DM Sans", -apple-system, sans-serif`;
+
     for (let i = 0; i < state.annotations.length; i++) {
         const ann = state.annotations[i];
 
@@ -416,8 +434,6 @@ function drawOverlays(canvas, img) {
                         ? `${ann.category} ${ann.score.toFixed(2)}`
                         : ann.category;
                 }
-                const fontSize = Math.max(MIN_FONT_SIZE, BASE_FONT_SIZE / state.scale);
-                ctx.font = `600 ${fontSize}px "DM Sans", -apple-system, sans-serif`;
                 const tw = ctx.measureText(label).width;
                 const pad = 3 / state.scale;
                 const lx = labelX;

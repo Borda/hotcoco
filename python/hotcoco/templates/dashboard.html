@@ -78,7 +78,7 @@
         if (typeof Plotly === "undefined") {
             document.addEventListener("DOMContentLoaded", function () {
                 document.querySelectorAll(".js-plotly-plot").forEach(function (el) {
-                    el.innerHTML = '<p style="color: #9a918a; text-align: center; padding: 40px;">' +
+                    el.innerHTML = '<p class="empty-state">' +
                         'Charts unavailable: plotly.js failed to load.</p>';
                 });
             });

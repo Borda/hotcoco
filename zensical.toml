@@ -71,8 +71,8 @@ toggle.icon = "lucide/moon"
 toggle.name = "Switch to dark mode"
 
 [project.theme.font]
-text = "DM Sans"
-code = "JetBrains Mono"
+text = "IBM Plex Sans"
+code = "IBM Plex Mono"
 
 [project.markdown_extensions.attr_list]
 

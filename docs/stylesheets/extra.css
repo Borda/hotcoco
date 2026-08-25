@@ -1,105 +1,119 @@
 /* ============================================================
-   hotcoco — Cold Brew theme
-   Light: stone cream · warm brown nav · steel blue accents
-   Dark:  espresso depths · roast surfaces · dusty steel accents
+   hotcoco — Cyanotype theme
+   Light: silver paper · neutral chrome · Prussian accents
+   Dark:  graphite grounds · neutral chrome · lifted Prussian
+   Canonical spec: .claude/skills/cyanotype/SKILL.md
    ============================================================ */
 
 /* --- Light mode palette --- */
 [data-md-color-scheme="default"] {
-  /* Brand — desaturated warm gray-brown */
-  --md-primary-fg-color:            #4A4540;
-  --md-primary-fg-color--light:     #7A706A;
-  --md-primary-fg-color--dark:      #28231F;
-  --md-accent-fg-color:             #566272;   /* Deep Steel */
-  --md-accent-fg-color--transparent: rgba(86, 98, 114, 0.12);
+  /* Brand — true neutral; the chrome carries no hue at all */
+  --md-primary-fg-color:            #18181A;
+  --md-primary-fg-color--light:     #52525A;
+  --md-primary-fg-color--dark:      #0E0E10;
+  --md-accent-fg-color:             #23467E;   /* Prussian */
+  --md-accent-fg-color--transparent: rgba(35, 70, 126, 0.13);
 
-  /* Surfaces — stone-cream, less yellow */
-  --md-default-bg-color:            #F4F1EE;
-  --md-default-bg-color--light:     #EAE6E1;
-  --md-default-bg-color--lighter:   #F0EDE9;
-  --md-default-fg-color:            #28231F;
-  --md-default-fg-color--light:     #5E554E;
-  --md-default-fg-color--lighter:   #9A908A;
-  --md-default-fg-color--lightest:  #C5BDB6;
+  /* Admonition accents — palette references, so border and tint cannot
+     diverge. Warning is Ochre, not red: red belongs to false positives. */
+  --hc-adm-note:                    #6E6E72;   /* Graphite */
+  --hc-adm-info:                    #23467E;   /* Prussian */
+  --hc-adm-warning:                 #B08A22;   /* Ochre */
+  --hc-adm-tip:                     #2E7A56;   /* Fern */
+
+  /* Surfaces — silver paper */
+  --md-default-bg-color:            #F5F5F4;
+  --md-default-bg-color--light:     #EBEBE9;
+  --md-default-bg-color--lighter:   #F0F0EF;
+  --md-default-fg-color:            #18181A;
+  --md-default-fg-color--light:     #52525A;
+  --md-default-fg-color--lighter:   #66666A;
+  --md-default-fg-color--lightest:  #C2C2C0;
 
   /* Code */
-  --md-code-bg-color:               #EBE6DF;
-  --md-code-fg-color:               #28231F;
+  --md-code-bg-color:               #EBEBE9;
+  --md-code-fg-color:               #18181A;
 
-  /* Syntax tokens — Cold Brew palette */
-  --md-code-hl-color:               rgba(86, 98, 114, 0.14);
-  --md-code-hl-color--light:        rgba(86, 98, 114, 0.08);
-  --md-code-hl-keyword-color:       #566272;
-  --md-code-hl-string-color:        #5D8455;
-  --md-code-hl-comment-color:       #9A8E84;
-  --md-code-hl-number-color:        #A85A35;
-  --md-code-hl-function-color:      #7A5FA0;
-  --md-code-hl-constant-color:      #2E7A8A;
-  --md-code-hl-variable-color:      #4A6B5A;
-  --md-code-hl-special-color:       #A0456A;
-  --md-code-hl-operator-color:      #6A6058;
-  --md-code-hl-punctuation-color:   #857870;
-  --md-code-hl-name-color:          #28231F;
-  --md-code-hl-generic-color:       #857870;
+  /* Syntax tokens — drawn from the Cyanotype chart palette */
+  --md-code-hl-color:               rgba(35, 70, 126, 0.14);
+  --md-code-hl-color--light:        rgba(35, 70, 126, 0.08);
+  --md-code-hl-keyword-color:       #23467E;   /* Prussian */
+  --md-code-hl-string-color:        #2E7A56;   /* Fern */
+  --md-code-hl-comment-color:       #8A8A8E;
+  --md-code-hl-number-color:        #CE6B33;   /* Vermilion */
+  --md-code-hl-function-color:      #7E5580;   /* Plum */
+  --md-code-hl-constant-color:      #3E9AA8;   /* Cerulean */
+  --md-code-hl-variable-color:      #47807B;   /* Viridian */
+  --md-code-hl-special-color:       #9E3B39;   /* Madder */
+  --md-code-hl-operator-color:      #6E6E72;   /* Graphite */
+  --md-code-hl-punctuation-color:   #7A7A7E;
+  --md-code-hl-name-color:          #18181A;
+  --md-code-hl-generic-color:       #7A7A7E;
 
   /* Footer */
-  --md-footer-bg-color:             #28231F;
-  --md-footer-bg-color--dark:       #1C1815;
-  --md-footer-fg-color:             #EAE6E1;
-  --md-footer-fg-color--light:      #B0A89E;
+  --md-footer-bg-color:             #1C1C1E;
+  --md-footer-bg-color--dark:       #141415;
+  --md-footer-fg-color:             #EAEAEA;
+  --md-footer-fg-color--light:      #B0B0B3;
 
-  /* Shadows — cooler tint */
-  --hc-shadow-sm:   0 1px 4px rgba(40, 35, 31, 0.10);
-  --hc-shadow-md:   0 3px 12px rgba(40, 35, 31, 0.13);
-  --hc-shadow-lg:   0 6px 24px rgba(40, 35, 31, 0.16);
+  
+  /* Floating surfaces only; depth otherwise comes from rule weight. */
+  --hc-shadow-sm:   none;
+  --hc-shadow-md:   0 2px 10px rgba(20, 20, 21, 0.10);
+  --hc-shadow-lg:   0 8px 28px rgba(20, 20, 21, 0.12);
 }
 
 /* --- Dark mode palette --- */
 [data-md-color-scheme="slate"] {
-  /* Brand — cooler gray-brown, less red */
-  --md-primary-fg-color:            #948880;
-  --md-primary-fg-color--light:     #B0A89E;
-  --md-primary-fg-color--dark:      #7A706A;
-  --md-accent-fg-color:             #8694A8;   /* Dusty Steel */
-  --md-accent-fg-color--transparent: rgba(134, 148, 168, 0.15);
+  /* Brand — true neutral; the chrome carries no hue at all */
+  --md-primary-fg-color:            #B0B0B3;
+  --md-primary-fg-color--light:     #EAEAEA;
+  --md-primary-fg-color--dark:      #8C8C90;
+  --md-accent-fg-color:             #8FB3E2;   /* Prussian, lifted */
+  --md-accent-fg-color--transparent: rgba(143, 179, 226, 0.15);
 
-  /* Surfaces — espresso browns */
-  --md-default-bg-color:            #1e1914;
-  --md-default-bg-color--light:     #28221a;
-  --md-default-bg-color--lighter:   #221c16;
-  --md-default-fg-color:            #E0D8D0;
-  --md-default-fg-color--light:     #BDB5AC;
-  --md-default-fg-color--lighter:   #857870;
-  --md-default-fg-color--lightest:  #433C38;
+  --hc-adm-note:                    #B4B4B8;   /* Graphite */
+  --hc-adm-info:                    #8FB3E2;   /* Prussian */
+  --hc-adm-warning:                 #DDB855;   /* Ochre */
+  --hc-adm-tip:                     #8FBC96;   /* Fern */
+
+  /* Surfaces — graphite */
+  --md-default-bg-color:            #141415;
+  --md-default-bg-color--light:     #1C1C1E;
+  --md-default-bg-color--lighter:   #242427;
+  --md-default-fg-color:            #EAEAEA;
+  --md-default-fg-color--light:     #B0B0B3;
+  --md-default-fg-color--lighter:   #8C8C90;
+  --md-default-fg-color--lightest:  #3E3E43;
 
   /* Code */
-  --md-code-bg-color:               #28221a;
-  --md-code-fg-color:               #E0D8D0;
+  --md-code-bg-color:               #242427;
+  --md-code-fg-color:               #EAEAEA;
 
-  /* Syntax tokens — Cold Brew dark */
-  --md-code-hl-color:               rgba(134, 148, 168, 0.18);
-  --md-code-hl-color--light:        rgba(134, 148, 168, 0.10);
-  --md-code-hl-keyword-color:       #8694A8;
-  --md-code-hl-string-color:        #90B880;
-  --md-code-hl-comment-color:       #756A62;
-  --md-code-hl-number-color:        #D89070;
-  --md-code-hl-function-color:      #C0A0D8;
-  --md-code-hl-constant-color:      #70C0C8;
-  --md-code-hl-variable-color:      #88B890;
-  --md-code-hl-special-color:       #D09090;
-  --md-code-hl-operator-color:      #9A9090;
-  --md-code-hl-punctuation-color:   #887E78;
-  --md-code-hl-name-color:          #E0D8D0;
-  --md-code-hl-generic-color:       #887E78;
+  /* Syntax tokens — the Cyanotype dark chart palette */
+  --md-code-hl-color:               rgba(143, 179, 226, 0.18);
+  --md-code-hl-color--light:        rgba(143, 179, 226, 0.10);
+  --md-code-hl-keyword-color:       #8FB3E2;   /* Prussian */
+  --md-code-hl-string-color:        #8FBC96;   /* Fern */
+  --md-code-hl-comment-color:       #76767A;
+  --md-code-hl-number-color:        #F0A050;   /* Vermilion */
+  --md-code-hl-function-color:      #B189B3;   /* Plum */
+  --md-code-hl-constant-color:      #74C4D2;   /* Cerulean */
+  --md-code-hl-variable-color:      #79B4AE;   /* Viridian */
+  --md-code-hl-special-color:       #D9736E;   /* Madder */
+  --md-code-hl-operator-color:      #B4B4B8;   /* Graphite */
+  --md-code-hl-punctuation-color:   #8C8C90;
+  --md-code-hl-name-color:          #EAEAEA;
+  --md-code-hl-generic-color:       #8C8C90;
 
   /* Footer */
-  --md-footer-bg-color:             #16120e;
-  --md-footer-bg-color--dark:       #100d0a;
-  --md-footer-fg-color:             #D0C8C0;
-  --md-footer-fg-color--light:      #857870;
+  --md-footer-bg-color:             #1C1C1E;
+  --md-footer-bg-color--dark:       #141415;
+  --md-footer-fg-color:             #EAEAEA;
+  --md-footer-fg-color--light:      #8C8C90;
 
   /* Shadows */
-  --hc-shadow-sm:   0 1px 4px rgba(0, 0, 0, 0.30);
+  --hc-shadow-sm:   none;
   --hc-shadow-md:   0 3px 12px rgba(0, 0, 0, 0.40);
   --hc-shadow-lg:   0 6px 24px rgba(0, 0, 0, 0.50);
 }
@@ -232,73 +246,40 @@
   background-color: transparent !important;
 }
 
-/* Note: warm mocha tan — whole box tinted so it reads against the page */
+/* Admonition accents. Border and tint both come from one --hc-adm-* token per
+   type, so they cannot diverge the way they did under the previous palette.
+   The scheme split lives in the palette blocks, not here. */
 .md-typeset .admonition.note,
 .md-typeset details.note {
-  border-color: #9B7B55;
-  background-color: rgba(155, 123, 85, 0.09) !important;
+  border-color: var(--hc-adm-note);
+  background-color: color-mix(in srgb, var(--hc-adm-note) 9%, transparent) !important;
 }
 .md-typeset .admonition.note > .admonition-title::before,
-.md-typeset details.note > summary::before { background-color: #9B7B55; }
+.md-typeset details.note > summary::before { background-color: var(--hc-adm-note); }
 
-[data-md-color-scheme="slate"] .md-typeset .admonition.note,
-[data-md-color-scheme="slate"] .md-typeset details.note {
-  border-color: #C4A882;
-  background-color: rgba(196, 168, 130, 0.10) !important;
-}
-[data-md-color-scheme="slate"] .md-typeset .admonition.note > .admonition-title::before,
-[data-md-color-scheme="slate"] .md-typeset details.note > summary::before { background-color: #C4A882; }
-
-/* Info: steel blue */
 .md-typeset .admonition.info,
 .md-typeset details.info {
-  border-color: #566272;
-  background-color: rgba(86, 98, 114, 0.09) !important;
+  border-color: var(--hc-adm-info);
+  background-color: color-mix(in srgb, var(--hc-adm-info) 9%, transparent) !important;
 }
 .md-typeset .admonition.info > .admonition-title::before,
-.md-typeset details.info > summary::before { background-color: #566272; }
+.md-typeset details.info > summary::before { background-color: var(--hc-adm-info); }
 
-[data-md-color-scheme="slate"] .md-typeset .admonition.info,
-[data-md-color-scheme="slate"] .md-typeset details.info {
-  border-color: #8694A8;
-  background-color: rgba(134, 148, 168, 0.10) !important;
-}
-[data-md-color-scheme="slate"] .md-typeset .admonition.info > .admonition-title::before,
-[data-md-color-scheme="slate"] .md-typeset details.info > summary::before { background-color: #8694A8; }
-
-/* Warning: warm clay */
 .md-typeset .admonition.warning,
 .md-typeset details.warning {
-  border-color: #B05A35;
-  background-color: rgba(176, 90, 53, 0.09) !important;
+  border-color: var(--hc-adm-warning);
+  background-color: color-mix(in srgb, var(--hc-adm-warning) 9%, transparent) !important;
 }
 .md-typeset .admonition.warning > .admonition-title::before,
-.md-typeset details.warning > summary::before { background-color: #B05A35; }
+.md-typeset details.warning > summary::before { background-color: var(--hc-adm-warning); }
 
-[data-md-color-scheme="slate"] .md-typeset .admonition.warning,
-[data-md-color-scheme="slate"] .md-typeset details.warning {
-  border-color: #E0956A;
-  background-color: rgba(224, 149, 106, 0.10) !important;
-}
-[data-md-color-scheme="slate"] .md-typeset .admonition.warning > .admonition-title::before,
-[data-md-color-scheme="slate"] .md-typeset details.warning > summary::before { background-color: #E0956A; }
-
-/* Tip: sage green */
 .md-typeset .admonition.tip,
 .md-typeset details.tip {
-  border-color: #5D8455;
-  background-color: rgba(93, 132, 85, 0.09) !important;
+  border-color: var(--hc-adm-tip);
+  background-color: color-mix(in srgb, var(--hc-adm-tip) 9%, transparent) !important;
 }
 .md-typeset .admonition.tip > .admonition-title::before,
-.md-typeset details.tip > summary::before { background-color: #5D8455; }
-
-[data-md-color-scheme="slate"] .md-typeset .admonition.tip,
-[data-md-color-scheme="slate"] .md-typeset details.tip {
-  border-color: #90B880;
-  background-color: rgba(144, 184, 128, 0.10) !important;
-}
-[data-md-color-scheme="slate"] .md-typeset .admonition.tip > .admonition-title::before,
-[data-md-color-scheme="slate"] .md-typeset details.tip > summary::before { background-color: #90B880; }
+.md-typeset details.tip > summary::before { background-color: var(--hc-adm-tip); }
 
 /* ============================================================
    Content tabs

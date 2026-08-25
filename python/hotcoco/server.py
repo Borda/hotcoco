@@ -144,7 +144,7 @@ def create_app(
 
     app = FastAPI(title="hotcoco browse")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-    # Vendored DM Sans (shared with the PDF report) — base.html's @font-face
+    # Vendored body faces (shared with the PDF report) — base.html's @font-face
     # rules point here so the UI has no font CDN dependency.
     app.mount("/fonts", StaticFiles(directory=str(_HERE / "_fonts")), name="fonts")
 
