@@ -11,6 +11,7 @@ from .core import (
     TIDE_ERROR_ORDER,
     _annotate_f1_peak,
     _configure_axes,
+    _headroom_for_bar_labels,
     _import_mpl,
     _mask_invalid_prec,
     _new_figure,
@@ -18,7 +19,7 @@ from .core import (
     _top_confusion_keep,
 )
 from .data import PlotData
-from .theme import _build_rc, _get_theme
+from .theme import CHROME, _build_rc, _get_theme
 
 
 def pr_curve_iou_sweep(
@@ -397,14 +398,26 @@ def confusion_matrix(
 
         im = ax.imshow(data, aspect="equal", vmin=0, vmax=vmax, interpolation="none")
 
-        thresh = data.max() / 2.0
         suppress = 0.01 if normalize else 1
+
+        def _ink(value: float) -> str:
+            """Pick the ink that survives on this cell.
+
+            Driven by the cell's own luminance, not the theme: on a light theme
+            the high cells are dark navy and on a dark theme they are bright
+            steel, so a fixed "white for high values" is wrong in one of them.
+            """
+            r, g, b, _ = im.cmap(im.norm(value))
+            chan = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b)]
+            lum = 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+            return CHROME["plot_bg"] if lum < 0.45 else CHROME["text"]
+
         for i in range(n):
             for j in range(n):
                 val = data[i, j]
                 if val < suppress:
                     continue
-                color = "white" if val > thresh else mpl.rcParams["text.color"]
+                color = _ink(val)
                 text = f"{val:.2f}" if normalize else f"{int(val)}"
                 ax.text(j, i, text, ha="center", va="center", color=color, fontsize=max(5, min(9, 100 / n)))
 
@@ -494,6 +507,7 @@ def top_confusions(
         fig, ax = _new_figure((8, max(4, 0.35 * num_bars)), ax)
         bars = ax.barh(range(num_bars), counts, height=0.7)
         ax.bar_label(bars, labels=[str(c) for c in counts], fontsize=8, padding=3)
+        _headroom_for_bar_labels(ax, counts)
 
         ax.set_yticks(range(num_bars))
         ax.set_yticklabels(bar_labels)
@@ -562,6 +576,7 @@ def per_category_ap(
 
         bar_labels = [f"{v:.2f}" if n != "..." else "" for n, v in zip(names, values)]
         ax.bar_label(bars, labels=bar_labels, fontsize=7.5, padding=3)
+        _headroom_for_bar_labels(ax, values)
 
         real_values = [v for n, v in zip(names, values) if n != "..."]
         mean_ap = sum(real_values) / len(real_values) if real_values else 0
@@ -616,6 +631,7 @@ def tide_errors(
         fig, ax = _new_figure((8, 4), ax)
         bars = ax.barh(range(len(error_types)), values, height=0.6)
         ax.bar_label(bars, labels=[f"{v:.3f}" for v in values], fontsize=9, padding=3)
+        _headroom_for_bar_labels(ax, values)
 
         ax.set_yticks(range(len(error_types)))
         ax.set_yticklabels(error_types)

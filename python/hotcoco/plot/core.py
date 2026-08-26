@@ -51,13 +51,9 @@ def _resolve_font_family() -> list[str]:
 
     # Only name families matplotlib can actually resolve. Listing a missing one
     # emits a `findfont` warning per text object — hundreds per figure — so the
-    # preference order is filtered against what is installed or vendored.
-    #
-    # "IBM Plex Sans" is Cyanotype's body face but is not vendored yet, so today
-    # this resolves to the "DM Sans" still in _fonts/. Remove "DM Sans" from the
-    # list when the Plex TTFs land; scripts/test_theme.py asserts which face
-    # actually wins.
-    preferred = ["IBM Plex Sans", "DM Sans", "Helvetica Neue", "DejaVu Sans"]
+    # preference order is filtered against what is installed or vendored rather
+    # than asserted. scripts/test_theme.py checks which face actually wins.
+    preferred = ["IBM Plex Sans", "Helvetica Neue", "DejaVu Sans"]
     try:
         available = {f.name for f in font_manager.fontManager.ttflist}
     except Exception:
@@ -71,6 +67,29 @@ def _resolve_font_family() -> list[str]:
 # ---------------------------------------------------------------------------
 # Figure / axes helpers
 # ---------------------------------------------------------------------------
+
+
+def _headroom_for_bar_labels(ax, values, axis: str = "x", frac: float = 0.14) -> None:
+    """Leave room past the longest bar for its `bar_label` text.
+
+    `bar_label(padding=...)` places the text outside the bar end but does not
+    widen the axes, so the label on the longest bar runs into the margin and
+    clips. The needed room depends on the rendered width of the digits, which
+    changes with the body face — this keeps the figures font-independent rather
+    than tuned to whichever face is vendored.
+    """
+    finite = [v for v in values if v is not None and v == v]
+    if not finite:
+        return
+    lo, hi = min(0.0, min(finite)), max(0.0, max(finite))
+    span = hi - lo
+    if span <= 0:
+        return
+    pad = span * frac
+    if axis == "x":
+        ax.set_xlim(lo - (pad if lo < 0 else 0), hi + pad)
+    else:
+        ax.set_ylim(lo - (pad if lo < 0 else 0), hi + pad)
 
 
 def _new_figure(figsize: tuple[float, float], ax=None, layout: str | None = "constrained"):

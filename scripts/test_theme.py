@@ -128,3 +128,21 @@ def test_red_belongs_to_false_positives():
     """Cyanotype's second rule: the signature gave up red so FP could own it."""
     assert not _same(TOKENS["--accent"], EVAL_COLORS_DARK["fp"])
     assert not _same(TOKENS["--caveat"], EVAL_COLORS_DARK["fp"])
+
+
+def test_matplotlib_actually_uses_the_body_face():
+    """Cyanotype's body face must win, not merely appear in the stack."""
+    from hotcoco.plot.core import _resolve_font_family
+
+    assert _resolve_font_family()[0] == "IBM Plex Sans"
+
+
+def test_the_vendored_weights_cover_what_the_code_asks_for():
+    """style.css and plot/core.py request 400/500/600; all three must ship."""
+    from matplotlib import font_manager
+
+    weights = {
+        font_manager.ttfFontProperty(font_manager.get_font(str(ttf))).weight
+        for ttf in sorted(FONTS_DIR.glob("IBMPlexSans-*.ttf"))
+    }
+    assert {400, 500, 600} <= weights, f"vendored weights: {sorted(weights)}"

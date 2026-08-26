@@ -333,7 +333,7 @@ function drawOverlays(canvas, img) {
     // Loop-invariant: both depend only on state.scale, and this runs on a
     // requestAnimationFrame path, so they are hoisted out of the draw loop.
     const fontSize = Math.max(MIN_FONT_SIZE, BASE_FONT_SIZE / state.scale);
-    ctx.font = `600 ${fontSize}px "IBM Plex Sans", "DM Sans", -apple-system, sans-serif`;
+    ctx.font = `600 ${fontSize}px "IBM Plex Sans", -apple-system, sans-serif`;
 
     for (let i = 0; i < state.annotations.length; i++) {
         const ann = state.annotations[i];

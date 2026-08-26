@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `EVAL_COLORS_DARK`** joined the public palette constants in `hotcoco.plot`,
   for styling a dark surface matplotlib does not own. The Plotly dashboard now
   derives its chrome and colorway from them instead of holding literal copies.
+- **Confusion matrix cell annotations pick their ink from the cell's own
+  luminance** rather than a hardcoded "white above the midpoint", which was
+  wrong on any colormap whose high end is light — as `cyanotype-dark`'s is.
+- **Bar-chart value labels get axis headroom.** `bar_label` places text past the
+  bar end without widening the axes, so the longest bar's label clipped. The
+  headroom is computed from the data, not tuned to a font.
+- **IBM Plex Sans is vendored** at 400/500/600 in `python/hotcoco/_fonts/`,
+  replacing the DM Sans the previous design system shipped. Shipped unmodified —
+  "Plex" is an OFL Reserved Font Name, so a subset could not keep the family
+  name. The browse UI, the PDF report, and matplotlib now all render Cyanotype's
+  real body face with no CDN dependency.
 - **`scripts/test_theme.py`** asserts the browse CSS tokens, the dashboard
   constants, and the vendored font files agree with `plot/theme.py`. The design
   system was previously a markdown convention with nothing enforcing it.

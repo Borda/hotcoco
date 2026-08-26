@@ -6,17 +6,15 @@
     <title>hotcoco — dataset browser</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥥</text></svg>">
     <style>
-    /* Body faces are vendored in python/hotcoco/_fonts and served at /fonts —
-       the browser UI must render offline, with no CDN dependency.
-
-       Cyanotype's body face is IBM Plex Sans, which is NOT yet vendored; until
-       it is, --font-body falls through to the DM Sans served here. Adding an
-       @font-face for Plex before the file exists would 404 on every page load,
-       so the rules land with the TTFs. Instrument Serif (display) and IBM Plex
+    /* IBM Plex Sans is vendored in python/hotcoco/_fonts and served at /fonts —
+       the browser UI must render offline, with no CDN dependency. Shipped
+       unmodified: "Plex" is an OFL Reserved Font Name, so a subset could not
+       keep the name. SemiBold covers 600-700; there is no Bold weight, which is
+       a deliberate choice for UI type. Instrument Serif (display) and IBM Plex
        Mono fall back to the system serif/mono stacks style.css declares. */
-    @font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans-Regular.ttf') format('truetype'); font-weight: 300 400; font-style: normal; font-display: swap; }
-    @font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
-    @font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans-Bold.ttf') format('truetype'); font-weight: 600 700; font-style: normal; font-display: swap; }
+    @font-face { font-family: 'IBM Plex Sans'; src: url('/fonts/IBMPlexSans-Regular.ttf') format('truetype'); font-weight: 300 400; font-style: normal; font-display: swap; }
+    @font-face { font-family: 'IBM Plex Sans'; src: url('/fonts/IBMPlexSans-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+    @font-face { font-family: 'IBM Plex Sans'; src: url('/fonts/IBMPlexSans-SemiBold.ttf') format('truetype'); font-weight: 600 700; font-style: normal; font-display: swap; }
     </style>
     <link rel="stylesheet" href="/static/style.css">
     <script src="/static/htmx.min.js"></script>

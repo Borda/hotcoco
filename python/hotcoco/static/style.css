@@ -56,9 +56,7 @@
     --radius-lg: 4px;
 
     --font-display: 'Instrument Serif', 'Times New Roman', Times, serif;
-    /* 'DM Sans' is what _fonts/ actually vendors today; it is the fallback
-       until the IBM Plex Sans TTFs land, then it comes out of the stack. */
-    --font-body: 'IBM Plex Sans', 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
 
     /* Floating surfaces only — dropdown panels, modals. A card in normal flow
