@@ -1,4 +1,4 @@
-# Framework Integrations
+# Framework integrations
 
 hotcoco works as a drop-in replacement for pycocotools in any framework that uses it internally. The standard approach is one line at the top of your script — no other changes needed.
 
@@ -14,7 +14,7 @@ This patches `sys.modules` so that `from pycocotools.coco import COCO` and simil
 | Detectron2 | pycocotools | Yes |
 | MMDetection | pycocotools (default) | Yes (default path) |
 | RF-DETR | pycocotools | Yes |
-| Ultralytics YOLO | Internal (custom) | No — see below |
+| Ultralytics YOLO | Internal (custom) | No — see [Ultralytics YOLO](#ultralytics-yolo) |
 
 ---
 

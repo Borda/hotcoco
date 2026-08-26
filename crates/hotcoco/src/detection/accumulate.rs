@@ -402,7 +402,7 @@ impl EvalShape {
 ///
 /// Precision and scores are stored as flat 5-D arrays with shape `[T x R x K x A x M]`.
 /// Recall is a flat 4-D array with shape `[T x K x A x M]`. Values of -1.0 indicate
-/// that no data was available for that combination (e.g. a category with no GT instances).
+/// that no data was available for that combination — a category with no GT instances, for example.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AccumulatedEval {

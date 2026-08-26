@@ -14,7 +14,7 @@ Low-level mask operations on Run-Length Encoded (RLE) binary masks.
     use hotcoco::mask;
     ```
 
-For background on RLE and usage patterns, see the [Mask Operations](../guide/masks.md) guide.
+For background on RLE and usage patterns, see the [Mask operations](../guide/masks.md) guide.
 
 !!! tip "pycocotools drop-in"
     The Python `mask` module is a drop-in replacement for `pycocotools.mask`.

@@ -119,7 +119,7 @@ impl Hierarchy {
     /// Parse an Open Images hierarchy JSON string.
     ///
     /// The JSON has a nested structure with `LabelName` and `Subcategory` fields.
-    /// `label_to_id` maps OID label strings (e.g. "/m/0jbk") to category IDs.
+    /// `label_to_id` maps OID label strings such as "/m/0jbk" to category IDs.
     /// Labels not found in `label_to_id` get virtual nodes.
     pub fn from_oid_json(
         json: &str,

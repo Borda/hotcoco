@@ -1,4 +1,4 @@
-# Dataset Browser
+# Dataset browser
 
 hotcoco ships a lightweight visual browser for COCO datasets — no FiftyOne, no heavy
 dependencies. Two entry points:

@@ -58,7 +58,7 @@ def _dark_layout(**overrides):
 
     We set all dark-theme colors manually instead of using
     ``template="plotly_dark"`` because the built-in template embeds
-    defaults for every trace type (scatter3d, scattergeo, mesh3d, etc.).
+    defaults for every trace type: scatter3d, scattergeo, mesh3d, and the rest.
     The cartesian partial bundle doesn't include those trace modules, so
     Plotly.js errors out trying to register them and nothing renders.
 

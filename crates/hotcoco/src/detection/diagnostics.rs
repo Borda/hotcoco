@@ -66,7 +66,7 @@ pub struct ImageSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LabelErrorType {
     /// A high-confidence detection overlaps a GT of a different category.
-    /// Suggests the GT label may be wrong.
+    /// Suggests the GT label is wrong.
     WrongLabel,
     /// A high-confidence detection has no nearby GT at all.
     /// Suggests a missing annotation in the ground truth.

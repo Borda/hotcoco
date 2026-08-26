@@ -396,7 +396,7 @@ impl PyCOCO {
 
     /// Validate this dataset for structural errors, quality warnings, and
     /// distribution issues. If ``dt`` is provided, also checks GT/DT compatibility
-    /// (e.g., mismatched image or category IDs).
+    /// such as mismatched image or category IDs.
     ///
     /// Returns a dict with ``"errors"``, ``"warnings"``, and ``"summary"`` keys.
     #[pyo3(signature = (dt=None))]
@@ -408,7 +408,7 @@ impl PyCOCO {
         serde_to_py(py, &report)
     }
 
-    /// Filter the dataset by category, image, and/or annotation area.
+    /// Filter the dataset by category, by image, by annotation area, or by any combination.
     ///
     /// Returns a new `COCO` with matching annotations. Images with no matching
     /// annotations are dropped unless `drop_empty_images=False`.
@@ -558,7 +558,7 @@ impl PyCOCO {
     /// Convert this dataset to YOLO label format.
     ///
     /// Writes one ``.txt`` label file per image into ``output_dir`` (named by
-    /// the image filename stem, e.g. ``000042.jpg`` → ``000042.txt``), plus a
+    /// the image filename stem: ``000042.jpg`` → ``000042.txt``), plus a
     /// ``data.yaml`` file listing the categories.
     ///
     /// Each label line: ``class_idx cx cy w h`` with coordinates normalized to
@@ -1223,7 +1223,7 @@ impl PyCOCO {
 // Params
 // ---------------------------------------------------------------------------
 
-#[doc = "Evaluation parameters controlling IoU thresholds, area ranges, etc.
+#[doc = "Evaluation parameters controlling IoU thresholds, area ranges, and max detections.
 
 Attribute reads return **copies**: ``p.max_dets.append(200)`` appends to a
 temporary list and is a silent no-op. Assign the whole attribute instead —
@@ -1491,7 +1491,7 @@ impl PyHierarchy {
     /// path : str
     ///     Path to the OID hierarchy JSON file (``LabelName``/``Subcategory`` format).
     /// label_to_id : dict, optional
-    ///     Maps OID label strings (e.g. ``"/m/dog"``) to category IDs.
+    ///     Maps OID label strings such as ``"/m/dog"`` to category IDs.
     ///     If ``None``, all labels get virtual node IDs.
     #[staticmethod]
     #[pyo3(signature = (path, label_to_id=None))]
@@ -1801,11 +1801,11 @@ Standard COCO bbox/segm returns 12 keys, keypoints 10, LVIS 13.
 
 Each dict describes one row of the summary table:
 
-- ``name``: ``str`` — the key in ``get_results()``, e.g. ``'AP50'``, ``'ARs'``.
+- ``name``: ``str`` — the key in ``get_results()``, such as ``'AP50'`` or ``'ARs'``.
 - ``ap``: ``bool`` — ``True`` for Average Precision, ``False`` for Average Recall.
 - ``iou_thr``: ``float | None`` — a single IoU threshold, or ``None`` when the
   metric averages over the whole sweep.
-- ``area``: ``str`` — area-range label, e.g. ``'all'``, ``'small'``.
+- ``area``: ``str`` — area-range label, such as ``'all'`` or ``'small'``.
 - ``max_det``: ``int`` — detections per image this metric allows.
 - ``freq_group``: ``str | None`` — ``'rare'``, ``'common'`` or ``'frequent'`` for
   the LVIS frequency-bucket APs, ``None`` otherwise. When set, the other axes
@@ -1950,7 +1950,7 @@ str
         Ok(value.as_str().unwrap_or("extension").to_string())
     }
 
-    #[doc = "Whether these numbers may be presented as leaderboard-comparable.
+    #[doc = "Whether these numbers can be presented as leaderboard-comparable.
 
 The predicate behind ``provenance()``, exposed so renderers do not re-derive it
 with a string compare. Default-deny: only a parity-verified configuration
@@ -1998,7 +1998,7 @@ Must be called after ``summarize()`` (or ``run()``). Returns a dict with:
 
 - ``hotcoco_version``: hotcoco version string that produced these results.
 - ``params``: evaluation parameters (iou_type, iou_thresholds, area_ranges, max_dets)
-- ``metrics``: summary metrics (AP, AP50, AP75, etc.)
+- ``metrics``: summary metrics (AP, AP50, AP75, and the rest)
 - ``per_class``: per-category AP values (only if ``per_class=True``)
 
 Parameters
@@ -2063,7 +2063,7 @@ Returns
 dict[str, float]
     For ``beta=1.0``: ``{\"F1\": ..., \"F1_50\": ..., \"F1_75\": ...}``.
     For other beta values: ``{\"F<beta>\": ..., \"F<beta>_50\": ..., \"F<beta>_75\": ...}``
-    — e.g. ``F0.5``, ``F0.5_50``, ``F0.5_75``.
+    — for example ``F0.5``, ``F0.5_50``, ``F0.5_75``.
     Returns an empty dict if ``accumulate()`` has not been run.
 
 Examples
@@ -2175,7 +2175,7 @@ Examples
 
 Unlike ``evaluate()``, this method compares **all** detections in an image against
 **all** ground truth boxes regardless of category, enabling cross-category confusion
-analysis (e.g. the model keeps predicting ``dog`` on ``cat`` ground truth).
+analysis — the model keeps predicting ``dog`` on ``cat`` ground truth, say.
 
 This method is standalone — no ``evaluate()`` call is needed first.
 
@@ -2672,7 +2672,7 @@ fn accumulated_eval_to_py(
 // Module
 // ---------------------------------------------------------------------------
 
-/// Patch `sys.modules` so that `from pycocotools.coco import COCO` etc.
+/// Patch `sys.modules` so that `from pycocotools.coco import COCO` and friends
 /// transparently use hotcoco.
 ///
 /// The submodule names are also set as *attributes* on the hotcoco module:
@@ -2695,7 +2695,7 @@ fn init_as_pycocotools(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
-/// Patch `sys.modules` so that `from lvis import LVIS, LVISEval, LVISResults` etc.
+/// Patch `sys.modules` so that `from lvis import LVIS, LVISEval, LVISResults`
 /// transparently use hotcoco.
 ///
 /// After calling this, existing Detectron2 / MMDetection LVIS pipelines work
@@ -2744,7 +2744,7 @@ fn init_as_lvis(py: Python<'_>) -> PyResult<()> {
 /// seed : int
 ///     Random seed for bootstrap reproducibility.
 /// confidence : float
-///     Confidence level for bootstrap intervals (e.g. 0.95 for 95% CI).
+///     Confidence level for bootstrap intervals, for example 0.95 for a 95% CI.
 ///
 /// Returns
 /// -------

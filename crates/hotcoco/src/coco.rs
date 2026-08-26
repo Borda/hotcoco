@@ -86,10 +86,10 @@ impl ResultKind {
 /// Python emits these bare tokens by default and reads them back, so files
 /// produced by pycocotools / numpy pipelines frequently contain them, even
 /// though they are not valid JSON. serde_json (correctly) rejects them. To load
-/// such files we rewrite each non-finite token to `null` — which serde also
+/// such files, each non-finite token is rewritten to `null` — which serde also
 /// uses when *serializing* a non-finite `f64` — but only when the token appears
 /// outside a JSON string, so string values that merely contain the substring
-/// `"NaN"`/`"Infinity"` (e.g. a file name) are left untouched. On `Option<f64>`
+/// `"NaN"`/`"Infinity"` — a file name, say — are left untouched. On `Option<f64>`
 /// fields (`area`, `score`) the `null` deserializes to `None`.
 ///
 /// Returns the input unchanged and borrowed (no allocation) when it contains no

@@ -48,7 +48,7 @@
 //! `1.0`: the intersection width `(x + w) - x` does not round-trip to `w`, and
 //! pycocotools computes it the same way. A *clamped* caller therefore still
 //! matches exact duplicates at `t == 1.0`; an unclamped caller comparing against
-//! a raw `1.0` may not. For sub-pixel geometry the drift can fall below even the
+//! a raw `1.0` might not. For sub-pixel geometry the drift can fall below even the
 //! clamped floor. Both regimes are pinned by
 //! `sim::tests::bbox_iou_algebraic_properties` and
 //! `sim::tests::self_iou_degrades_for_subpixel_boxes`.
@@ -264,7 +264,7 @@ pub struct GtMasks<'a> {
 /// Only if phase 1 finds nothing does phase 2 scan the ignored GTs. A GT already
 /// matched is skipped unless `masks.rematchable[gi]` (crowd GTs, which multiple
 /// detections may match). Phase 2 additionally skips any GT with
-/// `masks.phase2_eligible[gi] == false` (e.g. OID group-of, matched in a separate
+/// `masks.phase2_eligible[gi] == false` — OID group-of boxes, for instance, matched in a separate
 /// driver pass). Among equal IoUs the later GT index wins — matching
 /// pycocotools' `>=` update rule, which is observable through `evalImgs`.
 ///

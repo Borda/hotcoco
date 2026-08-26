@@ -107,7 +107,7 @@ pub(crate) const KPT_OKS_SIGMAS: [f64; 17] = [
 ///
 /// One ulp sounds harmless and is not, on the recall grid. `rc[d] = tp / num_gt`
 /// is a ratio of small integers, so it lands *exactly* on a grid point often: at
-/// `num_gt = 20, tp = 7` the recall equals our old `rec_thrs[35]` bit-for-bit
+/// `num_gt = 20, tp = 7` the recall equals the old `rec_thrs[35]` bit-for-bit
 /// while sitting strictly below numpy's. The two-pointer scan in
 /// [`metrics::counts`](crate::metrics::counts) then stops one detection earlier
 /// and reports a slightly different precision there. Neither grid is more

@@ -1,4 +1,4 @@
-# Dataset Operations
+# Dataset operations
 
 hotcoco can do more than evaluate — it can reshape your datasets before evaluation starts.
 

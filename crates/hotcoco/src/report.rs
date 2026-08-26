@@ -25,10 +25,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Where a set of numbers came from, and therefore how much they may be trusted
+/// Where a set of numbers came from, and therefore how far they can be trusted
 /// to match a published leaderboard.
 ///
-/// `#[non_exhaustive]`: families may need to describe provenance we have not
+/// `#[non_exhaustive]`: a family might need to describe provenance this enum has not
 /// anticipated, and adding a variant must not be a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 pub enum Provenance {
     /// Verified against the reference implementation for this metric family —
     /// pycocotools, panopticapi, TrackEval — within its documented tolerance.
-    /// These are the numbers you may compare against a leaderboard.
+    /// These are the numbers you can compare against a leaderboard.
     ParityVerified,
     /// A hotcoco extension: a real metric computed over a geometry or
     /// configuration the reference implementation does not support, such as
@@ -50,7 +50,7 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    /// Whether these numbers may be presented as benchmark-standard.
+    /// Whether these numbers can be presented as benchmark-standard.
     pub fn is_benchmark_standard(self) -> bool {
         matches!(self, Provenance::ParityVerified)
     }
@@ -68,7 +68,7 @@ pub struct EvalReport {
     pub task: String,
     /// See [`Provenance`]. Set by the producer; never inferred by a renderer.
     pub provenance: Provenance,
-    /// Headline metrics, e.g. `AP`, `AP50`, `ARl`. `BTreeMap` so serialization
+    /// Headline metrics such as `AP`, `AP50`, `ARl`. `BTreeMap` so serialization
     /// is key-ordered and therefore diffable.
     pub metrics: BTreeMap<String, f64>,
     /// Per-class breakdown: class name -> metric name -> value.
@@ -86,7 +86,7 @@ pub struct EvalReport {
     ///
     /// A curve holds **y-values only**; its x-axis is a sibling entry in this
     /// same map, so the two ship together and cannot drift. Detection writes
-    /// `pr@<iou>` keys (e.g. `"pr@0.50"`) holding precision sampled on the
+    /// `pr@<iou>` keys such as `"pr@0.50"`, holding precision sampled on the
     /// recall grid, and stores that grid under `"rec_thrs"` — by default the
     /// 101-point COCO grid from [`crate::params::default_rec_thrs`]. Every
     /// `pr@` curve has the same length as `"rec_thrs"` and is index-aligned

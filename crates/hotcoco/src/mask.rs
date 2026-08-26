@@ -1,4 +1,4 @@
-//! Pure Rust implementation of COCO mask operations (RLE encoding/decoding, IoU, merge, etc.)
+//! Pure Rust implementation of COCO mask operations: RLE encoding and decoding, IoU, merge, and area.
 //!
 //! This is a faithful port of the C `maskApi.c` from pycocotools/cocoapi.
 //! The scan-line polygon rasterization and LEB128-like string encoding match

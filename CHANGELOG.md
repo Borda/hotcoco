@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`STYLE.md`** — the documentation style authority. hotcoco now follows the
+  [Google developer documentation style guide](https://developers.google.com/style);
+  `STYLE.md` records the rules that come up most (sentence-case headings, no
+  `e.g.`/`i.e.`/`etc.`, `might` for possibility and `may` only for permission, no
+  "see below", descriptive link text) and the deliberate deviations — spaced em
+  dashes stay, and `//` implementation comments are out of scope. Referenced from
+  `CONTRIBUTING.md`, `CLAUDE.md`, and the `docs` skill, which gained a diff-grep
+  for the words-to-avoid list. No linter enforces it: Vale was evaluated and
+  removed as too noisy for a single-contributor repo.
 - **The Cyanotype design system**, replacing Cold Brew across every visual
   surface — browse UI, docs site, matplotlib, and the Plotly dashboard. Grounds
   are true-neutral silver in both modes, the signature is Prussian blue
@@ -269,6 +278,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Every documentation surface was brought onto the Google style guide.** Page
+  titles, section headings, and `zensical.toml` nav labels moved to sentence case
+  (`# Mask operations`, `# Working with results`); `&` became `and` in headings and
+  bullet labels, which moves those anchors, so the two inbound links to
+  `#per-image-diagnostics-label-error-detection` were repointed and every
+  cross-reference's link text was realigned to the renamed titles. 21 instances of
+  `e.g.`/`i.e.`/`etc.` and 16 "see below"/"the run above" spatial references were
+  rewritten to `for example`/`such as` and named-section links. The same pass ran
+  over `///` and `//!` doc comments, PyO3 `#[doc]` strings, Python docstrings,
+  `.pyi` stubs, and CLI `help=` text — 58 files in all.
+- **The `iou_thrs` deviation warning reads `lines might show -1.000`**, not `may
+  show`. `may` denotes permission; possibility is `might`. The string is quoted
+  verbatim in `docs/api/cocoeval.md`, so both moved together.
 - **BREAKING: the plot theme `"cold-brew"` is renamed `"cyanotype"`.** The old
   name raises `ValueError`. The registered colormap is renamed to match:
   `hotcoco_coldbrew` → `hotcoco_cyanotype`. Callers passing the old string must

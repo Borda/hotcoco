@@ -4744,7 +4744,7 @@ fn test_dota_round_trip_integration() {
 /// `Params::max_det()`'s fallback cap (100), and with no M slots to report,
 /// every summary stat is the `-1.0` "not computed" sentinel — the same
 /// degradation a missing area label or IoU threshold gets. (This used to be an
-/// `assert!` panic, the only abort on a path whose siblings all degrade.)
+/// `assert!` panic, the only hard stop on a path whose siblings all degrade.)
 /// The deeper end-to-end coverage lives in `tests/detection_fixes.rs`.
 #[test]
 fn test_empty_max_dets_degrades_gracefully() {

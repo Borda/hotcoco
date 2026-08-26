@@ -15,7 +15,7 @@ pub struct Dataset {
     pub licenses: Vec<License>,
 }
 
-/// Dataset metadata (version, description, date, etc.).
+/// Dataset metadata: version, description, date, and the rest of the `info` block.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
     #[serde(default)]
@@ -100,7 +100,7 @@ pub struct Annotation {
 
 /// Deserialize `iscrowd` from either a boolean or an integer (0/1).
 ///
-/// COCO JSON files use both representations, so we accept either.
+/// COCO JSON files use both representations, so both are accepted.
 fn deserialize_iscrowd<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -226,7 +226,7 @@ impl<'de> Deserialize<'de> for Segmentation {
     }
 }
 
-/// An object category (e.g. "person", "car").
+/// An object category, such as "person" or "car".
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Category {
     pub id: u64,

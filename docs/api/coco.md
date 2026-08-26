@@ -88,7 +88,7 @@ coco.dataset = d          # applies the change and rebuilds the index
 
 Keys outside the COCO schema (custom metadata on images, annotations, or
 categories) are preserved through load, dataset ops, and `save` — see
-[The COCO Format](../getting-started/coco-format.md#unknown-keys-are-preserved).
+[The COCO format](../getting-started/coco-format.md#unknown-keys-are-preserved).
 
 === "Python"
 
@@ -609,21 +609,21 @@ detection overlays — pass both.
 Raises `ValueError` if `image_dir` is `None` and `self.image_dir` is also `None`.
 Raises `ImportError` if browse dependencies are not installed.
 
-See the [Dataset Browser guide](../guide/browse.md) for a full walkthrough.
+See the [Dataset browser guide](../guide/browse.md) for a full walkthrough.
 
 ---
 
-## Dataset Operations
+## Dataset operations
 
 The following methods reshape or subset a dataset, returning a new `COCO` object.
-The original is never modified. See the [Dataset Operations guide](../guide/datasets.md)
+The original is never modified. See the [Dataset operations guide](../guide/datasets.md)
 for worked examples.
 
 ---
 
 ### `filter`
 
-Subset the dataset by category, image, and/or annotation area. All criteria are ANDed.
+Subset the dataset by category, by image, by annotation area, or by any combination of the three. All criteria are ANDed.
 
 === "Python"
 
@@ -819,13 +819,13 @@ Serialize the dataset to a COCO-format JSON file.
 
 ---
 
-## Format Conversion {#convert}
+## Format conversion {#convert}
 
 All ten converters share one contract:
 
 - **Malformed input is an error, not a skip.** Parse failures raise `ValueError`
   naming the file and line/position; filesystem problems raise `IOError`. Records
-  the target format simply cannot express (an annotation with no bbox in a
+  the target format cannot express (an annotation with no bbox in a
   bbox-only format, say) are skipped and **counted** in the returned stats dict
   under a `skipped_<reason>` key — nothing vanishes uncounted.
 - **Missing image dimensions are an error wherever geometry must scale.**
@@ -978,7 +978,7 @@ Load a Pascal VOC annotation directory as a COCO dataset.
     ```
 
     Scans `voc_dir/Annotations/` for `.xml` files (falls back to `voc_dir/` directly).
-    Image dimensions come from each XML's `<size>` element. Coordinates may be
+    Image dimensions come from each XML's `<size>` element. Coordinates can be
     integers or floats and are converted from VOC's 1-based inclusive convention
     (`x = xmin − 1`, `w = xmax − xmin + 1` — the exact inverse of `to_voc`);
     `<difficult>1</difficult>` imports as `iscrowd`.
@@ -1041,7 +1041,7 @@ Load a CVAT for Images 1.1 XML file as a COCO dataset.
     the self-closing form and the open/close-pair form CVAT writes when a shape
     carries `<attribute>` children. Unsupported shapes (`<polyline>`, `<points>`,
     `<cuboid>`) and degenerate polygons are skipped and reported with a
-    `UserWarning` naming the count — they do not abort the file.
+    `UserWarning` naming the count — they don't stop the conversion.
 
     ```python
     coco = COCO.from_cvat("annotations.xml")
@@ -1131,7 +1131,7 @@ Export the dataset to Open Images challenge CSV format.
     to_oid(output_csv: str) -> dict
     ```
 
-    Writes `ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf` — note that Open
+    Writes `ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf` — Open
     Images puts `XMax` before `YMin` — with coordinates normalized to `[0, 1]`.
     A `Score` column is added when any annotation carries a score, so detection
     files round-trip too. Coordinates are normalized, so every referenced image

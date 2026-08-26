@@ -26,12 +26,12 @@ pub enum Layer {
 /// A single issue found during healthcheck.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
-    /// Machine-readable code (e.g., "duplicate_ann_id", "degenerate_bbox").
+    /// Machine-readable code, such as "duplicate_ann_id" or "degenerate_bbox".
     pub code: &'static str,
     /// Human-readable message with actionable guidance.
     pub message: String,
     /// IDs of the entity being checked. The `code` field disambiguates the ID kind
-    /// (annotation IDs for annotation checks, image IDs for image checks, etc.).
+    /// — annotation IDs for annotation checks, image IDs for image checks.
     pub affected_ids: Vec<u64>,
     /// Which check layer produced this finding.
     pub layer: Layer,

@@ -1032,7 +1032,7 @@ def main():
         "--slices",
         metavar="slices.json",
         default=None,
-        help='JSON file mapping slice names to image ID lists, e.g. {"daytime": [1,2,3]}',
+        help='JSON file mapping slice names to image ID lists, for example {"daytime": [1,2,3]}',
     )
     eval_parser.add_argument(
         "--healthcheck",
@@ -1187,7 +1187,7 @@ def main():
         "--slices",
         metavar="slices.json",
         default=None,
-        help='JSON file mapping slice names to image ID lists, e.g. {"daytime": [1,2,3]}',
+        help='JSON file mapping slice names to image ID lists, for example {"daytime": [1,2,3]}',
     )
     explore_parser.add_argument(
         "--batch-size", dest="batch_size", type=int, default=12, metavar="N", help="images per batch (default 12)"

@@ -26,7 +26,7 @@ Hierarchy.from_file(path: str, label_to_id: dict[str, int] | None = None) -> Hie
 
 Parse an Open Images hierarchy JSON file (`bbox_labels_600_hierarchy.json`).
 
-The JSON uses nested `LabelName` / `Subcategory` fields. `label_to_id` maps OID label strings (e.g. `"/m/0jbk"`) to category IDs. Labels not present in `label_to_id` get virtual node IDs that won't appear in your dataset's category list.
+The JSON uses nested `LabelName` / `Subcategory` fields. `label_to_id` maps OID label strings, for example `"/m/0jbk"`, to category IDs. Labels not present in `label_to_id` get virtual node IDs that won't appear in your dataset's category list.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

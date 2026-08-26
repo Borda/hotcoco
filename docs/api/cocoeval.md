@@ -159,7 +159,7 @@ See [Params](params.md) for all configurable fields.
 
 ### `eval_imgs`
 
-Per-image evaluation results, populated after `evaluate()`. See [Working with Results](../guide/results.md) for details.
+Per-image evaluation results, populated after `evaluate()`. See [Working with results](../guide/results.md) for details.
 
 === "Python"
 
@@ -177,7 +177,7 @@ Per-image evaluation results, populated after `evaluate()`. See [Working with Re
 
 ### `eval`
 
-Accumulated precision/recall arrays, populated after `accumulate()`. See [Working with Results](../guide/results.md) for details.
+Accumulated precision/recall arrays, populated after `accumulate()`. See [Working with results](../guide/results.md) for details.
 
 === "Python"
 
@@ -232,7 +232,7 @@ summarize() -> None
 Compute and print the standard COCO metrics. Populates `stats`.
 
 !!! warning "Non-default parameters"
-    `summarize()` uses a fixed display format that assumes default `iou_thrs`, `max_dets`, and `area_rng_lbl`. If you've changed any of these, a `UserWarning` is emitted (catchable with `warnings.catch_warnings`, visible in Jupyter) and some metrics may show `-1.000` (e.g. AP50 when `iou_thrs` doesn't include 0.50). The `stats` array always has 12 entries (10 for keypoints) regardless of your parameters. `-1.000` always means "not computed for this configuration" — an unknown area label or max-dets value degrades to `-1.0` rather than silently substituting the `"all"` slice.
+    `summarize()` uses a fixed display format that assumes default `iou_thrs`, `max_dets`, and `area_rng_lbl`. If you've changed any of these, a `UserWarning` is emitted (catchable with `warnings.catch_warnings`, visible in Jupyter) and some metrics might show `-1.000` (for example, AP50 when `iou_thrs` doesn't include 0.50). The `stats` array always has 12 entries (10 for keypoints) regardless of your parameters. `-1.000` always means "not computed for this configuration" — an unknown area label or max-dets value degrades to `-1.0` rather than silently substituting the `"all"` slice.
 
 Prints 12 lines for bbox/segm (10 for keypoints):
 
@@ -363,7 +363,7 @@ Category names added by Open Images hierarchy expansion — ancestor categories 
 ```python
 ev = COCOeval(gt, dt, "bbox", oid_style=True, hierarchy=h)
 ev.evaluate()
-ev.virtual_cat_names   # e.g. ['Carnivore', 'Mammal'] — no parentheses; it's a property
+ev.virtual_cat_names   # for example, ['Carnivore', 'Mammal'] — no parentheses; it's a property
 ```
 
 ---
@@ -394,14 +394,14 @@ report() -> dict
 
 Return a full evaluation report. Must be called after `summarize()` (or `run()`). Raises `RuntimeError` otherwise.
 
-This is the shape every hotcoco metric family reports in, so code that renders a detection report will render a panoptic or tracking one unchanged.
+This is the shape every hotcoco metric family reports in, so code that renders a detection report renders a panoptic or tracking one unchanged.
 
 **Returns** a dict with:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `"task"` | `str` | `"detection"`. |
-| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — see below. |
+| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — see [Checking provenance](#checking-provenance). |
 | `"metrics"` | `dict[str, float]` | Summary metrics keyed by name. |
 | `"per_class"` | `dict[str, dict[str, float]]` | `{class_name: {metric: value}}`. |
 | `"per_group"` | `dict[str, dict[str, float]]` | LVIS frequency buckets in LVIS mode; empty otherwise. |
@@ -418,7 +418,7 @@ report["per_class"]["person"]["AP"]  # 0.521
 
 #### Checking provenance
 
-`provenance` records whether these numbers may be compared against a published leaderboard:
+`provenance` records whether these numbers can be compared against a published leaderboard:
 
 | Value | Meaning |
 |-------|---------|
@@ -509,7 +509,7 @@ before `run()`.
 ```python
 for reason in ev.reference_deviations():
     print(reason)
-# iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines may show -1.000.
+# iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines might show -1.000.
 ```
 
 This is the same predicate behind the warnings `summarize()` prints, so a report cannot
@@ -604,7 +604,7 @@ This method is **standalone** — no `evaluate()` call is needed first.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `"matrix"` | `np.ndarray[uint64]` shape `(K+1, K+1)` | Raw confusion counts. Rows = GT category, cols = predicted. Index `K` is background. Unsigned — cast before subtracting counts (e.g. `matrix.astype(np.int64)`) to avoid underflow. |
+| `"matrix"` | `np.ndarray[uint64]` shape `(K+1, K+1)` | Raw confusion counts. Rows = GT category, cols = predicted. Index `K` is background. Unsigned — cast before subtracting counts (for example, `matrix.astype(np.int64)`) to avoid underflow. |
 | `"normalized"` | `np.ndarray[float64]` shape `(K+1, K+1)` | Row-normalized version (rows sum to 1.0; zero rows stay zero). |
 | `"cat_ids"` | `list[int]` | Category IDs for rows/cols `0..K-1`. |
 | `"cat_names"` | `list[str]` | Category names for rows/cols `0..K-1`, in the same order as `cat_ids`. |
@@ -805,8 +805,8 @@ Requires `evaluate()` to have been called first.
 | `"gt_status"` | `dict[int, str]` | GT annotation ID → `"matched"` or `"fn"`. |
 | `"dt_match"` | `dict[int, int]` | TP detection → matched GT annotation ID. |
 | `"gt_match"` | `dict[int, int]` | Matched GT → the detection that matched it. |
-| `"img_summary"` | `dict[int, dict]` | Per-image summary (see below). |
-| `"label_errors"` | `list[dict]` | Suspected label errors, sorted by detection score descending (see below). |
+| `"img_summary"` | `dict[int, dict]` | Per-image summary; see the **image summary** table that follows. |
+| `"label_errors"` | `list[dict]` | Suspected label errors, sorted by detection score descending; see the **label error** table that follows. |
 | `"iou_thr"` | `float` | Actual IoU threshold used (snapped). |
 | `"score_thr"` | `float` | Score threshold used for label error detection. |
 
@@ -850,7 +850,7 @@ for le in diag["label_errors"]:
     print(f"{le['type']}: {le['dt_category']}→{le.get('gt_category', 'N/A')}")
 ```
 
-See [Per-image diagnostics](../guide/diagnostics.md#per-image-diagnostics-label-error-detection) in the evaluation guide.
+See [Per-image diagnostics](../guide/diagnostics.md#per-image-diagnostics-and-label-error-detection) in the evaluation guide.
 
 ---
 
@@ -929,7 +929,7 @@ Pairwise model comparison. Both evaluators must have had `evaluate()` called and
 | `eval_b` | `COCOeval` | — | Improved model evaluation. |
 | `n_bootstrap` | `int` | `0` | Bootstrap samples for CIs (0 = disabled). |
 | `seed` | `int` | `42` | Random seed for reproducibility. |
-| `confidence` | `float` | `0.95` | Confidence level (e.g. 0.95 for 95% CI). |
+| `confidence` | `float` | `0.95` | Confidence level, for example 0.95 for a 95% CI. |
 
 **Returns** a dict with:
 
@@ -955,10 +955,10 @@ ev_b.evaluate()
 
 # Without bootstrap
 result = hotcoco.compare(ev_a, ev_b)
-print(result["deltas"]["AP"])  # e.g. +0.033
+print(result["deltas"]["AP"])  # for example, +0.033
 
 # With bootstrap CIs
 result = hotcoco.compare(ev_a, ev_b, n_bootstrap=1000)
 ci = result["ci"]["AP"]
-print(f"[{ci['lower']:+.3f}, {ci['upper']:+.3f}]")  # e.g. [+0.01, +0.05]
+print(f"[{ci['lower']:+.3f}, {ci['upper']:+.3f}]")  # for example, [+0.01, +0.05]
 ```

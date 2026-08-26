@@ -5,7 +5,7 @@ the equivalent classes in torchvision's detection reference scripts. No
 torchvision or pycocotools dependency is required.
 
 PyTorch and Pillow are optional — only needed when calling methods that use
-them (e.g. ``CocoDetection.__getitem__`` needs PIL, ``synchronize_between_processes``
+them: ``CocoDetection.__getitem__`` needs PIL, and ``synchronize_between_processes``
 needs torch.distributed).
 """
 
@@ -91,7 +91,7 @@ class CocoEvaluator:
     coco_gt : COCO
         Ground-truth COCO object.
     iou_types : list[str]
-        IoU types to evaluate, e.g. ``["bbox"]``, ``["bbox", "segm"]``.
+        IoU types to evaluate, such as ``["bbox"]`` or ``["bbox", "segm"]``.
 
     Example
     -------

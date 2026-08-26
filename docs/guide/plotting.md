@@ -33,7 +33,7 @@ and a per-category AP bar chart sorted from best to worst.
 
 Every report carries a **provenance** line stating whether its numbers are comparable
 to a published leaderboard. A parity-verified run says so quietly; anything else is
-marked as an extension and lists why — oriented boxes, Open Images, or simply a
+marked as an extension and lists why — oriented boxes, Open Images, or just a
 non-default `iou_thrs`. Since the PDF is the artifact that gets circulated to people
 who did not run the evaluation, the marker is always present, so a report *without* a
 caveat means the run was checked rather than that the caveat was omitted. See
@@ -217,7 +217,7 @@ with style(theme="cyanotype", paper_mode=True):
     fig.savefig("custom.pdf")
 ```
 
-To use a completely different style (seaborn, corporate rcParams, etc.), simply don't call
+To use a different style, such as seaborn or your own rcParams, don't call
 hotcoco plot functions inside a `style()` context — the default matplotlib style applies:
 
 ```python

@@ -25,7 +25,7 @@ impl COCOeval {
     /// from params, and returns them sorted for deterministic output order.
     ///
     /// In LVIS mode, DT-only pairs are dropped unless the category appears in `neg_cats`
-    /// for that image (i.e. it was confirmed absent and unmatched DTs should count as FP).
+    /// for that image — that is, it was confirmed absent and unmatched DTs should count as FP.
     fn collect_sparse_pairs(
         &self,
         cat_ids: &[u64],
@@ -114,7 +114,7 @@ impl COCOeval {
         let cat_ids = if self.params.use_cats {
             self.params.cat_ids.clone()
         } else {
-            vec![u64::MAX] // dummy single category (avoids collision with real category_id=0)
+            vec![u64::MAX] // placeholder single category (avoids collision with real category_id=0)
         };
 
         // LVIS: scan GT image metadata to build per-image category sets.

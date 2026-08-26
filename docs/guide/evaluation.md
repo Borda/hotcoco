@@ -2,7 +2,7 @@
 
 hotcoco supports four evaluation types: bounding box, segmentation, keypoints, and oriented bounding box (OBB). All four follow the same workflow.
 
-This page covers the core pipeline. [LVIS and Open Images](lvis-open-images.md) have their own protocols, and the analysis tools that explain *why* a model scores what it does — confusion matrices, TIDE, calibration, per-image diagnostics — live in [Model Diagnostics](diagnostics.md).
+This page covers the core pipeline. [LVIS and Open Images](lvis-open-images.md) have their own protocols, and the analysis tools that explain *why* a model scores what it does — confusion matrices, TIDE, calibration, per-image diagnostics — live in [Model diagnostics](diagnostics.md).
 
 ## The three-step pipeline
 
@@ -73,7 +73,7 @@ Detection format — each result needs `image_id`, `category_id`, `segmentation`
 ]
 ```
 
-**What is RLE?** Run-Length Encoding stores a binary mask as the lengths of alternating runs of 0s and 1s — `size` is `[height, width]` and `counts` is a compact string (`str` in JSON files, `bytes` from `mask.encode`; `load_res` accepts either). For encoding masks from numpy arrays, see the [Mask Operations guide](masks.md).
+**What is RLE?** Run-Length Encoding stores a binary mask as the lengths of alternating runs of 0s and 1s — `size` is `[height, width]` and `counts` is a compact string (`str` in JSON files, `bytes` from `mask.encode`; `load_res` accepts either). For encoding masks from numpy arrays, see the [Mask operations guide](masks.md).
 
 IoU is computed on the binary masks after RLE decoding.
 
@@ -213,7 +213,7 @@ See [Params](../api/params.md) for the full list of configurable parameters.
 
 ## Sliced evaluation
 
-`slice_by()` re-computes all summary metrics for named subsets of images — without re-running IoU computation. This is useful for comparing model performance across data splits (e.g., indoor vs outdoor, day vs night, small images vs large images).
+`slice_by()` re-computes all summary metrics for named subsets of images — without re-running IoU computation. This is useful for comparing model performance across data splits: indoor versus outdoor, day versus night, or small versus large images.
 
 ```python
 ev = COCOeval(coco_gt, coco_dt, "bbox")
@@ -253,6 +253,6 @@ coco eval --gt annotations.json --dt detections.json --slices slices.json
 
 ## Where to next
 
-- [LVIS & Open Images](lvis-open-images.md) — federated AP, category hierarchies, and group-of matching
-- [Model Diagnostics](diagnostics.md) — confusion matrix, TIDE error analysis, calibration, F-scores, model comparison, and per-image failure mining
-- [Working with Results](results.md) — the evaluation report, provenance, per-category AP, JSON export, and experiment-tracker logging
+- [LVIS and Open Images](lvis-open-images.md) — federated AP, category hierarchies, and group-of matching
+- [Model diagnostics](diagnostics.md) — confusion matrix, TIDE error analysis, calibration, F-scores, model comparison, and per-image failure mining
+- [Working with results](results.md) — the evaluation report, provenance, per-category AP, JSON export, and experiment-tracker logging

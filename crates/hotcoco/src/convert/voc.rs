@@ -27,7 +27,7 @@ pub struct VocStats {
 /// Convert a COCO dataset to Pascal VOC annotation format.
 ///
 /// Writes one XML file per image into `output_dir/Annotations/`, named by the image
-/// filename stem (e.g. `000042.xml`). Also writes a `labels.txt` file listing all
+/// filename stem, for example `000042.xml`. Also writes a `labels.txt` file listing all
 /// category names sorted by COCO category ID.
 ///
 /// # Field mapping

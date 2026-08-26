@@ -93,7 +93,6 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 
 ## Testing
 
-- Run `cargo test` after any Rust code changes and verify all tests pass before committing.
 - For Python binding changes: `just build` as a smoke test, then `just parity` to verify metrics.
 - `just test` runs `cargo test` + fast Python regression tests (`scripts/test_parity.py`) — safe for CI, completes in under 30s.
 - `just fuzz` runs the hypothesis-based fuzzer (`scripts/fuzz_parity.py`) — use to hunt for parity bugs, not in CI. Takes several minutes.
@@ -159,6 +158,14 @@ monotonically until the disk fills. Assume nothing cleans up for you.
   inherit the workspace profiles, but `just clean` only cleans the one you are in.
 
 ## Documentation
+
+`STYLE.md` at the repo root is the style authority: hotcoco follows the
+[Google developer documentation style guide](https://developers.google.com/style), and
+`STYLE.md` records the rules that come up most plus the deliberate deviations (spaced em
+dashes stay). It governs `docs/`, `README.md`, `CONTRIBUTING.md`, `///` and `//!` doc
+comments, PyO3 `#[doc]` strings, Python docstrings, `.pyi` stubs, CLI `help=` text, and
+user-facing warning and error messages — but not `//` implementation comments. No linter
+enforces it; grep your own diff.
 
 - This project targets Python users first, Rust users second. Documentation, README, and examples should lead with Python usage in a Python-first tone similar to Polars. Do not be Rust-centric.
 - Before making large-scale changes (docs revamps, major refactors), present a concrete preview or small example for approval first. Do not rewrite everything at once. For small additions (a single new page, a new section), just write it directly.

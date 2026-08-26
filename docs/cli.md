@@ -295,7 +295,7 @@ coco explore --gt <annotations.json> --images <images_dir/> [options]
 | `--iou-type` | Evaluation type for TP/FP/FN coloring: `bbox`, `segm`, or `keypoints` | `bbox` |
 | `--iou-thr THR` | Initial IoU threshold for TP/FP classification; sets the UI slider's starting position (snapped to 0.50–0.95 in steps of 0.05) | `0.5` |
 | `--no-eval` | Disable automatic evaluation — show detections without TP/FP/FN coloring | off |
-| `--slices <path>` | JSON file mapping slice names to image ID lists, e.g. `{"daytime": [1, 2, 3]}` | off |
+| `--slices <path>` | JSON file mapping slice names to image ID lists, for example `{"daytime": [1, 2, 3]}` | off |
 | `--batch-size N` | Images loaded per batch | `12` |
 | `--port N` | Local server port | `7860` |
 
@@ -316,7 +316,7 @@ coco explore --gt instances_val2017.json --images /data/images/ --port 7861
 ```
 
 Opens a sidebar with category filter and shuffle. Click any thumbnail to open a
-full-resolution lightbox with canvas annotation overlay. See the [Dataset Browser guide](guide/browse.md).
+full-resolution lightbox with canvas annotation overlay. See the [Dataset browser guide](guide/browse.md).
 
 ---
 
@@ -495,7 +495,7 @@ cargo install hotcoco-cli
 coco-eval --gt annotations.json --dt detections.json --iou-type bbox
 ```
 
-Evaluation is the default action, so the flags can be passed bare as above. The
+Evaluation is the default action, so the flags can be passed bare, as in the preceding example. The
 same run can be written explicitly with the `eval` subcommand — useful in scripts
 where the intent should be obvious:
 
@@ -525,7 +525,7 @@ These apply to `eval` and to the bare form.
 | `-o / --output <path>` | Write evaluation results to a JSON file | off |
 
 Tab completion is set up with `coco-eval completions <shell>` — see
-[Shell completions](#shell-completions) below.
+[Shell completions](#shell-completions).
 
 ### Examples
 

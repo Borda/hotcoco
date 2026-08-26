@@ -1,4 +1,4 @@
-# The COCO Format
+# The COCO format
 
 The ground-truth file is a single JSON object with three required top-level keys —
 `images`, `annotations`, and `categories` — plus optional `info` and `licenses`
@@ -6,7 +6,7 @@ metadata. This page documents what hotcoco requires in each, what is optional, a
 what happens to fields it doesn't recognize.
 
 Detection *results* are a different, flatter format (a JSON array of detection
-dicts) — see [Working with Results](../guide/results.md#loading-results).
+dicts) — see [Working with results](../guide/results.md#loading-results).
 
 ## Minimal example
 
@@ -33,7 +33,7 @@ dicts) — see [Working with Results](../guide/results.md#loading-results).
 | `width`, `height` | int | **yes** | Pixel dimensions. Needed for mask decoding, YOLO/Open Images export, and the browser. |
 | `file_name` | str | no | Defaults to `""`. Needed by `browse()` and image-dir workflows. |
 | `license`, `coco_url`, `flickr_url`, `date_captured` | — | no | Carried through untouched. |
-| `neg_category_ids`, `not_exhaustive_category_ids` | list[int] | no | LVIS federated-annotation fields — see [LVIS & Open Images](../guide/lvis-open-images.md). |
+| `neg_category_ids`, `not_exhaustive_category_ids` | list[int] | no | LVIS federated-annotation fields — see [LVIS and Open Images](../guide/lvis-open-images.md). |
 
 ## `annotations`
 
@@ -44,7 +44,7 @@ dicts) — see [Working with Results](../guide/results.md#loading-results).
 | `id` | int | no | Defaults to 0. Duplicate ids are tolerated but reported in [`load_warnings`](../api/coco.md#load_warnings). |
 | `bbox` | `[x, y, w, h]` | for bbox eval | Pixel coordinates, top-left corner + size — not `[x1, y1, x2, y2]`. |
 | `area` | float | no | Computed by `load_res` when missing. Annotations without `area` are excluded from explicit area-range queries (`get_ann_ids(area_rng=...)`, `filter(area_rng=...)`). |
-| `segmentation` | polygon(s) or RLE | for segm eval | A list of flat polygon coordinate lists, an uncompressed RLE dict (`counts` as a list of ints), or a compressed RLE dict (`counts` as a string). See [Mask Operations](../guide/masks.md). |
+| `segmentation` | polygon(s) or RLE | for segm eval | A list of flat polygon coordinate lists, an uncompressed RLE dict (`counts` as a list of ints), or a compressed RLE dict (`counts` as a string). See [Mask operations](../guide/masks.md). |
 | `iscrowd` | 0/1 or bool | no | Defaults to 0. Crowd regions match by IoA and are ignored rather than scored. |
 | `keypoints` | flat list | for keypoint eval | `[x1, y1, v1, x2, y2, v2, ...]` with visibility flags. |
 | `num_keypoints` | int | no | GT annotations with `num_keypoints == 0` are ignored in keypoint eval. |

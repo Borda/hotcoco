@@ -1,4 +1,4 @@
-# PyTorch Integration
+# PyTorch integration
 
 hotcoco ships two classes in `hotcoco.integrations` that replace their torchvision equivalents without requiring pycocotools or torchvision to be installed:
 
@@ -127,7 +127,7 @@ evaluator.summarize()
 The `predictions` dict maps `image_id → output_dict`. The keys expected in the output dict depend on the iou_type.
 
 !!! tip "torchvision detection models"
-    Standard torchvision models (Faster R-CNN, RetinaNet, FCOS, etc.) already return dicts with `boxes`, `labels`, and `scores` in the expected format. The `update()` call in the example above works without modification — torchvision models output XYXY boxes, and `CocoEvaluator` converts them to XYWH automatically.
+    Standard torchvision models (Faster R-CNN, RetinaNet, FCOS, and others) already return dicts with `boxes`, `labels`, and `scores` in the expected format. The `update()` call in the preceding example works without modification — torchvision models output XYXY boxes, and `CocoEvaluator` converts them to XYWH automatically.
 
 === "bbox"
 

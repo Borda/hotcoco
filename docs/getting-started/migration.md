@@ -21,7 +21,7 @@ Everything else stays the same. The classes, methods, and return types are ident
 
 ## Option 2: Zero-code drop-in
 
-If pycocotools is imported by a library you don't control (e.g. mmdet, detectron2), call `init_as_pycocotools()` once at startup:
+If pycocotools is imported by a library you don't control, such as mmdet or detectron2, call `init_as_pycocotools()` once at startup:
 
 ```python
 from hotcoco import init_as_pycocotools
@@ -68,7 +68,7 @@ anns = coco.load_anns([101])
 print(type(anns[0]))  # <class 'dict'>
 ```
 
-Annotation dicts have the same keys: `id`, `image_id`, `category_id`, `bbox`, `area`, `segmentation`, `iscrowd`, etc.
+Annotation dicts carry the same keys — `id`, `image_id`, `category_id`, `bbox`, `area`, `segmentation`, `iscrowd` — plus any custom fields your dataset defines.
 
 ## Getters return copies — assign back to apply
 

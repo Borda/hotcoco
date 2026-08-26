@@ -238,7 +238,7 @@ class COCOeval:
 # ---------------------------------------------------------------------------
 
 class Params:
-    """Evaluation parameters controlling IoU thresholds, area ranges, etc.
+    """Evaluation parameters controlling IoU thresholds, area ranges, and max detections.
 
     Attribute reads return **copies**: ``p.max_dets.append(200)`` mutates a
     temporary and is a silent no-op. Assign whole values instead:

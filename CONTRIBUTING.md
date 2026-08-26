@@ -117,6 +117,15 @@ the documented `fr_py_objects` did not exist.
 - **Python:** `ruff format` and `ruff check` — enforced by the pre-commit hook and CI (`just py-fmt-check`, `just py-lint`).
 - Don't add comments where the logic is self-evident. Comments should explain *why*, not *what* — and "why" means a constraint or invariant the code can't show, not the history of how the code got here. Never narrate a change ("used to", "previously", "the old version...") or justify it against alternatives the reader can't see; that rationale belongs in the commit message.
 
+## Documentation style
+
+Published prose follows the [Google developer documentation style guide](https://developers.google.com/style).
+The rules that come up most — sentence-case headings, no `e.g.`/`i.e.`/`etc.`, `might` for
+possibility, no "see below" — plus hotcoco's deliberate deviations from Google are recorded
+in [STYLE.md](STYLE.md). Read it before writing docs, doc comments, or error messages.
+
+Run `just docs-links` after any page split, rename, or heading change.
+
 ## Tests
 
 ```bash

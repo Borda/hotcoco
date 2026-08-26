@@ -35,7 +35,7 @@ class LVISeval:
     gt : COCO
         Ground-truth COCO object loaded from an LVIS annotation file.
     dt : COCO
-        Detection results COCO object (e.g. from ``gt.load_res(...)``).
+        Detection results COCO object, for example from ``gt.load_res(...)``.
     iou_type : str
         One of ``"bbox"``, ``"segm"``, or ``"keypoints"``.
     """

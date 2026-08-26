@@ -12,7 +12,7 @@ pub struct SliceResult {
     pub name: String,
     /// Number of images in this slice.
     pub num_images: usize,
-    /// All summary metrics (AP, AP50, AR100, etc.) for this slice.
+    /// All summary metrics for this slice — AP, AP50, AR100, and the rest.
     pub metrics: BTreeMap<String, f64>,
     /// Per-metric delta vs the overall baseline. Empty for the `_overall` entry.
     pub delta: BTreeMap<String, f64>,

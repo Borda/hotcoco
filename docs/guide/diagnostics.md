@@ -1,4 +1,4 @@
-# Model Diagnostics
+# Model diagnostics
 
 AP tells you how good a model is; this page is about finding out *why* it isn't better. Confusion matrices show which categories get mixed up, TIDE decomposes errors by type, calibration checks whether confidence scores mean anything, and per-image diagnostics surface the images — and the annotations — worth looking at.
 
@@ -184,7 +184,7 @@ for b in cal["bins"]:
 
 ### Per-category calibration
 
-`per_category` maps each category name to its ECE. Some categories may be well-calibrated while others are wildly off:
+`per_category` maps each category name to its ECE. Some categories are well calibrated while others are wildly off:
 
 ```python
 # Top 5 worst-calibrated categories
@@ -320,7 +320,7 @@ plot.category_deltas(result, top_k=10, save_path="deltas.png")
 
 See [`compare`](../api/cocoeval.md#compare) and [`comparison_bar`](../api/plot.md) in the API reference.
 
-## Per-image diagnostics & label error detection
+## Per-image diagnostics and label error detection
 
 `image_diagnostics()` gives you per-image F1 and AP scores, per-annotation TP/FP/FN classification, and automatically flags suspected label errors in your ground truth. It's the single call that answers "which images should I look at?" and "are my annotations trustworthy?"
 

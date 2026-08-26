@@ -260,7 +260,7 @@ impl COCOeval {
     /// Run the full evaluation pipeline in one call: `evaluate` → `accumulate` → `summarize`.
     ///
     /// Equivalent to calling the three methods in sequence. Primarily used with LVIS
-    /// pipelines (e.g. Detectron2 / MMDetection) that expect a single `run()` entry point.
+    /// pipelines such as Detectron2 and MMDetection that expect a single `run()` entry point.
     pub fn run(&mut self) {
         self.evaluate();
         self.accumulate();

@@ -19,7 +19,7 @@ use super::{COCOeval, EvalMode};
 /// it can never go stale relative to the datasets it was drawn from.
 ///
 /// Annotations without a convertible mask (no segmentation *and* no bbox) are
-/// simply absent; readers fall back to [`COCO::ann_to_rle`].
+/// absent; readers fall back to [`COCO::ann_to_rle`].
 pub(super) struct SegmRles {
     // Private on purpose, mirroring the `ious` cache discipline ("the
     // visibility is the enforcement"): consumers get one RLE at a time via the

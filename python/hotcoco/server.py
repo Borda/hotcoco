@@ -462,7 +462,7 @@ def run_server(app: FastAPI, port: int = 7860, open_browser: bool = True):
 
     Probes ``port`` through ``port+10`` for a free port (like
     :func:`start_server_background`), and opens the browser only once the
-    server reports it has started — not blindly on a timer.
+    server reports it has started — not on a fixed timer.
     """
     import time
 

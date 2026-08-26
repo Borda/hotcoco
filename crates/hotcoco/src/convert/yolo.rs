@@ -136,8 +136,8 @@ pub fn coco_to_yolo(dataset: &Dataset, output_dir: &Path) -> Result<YoloStats, C
 ///
 /// # Image dimensions
 ///
-/// `image_dims` maps filename stems (e.g. `"000042"`) or stems with extensions
-/// (e.g. `"000042.jpg"`) to `(width, height)` in pixels. Both forms are tried;
+/// `image_dims` maps filename stems such as `"000042"`, or stems with extensions
+/// such as `"000042.jpg"`, to `(width, height)` in pixels. Both forms are tried;
 /// common image extensions (`jpg`, `jpeg`, `png`, `bmp`, `tif`, `tiff`) are also
 /// checked as fallbacks. YOLO coordinates are normalized, so a stem with no
 /// usable dimensions is [`ConvertError::MissingImageDimensions`] — denormalizing

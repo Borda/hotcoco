@@ -8,7 +8,7 @@
 //! A record that is *wrong* — an unparsable number, a missing required
 //! attribute or column, the wrong field count — fails the conversion with a
 //! [`ConvertError`] naming the file and, where one exists, the line or byte
-//! position. A record the target format simply *cannot express* — an
+//! position. A record the target format *cannot express* — an
 //! unsupported CVAT shape kind, a polygon with fewer than three points, a crowd
 //! annotation in YOLO — is skipped and counted in the returned stats struct.
 //! Nothing is ever dropped without either a counter or an error. An annotation

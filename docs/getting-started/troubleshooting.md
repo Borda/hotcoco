@@ -18,7 +18,7 @@ If you're in a virtual environment, make sure it's activated before installing.
 
 ### `ImportError` after upgrading numpy
 
-hotcoco ships prebuilt wheels that bundle a compiled Rust extension. If you upgrade numpy to a major version that changes the C ABI (e.g. numpy 1.x → 2.x), you may need to reinstall hotcoco to pick up a compatible wheel:
+hotcoco ships prebuilt wheels that bundle a compiled Rust extension. If you upgrade numpy to a major version that changes the C ABI (numpy 1.x → 2.x, for example), you might need to reinstall hotcoco to pick up a compatible wheel:
 
 ```bash
 pip install --upgrade hotcoco
@@ -42,7 +42,7 @@ from pycocotools.coco import COCO
 from hotcoco import COCO
 ```
 
-To use hotcoco as a drop-in without changing any imports, call `init_as_pycocotools()` once at the start of your script — see [Framework Integrations](../guide/frameworks.md) for the details and per-framework notes.
+To use hotcoco as a drop-in without changing any imports, call `init_as_pycocotools()` once at the start of your script — see [Framework integrations](../guide/frameworks.md) for the details and per-framework notes.
 
 ---
 
@@ -74,7 +74,7 @@ A minimal valid bbox detection:
 COCO uses `[x, y, width, height]` (top-left corner + size) in **pixel coordinates**. Two common pitfalls:
 
 - Many model outputs use `[x1, y1, x2, y2]` (two corners) instead of `[x, y, w, h]`
-- Some formats (e.g. YOLO) use normalized coordinates in `[0, 1]` — COCO always expects pixel values
+- Some formats, such as YOLO, use normalized coordinates in `[0, 1]` — COCO always expects pixel values
 
 Convert before passing to `load_res`:
 
@@ -110,9 +110,9 @@ if missing:
 
 This usually means `evaluate()` found no matching (image_id, category_id) pairs between GT and DT. Common causes:
 
-- Wrong `iou_type` — e.g. passing segmentation results to `COCOeval(..., "bbox")`
+- Wrong `iou_type` — for example, passing segmentation results to `COCOeval(..., "bbox")`
 - `category_id` mismatch — model uses 0-indexed classes but COCO uses 1-indexed IDs
-- All detections were dropped by `load_res` (see `image_id` issue above)
+- All detections were dropped by `load_res` — see [`image_id` not found in ground truth](#image_id-not-found-in-ground-truth)
 
 Check that categories align:
 
@@ -165,7 +165,7 @@ If you see differences larger than these tolerances, the most common cause is mi
 
 ### `summarize()` prints `-1.000` for some metrics
 
-A metric shows `-1.000` when its required IoU threshold or area range isn't in `ev.params`. For example, AP50 requires `0.50` to be in `ev.params.iou_thrs`. If you've customized `iou_thrs`, the standard 12-metric output format will show `-1.000` for thresholds not in your list. This is expected — use `ev.get_results()` to access only the metrics that were actually computed.
+A metric shows `-1.000` when its required IoU threshold or area range isn't in `ev.params`. For example, AP50 requires `0.50` to be in `ev.params.iou_thrs`. If you've customized `iou_thrs`, the standard 12-metric output format shows `-1.000` for thresholds not in your list. This is expected — use `ev.get_results()` to access only the metrics that were actually computed.
 
 ---
 

@@ -69,7 +69,7 @@ pub struct EvalResults {
     pub provenance: Provenance,
     /// Evaluation parameters used to produce these metrics.
     pub params: EvalParams,
-    /// Summary metrics (AP, AP50, AP75, AR1, AR10, AR100, etc.).
+    /// Summary metrics: AP, AP50, AP75, AR1, AR10, AR100, and the rest of the catalog.
     pub metrics: BTreeMap<String, f64>,
     /// Per-class AP values, keyed by category name. `None` if not requested.
     #[serde(skip_serializing_if = "Option::is_none")]

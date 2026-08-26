@@ -1,4 +1,4 @@
-# Quick Start
+# Quick start
 
 A complete COCO evaluation in under a minute.
 
@@ -26,7 +26,7 @@ A complete COCO evaluation in under a minute.
 
 ## 2. Load ground truth
 
-The ground truth is a COCO-format JSON file containing your dataset's annotations (bounding boxes, segmentation masks, or keypoints). See [The COCO Format](coco-format.md) for the expected file layout and which fields are required.
+The ground truth is a COCO-format JSON file containing your dataset's annotations (bounding boxes, segmentation masks, or keypoints). See [The COCO format](coco-format.md) for the expected file layout and which fields are required.
 
 === "Python"
 
@@ -211,9 +211,9 @@ Output:
 ## Next steps
 
 - [Evaluation](../guide/evaluation.md) — bbox, segm, keypoint, and OBB workflows explained
-- [LVIS & Open Images](../guide/lvis-open-images.md) — federated annotation, 13-metric LVIS output, hierarchy-aware Open Images eval
-- [Model Diagnostics](../guide/diagnostics.md) — TIDE errors, confusion matrix, calibration, F-scores, model comparison
-- [PyTorch Integration](../guide/pytorch.md) — `CocoDetection` dataset and `CocoEvaluator` for training loops
-- [Working with Results](../guide/results.md) — load_res, eval_imgs, precision/recall arrays
+- [LVIS and Open Images](../guide/lvis-open-images.md) — federated annotation, 13-metric LVIS output, hierarchy-aware Open Images eval
+- [Model diagnostics](../guide/diagnostics.md) — TIDE errors, confusion matrix, calibration, F-scores, model comparison
+- [PyTorch integration](../guide/pytorch.md) — `CocoDetection` dataset and `CocoEvaluator` for training loops
+- [Working with results](../guide/results.md) — load_res, eval_imgs, precision/recall arrays
 - [API Reference](../api/coco.md) — full class and method reference
 - [Notebook: COCO Evaluation 101](https://github.com/derekallman/hotcoco/blob/main/examples/coco_evaluation_101.ipynb) — end-to-end walkthrough: diagnostics (TIDE, confusion matrix, calibration, label errors), model comparison, dataset ops, plots, and more

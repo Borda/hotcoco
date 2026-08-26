@@ -16,7 +16,7 @@ pub struct CompareOpts {
     pub n_bootstrap: usize,
     /// Random seed for reproducibility.
     pub seed: u64,
-    /// Confidence level for bootstrap intervals (e.g. 0.95 for 95% CI).
+    /// Confidence level for bootstrap intervals, for example 0.95 for a 95% CI.
     pub confidence: f64,
 }
 

@@ -1,4 +1,4 @@
-# Mask Operations
+# Mask operations
 
 The `mask` module provides low-level operations on Run-Length Encoded (RLE) binary masks. It is a drop-in replacement for `pycocotools.mask` — all functions accept and return the same types.
 
@@ -60,7 +60,7 @@ An RLE dict looks like:
         rle["counts"] = rle["counts"].decode("utf-8")
     ```
 
-    Some third-party mask libraries (e.g. older versions of pycocotools) also return `bytes`. Apply the same fix before passing those dicts to hotcoco.
+    Some third-party mask libraries, such as older versions of pycocotools, also return `bytes`. Apply the same fix before passing those dicts to hotcoco.
 
 === "Rust"
 

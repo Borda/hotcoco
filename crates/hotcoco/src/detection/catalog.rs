@@ -24,13 +24,13 @@ use super::mode::FreqGroup;
 /// the string `"APs"` is exactly the re-derivation this type exists to prevent.
 #[derive(Debug, Clone)]
 pub struct MetricDef {
-    /// Short metric name, e.g. "AP", "AP50", "ARs". Used as the key in `get_results()`.
+    /// Short metric name such as "AP", "AP50", or "ARs". Used as the key in `get_results()`.
     pub name: &'static str,
     /// true = Average Precision, false = Average Recall.
     pub ap: bool,
     /// Specific IoU threshold, or None to average over all thresholds.
     pub iou_thr: Option<f64>,
-    /// Area range label to filter by (e.g. "all", "small", "medium", "large").
+    /// Area range label to filter by: "all", "small", "medium", or "large".
     pub area_lbl: &'static str,
     /// Maximum detections per image for this metric.
     pub max_det: usize,

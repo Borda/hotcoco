@@ -1,4 +1,4 @@
-# LVIS & Open Images
+# LVIS and Open Images
 
 COCO's protocol is not the only one hotcoco speaks. LVIS needs federated evaluation over its 1,200-category long tail, and Open Images has its own single-threshold AP with category hierarchies and group-of boxes. Both are built in — this page covers when each applies and how to run them.
 
@@ -105,8 +105,8 @@ coco_gt = COCO.from_oid(
 coco_dt = coco_gt.load_res_oid("predictions.csv")
 ```
 
-`IsGroupOf` carries through to the group-of matching described
-[below](#group-of-annotations). The readers, their optional arguments, and what
+`IsGroupOf` carries through to the matching rules in
+[Group-of annotations](#group-of-annotations). The readers, their optional arguments, and what
 happens without image dimensions are documented under
 [format conversion](datasets.md#open-images).
 
@@ -171,13 +171,13 @@ OID uses `is_group_of: true` on annotations covering a *cluster* of objects — 
 - **Missing it costs one false negative.** An undetected group-of box counts once against recall.
 - **"Inside" is IoA, not IoU** — intersection divided by the *detection's* area. A detection wholly inside the box qualifies however small it is, which is the point: individual objects are much smaller than the cluster that contains them.
 
-This is the [Open Images Challenge protocol](https://storage.googleapis.com/openimages/web/evaluation.html), equivalently TensorFlow's `group_of_weight = 1.0`, and it is what FiftyOne implements. It is checked against the TensorFlow Object Detection API on every commit — see [verification](#verification) below.
+This is the [Open Images Challenge protocol](https://storage.googleapis.com/openimages/web/evaluation.html), equivalently TensorFlow's `group_of_weight = 1.0`, and it is what FiftyOne implements. It is checked against the TensorFlow Object Detection API on every commit — see [Verification](#verification).
 
 Open Images AP also uses **VOC 2010 all-points integration** — the exact area under the precision-recall curve — rather than COCO's 101-point recall grid. The protocol specifies it and both reference implementations do it, so an OID number here is not directly comparable to a COCO number computed on the same data.
 
 !!! note "Not the same as the Open Images V2 metric"
 
-    The older V2 detection metric ignored group-of boxes entirely — they contributed to neither the numerator nor the denominator (`group_of_weight = 0.0`). Both are real published protocols. hotcoco implements the Challenge metric, so **numbers here will not match a V2-era leaderboard**.
+    The older V2 detection metric ignored group-of boxes entirely — they contributed to neither the numerator nor the denominator (`group_of_weight = 0.0`). Both are real published protocols. hotcoco implements the Challenge metric, so **numbers here don't match a V2-era leaderboard**.
 
 Mechanically this is COCO's `iscrowd` with the scoring changed: same intersection-over-area measure, same "many detections may fall inside one region", but where a crowd region is dropped from the denominator, a group-of box is counted once and can be found.
 

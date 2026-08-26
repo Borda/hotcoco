@@ -66,7 +66,7 @@ table is a separate capture.
 
 ### Where the time goes
 
-The end-to-end numbers above blend two very different phases: **load** (JSON
+The preceding end-to-end numbers blend two very different phases: **load** (JSON
 parsing and index building — `COCO()` + `loadRes`) and **eval** (`evaluate` +
 `accumulate` + `summarize`). Splitting them shows where each library spends its
 time (single run, same synthetic detections as the 1× table):
@@ -120,7 +120,7 @@ Peak RAM is the peak working set (physical memory). Committed includes swap — 
 tests. Both are fetched by `just download-coco` — `data/` is not checked into the repository.
 
 **All 34 metrics agree to within 3.7e-14** — floating-point noise, the last few
-bits a `f64` can represent. Diffs below are raw measured differences, not rounded.
+bits a `f64` can represent. The diffs in the following tables are raw measured differences, not rounded.
 
 ### Bounding box
 
@@ -226,7 +226,7 @@ The same shape works for `hotcoco.mask` against `pycocotools.mask`; the repo's
 - **Wall clock time** includes file I/O, evaluation, and accumulation. Excludes Python import time.
 - **Core count affects the ratio.** hotcoco evaluates in parallel; pycocotools is
   single-threaded. Speedups therefore scale with the cores available, and the numbers
-  here come from an 8-core machine — a 4-core laptop will see less, a 32-core server
+  here come from an 8-core machine — a 4-core laptop sees less, a 32-core server
   more. Run the suite on your own hardware for a figure that describes it.
 - **Detections are synthetic** — generated from GT annotations with a fixed seed (`seed=42`), so AP scores are meaningless but detection count and format are representative of real model output. Fixed seed means results are identical across runs.
 - **Only detections are scaled** for the 10x benchmark — ground truth annotations are unchanged.

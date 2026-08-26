@@ -26,7 +26,7 @@
 //! # Crowd columns are intersection-over-area
 //!
 //! For a flagged column the formula is `intersection / area(first argument)` —
-//! i.e. IoA, not IoU. Detection calls this "crowd", but the quantity is general:
+//! that is, IoA rather than IoU. Detection calls this "crowd", but the quantity is general:
 //! it is exactly what MOT preprocessing needs for distractor suppression
 //! (TrackEval's `do_ioa=True`). A tracking driver wanting IoA against ignore
 //! regions should call `bbox_iou(dets, ignore_regions, &vec![true; n])` rather

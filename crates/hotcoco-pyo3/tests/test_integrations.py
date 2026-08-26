@@ -268,7 +268,7 @@ class TestCocoDetection:
 
         # First image in val2017: id=139, file_name="000000000139.jpg"
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a dummy JPEG matching the expected filename
+            # Create a placeholder JPEG matching the expected filename
             img = Image.new("RGB", (640, 426), color=(128, 64, 32))
             img.save(os.path.join(tmpdir, "000000000139.jpg"))
 

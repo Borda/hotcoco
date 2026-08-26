@@ -77,7 +77,7 @@ impl COCOeval {
 
         if self.params.iou_thrs != defaults.iou_thrs {
             out.push(
-                "iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines may show -1.000."
+                "iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines might show -1.000."
                     .to_string(),
             );
         }
@@ -164,7 +164,7 @@ impl COCOeval {
         out
     }
 
-    /// Whether this run's numbers may be presented as leaderboard-comparable.
+    /// Whether this run's numbers can be presented as leaderboard-comparable.
     ///
     /// The single mapping from [`reference_deviations`](Self::reference_deviations)
     /// to a [`Provenance`] bit, exposed separately so a renderer can have the bit
@@ -313,7 +313,7 @@ impl COCOeval {
     ///
     /// # Arguments
     ///
-    /// * `prefix` — When `Some("val/bbox")`, keys become `"val/bbox/AP"` etc.
+    /// * `prefix` — When `Some("val/bbox")`, keys become `"val/bbox/AP"` and so on.
     ///   When `None`, keys are bare metric names (`"AP"`, `"AR100"`, …).
     /// * `per_class` — When `true` and [`accumulate`](COCOeval::accumulate) has been
     ///   run, adds per-category AP entries keyed as `"AP/{cat_name}"` (or

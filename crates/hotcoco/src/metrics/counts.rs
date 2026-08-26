@@ -274,7 +274,7 @@ pub fn average_precision(
 
 /// [`average_precision`] for detections **already** in score-descending order.
 ///
-/// Same metric, same value — it simply skips the sort, which is the only thing
+/// Same metric, same value — it skips the sort, which is the only thing
 /// `scores` was used for. A caller ranking one array of detections several ways
 /// (TIDE runs eight AP evaluations per category over the same ranking) sorts once
 /// and calls this; sorting stably twice and sorting stably once produce the same
@@ -341,7 +341,7 @@ pub fn average_precision_ranked(
 /// leading `precision = 0` is never a summation term, and the trailing
 /// `(recall = 1, precision = 0)` contributes `(1 - max_recall) * 0`. They collapse
 /// into the loop bounds and the initial envelope value. Sweeping right to left also
-/// means the envelope is simply the running maximum, so it needs no second pass.
+/// means the envelope is just the running maximum, so it needs no second pass.
 pub fn average_precision_all_points(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize) -> f64 {
     let nd = tp_cum.len();
     if nd == 0 || num_gt == 0 {
@@ -518,7 +518,7 @@ mod tests {
         }
     }
 
-    /// All-points AP, derived by hand rather than recorded from our own output.
+    /// All-points AP, derived by hand rather than recorded from this crate's output.
     ///
     /// Each case is small enough to integrate on paper, which is the point: the
     /// end-to-end check against TensorFlow lives in `scripts/parity_oid.py`, and

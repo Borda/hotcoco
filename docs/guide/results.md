@@ -1,4 +1,4 @@
-# Working with Results
+# Working with results
 
 Beyond the 12 summary metrics, hotcoco gives you access to per-image evaluation results and the full precision/recall arrays.
 
@@ -68,7 +68,7 @@ After calling `evaluate()`, the `eval_imgs` field contains per-image, per-catego
     ev = COCOeval(coco_gt, coco_dt, "bbox")
     ev.evaluate()
 
-    # eval_imgs is a list — some entries may be None
+    # eval_imgs is a list — some entries can be None
     for e in ev.eval_imgs:
         if e is not None:
             print(f"Image {e['image_id']}, Cat {e['category_id']}")
@@ -165,7 +165,7 @@ After calling `accumulate()`, the full precision/recall curves are available:
 | A | Area ranges | 4 | `[all, small, medium, large]` |
 | M | Max detections | 3 | `[1, 10, 100]` |
 
-Precision has shape `[T x R x K x A x M]`. Recall has shape `[T x K x A x M]`. A value of `-1` means no data (e.g. no GT annotations for that category/area combination).
+Precision has shape `[T x R x K x A x M]`. Recall has shape `[T x K x A x M]`. A value of `-1` means no data — for example, no ground truth annotations for that category and area combination.
 
 ## The evaluation report
 
@@ -209,7 +209,7 @@ it. That covers more than geometry:
 Extension numbers are fine for comparing your own models against each other; they
 are not leaderboard numbers.
 
-The distinction is easy to lose once results reach a chart, so it travels with the
+The distinction goes missing the moment results reach a chart, so it travels with the
 data and survives saving and reloading:
 
 ```python
@@ -241,7 +241,7 @@ the run is parity-verified. It is the same predicate behind the warnings `summar
 prints, so a report cannot claim parity while the warnings disagree.
 
 Read these rather than inferring comparability from `iou_type` or the eval mode:
-parity is a property of the whole configuration, so the run above is an extension
+parity is a property of the whole configuration, so the preceding run is an extension
 even though it is ordinary COCO bbox evaluation.
 
 ### Plotting precision-recall curves
@@ -263,7 +263,7 @@ plt.legend()
 
 These are averaged over categories at `area="all"` and the largest `max_dets` — the
 slice a chart draws. For per-category curves, read the `eval["precision"]` array
-directly, as shown below.
+directly, as the next section shows.
 
 ## Extracting per-category AP
 
@@ -281,7 +281,7 @@ for key, val in per_class.items():
         print(f"{key[3:]}: {val:.3f}")
 ```
 
-For direct access to the raw precision arrays (e.g. to compute AP at a non-standard IoU or area range):
+For direct access to the raw precision arrays, for example to compute AP at a non-standard IoU or area range:
 
 === "Python"
 

@@ -67,7 +67,7 @@ pub struct BootstrapCI {
     pub lower: f64,
     /// Upper percentile bound.
     pub upper: f64,
-    /// Confidence level these bounds were computed at (e.g. 0.95).
+    /// Confidence level these bounds were computed at, for example 0.95.
     pub confidence: f64,
     /// Fraction of bootstrap samples in which the statistic was positive.
     ///

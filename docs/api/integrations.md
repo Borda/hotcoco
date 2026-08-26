@@ -1,4 +1,4 @@
-# PyTorch Integrations
+# PyTorch integrations
 
 Drop-in replacements for torchvision's detection reference classes, backed by hotcoco instead of pycocotools. No torchvision or pycocotools dependency required.
 
@@ -48,7 +48,7 @@ dataset = CocoDetection(
 
 image, targets = dataset[0]
 # image: Tensor(3, H, W)
-# targets: list of annotation dicts with bbox, category_id, etc.
+# targets: list of annotation dicts with bbox, category_id, and so on
 
 loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=lambda b: tuple(zip(*b)))
 ```
@@ -69,7 +69,7 @@ CocoEvaluator(
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `coco_gt` | `COCO` | Ground-truth COCO object |
-| `iou_types` | `list[str]` | IoU types to evaluate, e.g. `["bbox"]` or `["bbox", "segm"]` |
+| `iou_types` | `list[str]` | IoU types to evaluate, for example `["bbox"]` or `["bbox", "segm"]` |
 
 **Example**
 
