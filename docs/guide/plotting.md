@@ -82,6 +82,14 @@ fig, ax = pr_curve(ev, cat_id=1)
 fig, ax = pr_curve(ev, iou_thr=0.50, top_n=10)
 ```
 
+<figure markdown>
+![Precision-recall curves at IoU 0.50 and 0.75](../assets/pr-curve.png#only-light)
+![Precision-recall curves at IoU 0.50 and 0.75](../assets/pr-curve-dark.png#only-dark)
+<figcaption>The IoU sweep, narrowed to the two thresholds COCO reports as AP50 and AP75
+(<code>iou_thrs=[0.50, 0.75]</code>). The primary curve is drawn heavier, filled, and
+annotated at its peak F1. The default plots all ten thresholds.</figcaption>
+</figure>
+
 ### Per-category AP
 
 ```python
@@ -95,6 +103,14 @@ Shows horizontal bars sorted by AP with a mean AP reference line.
 When there are many categories, the top 20 and bottom 5 are shown
 with a visual break.
 
+<figure markdown>
+![Per-category AP as horizontal bars, best to worst](../assets/per-category-ap.png#only-light)
+![Per-category AP as horizontal bars, best to worst](../assets/per-category-ap-dark.png#only-dark)
+<figcaption>All 80 COCO categories, collapsed to the top 20 and bottom 5. The dashed
+line is mean AP — the gap between <code>bed</code> and <code>sports ball</code> is the
+kind of thing a single AP number hides.</figcaption>
+</figure>
+
 ### Confusion matrix
 
 ```python
@@ -102,6 +118,13 @@ from hotcoco.plot import confusion_matrix
 
 fig, ax = confusion_matrix(ev.confusion_matrix())
 ```
+
+<figure markdown>
+![Row-normalized confusion matrix for fifteen COCO categories](../assets/confusion-matrix.png#only-light)
+![Row-normalized confusion matrix for fifteen COCO categories](../assets/confusion-matrix-dark.png#only-dark)
+<figcaption>Row-normalized, so the diagonal reads as recall. The <code>BG</code> row and
+column carry detections with no ground truth and ground truth with no detection.</figcaption>
+</figure>
 
 For datasets with many categories (>30), the matrix auto-filters to
 the 25 most confused categories. You can also aggregate by supercategory:
@@ -138,6 +161,14 @@ fig, ax = tide_errors(ev.tide_errors())
 Shows the six TIDE error types (Cls, Loc, Both, Dupe, Bkg, Miss)
 as horizontal bars with their delta-AP values.
 
+<figure markdown>
+![TIDE error breakdown as horizontal bars](../assets/tide-errors.png#only-light)
+![TIDE error breakdown as horizontal bars](../assets/tide-errors-dark.png#only-dark)
+<figcaption>Each bar is the AP you would recover by fixing that error type alone. Here
+localization dominates and classification is near zero — a model that finds the right
+things in roughly the wrong place.</figcaption>
+</figure>
+
 ### Model comparison
 
 ```python
@@ -158,6 +189,10 @@ AP deltas sorted by magnitude — green for improvements, red for regressions.
 Every plot function accepts a `theme` argument — `"cyanotype"` (the default)
 or `"cyanotype-dark"`. See
 [themes](../api/plot.md#themes) for what each looks like.
+
+Every figure on this page is drawn twice — `"cyanotype"` and `"cyanotype-dark"` —
+and the site swaps them with the palette toggle in the header. Flip it to see the
+dark theme.
 
 ```python
 fig, ax = pr_curve(ev, theme="cyanotype-dark")

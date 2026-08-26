@@ -1,14 +1,13 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-hotcoco is a pure Rust port of [pycocotools](https://github.com/ppwwyyxx/cocoapi) with PyO3 Python bindings. It provides 17-33x speedups over pycocotools for bbox, segmentation, and keypoint evaluation.
-
-- **Primary language:** Rust. All core logic lives in `hotcoco`.
-- **Python bindings:** PyO3/maturin in `hotcoco-pyo3`, exposed as the `hotcoco` Python package.
-- **CLI:** `hotcoco-cli` binary wrapping the Rust library.
+hotcoco is a perception evaluation toolkit — a pure-Rust engine with PyO3 Python
+bindings. Detection is the family that ships today (COCO, LVIS, and Open Images
+protocols over bbox, segm, keypoints, and OBB) and doubles as a drop-in
+[pycocotools](https://github.com/ppwwyyxx/cocoapi) replacement at 19–36× the speed
+on COCO val2017. Panoptic and tracking are planned families on the same engine —
+see `plans/PLAN.md` for the ladder, `plans/POSITIONING.md` for how the docs say so.
 
 ### Build and binding mechanics
 
@@ -100,15 +99,6 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - `just fuzz` runs the hypothesis-based fuzzer (`scripts/fuzz_parity.py`) — use to hunt for parity bugs, not in CI. Takes several minutes.
 - Model: use the fuzzer to *find* bugs, then prove fixes with Rust integration tests in `crates/hotcoco/tests/`.
 
-Running a single test:
-
-```bash
-cargo test -p hotcoco --test integration_test <test_name>
-cargo test -p hotcoco --test architecture            # just the conformance checks
-cargo test -p hotcoco --lib metrics::counts          # one module's unit tests
-uv run pytest scripts/test_stubs.py::<test_name>
-```
-
 ### What CI does and does not check
 
 - `just semver` gates the public Rust API (needs `cargo install cargo-semver-checks --locked`).
@@ -172,8 +162,6 @@ monotonically until the disk fills. Assume nothing cleans up for you.
 
 - This project targets Python users first, Rust users second. Documentation, README, and examples should lead with Python usage in a Python-first tone similar to Polars. Do not be Rust-centric.
 - Before making large-scale changes (docs revamps, major refactors), present a concrete preview or small example for approval first. Do not rewrite everything at once. For small additions (a single new page, a new section), just write it directly.
-
-Docs are built with Zensical (config: `zensical.toml`). Preview locally with `zensical serve`.
 
 When updating documentation (`docs/`) or `README.md`, always ensure both reflect the same information. Any change to one must be checked against the other — benchmark numbers, API examples, CLI flags, installation instructions, and feature descriptions must stay consistent across both.
 

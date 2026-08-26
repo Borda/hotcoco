@@ -3,7 +3,7 @@
 Six surfaces each hold their own copy of the theme values, and only three of
 them can import Python. Before this file the spec was a markdown convention
 with nothing stopping a copy from drifting — which is exactly how the previous
-system ended up with the same colour in five places at four values.
+system ended up with the same color in five places at four values.
 
 These tests are cheap and they fail loudly. To prove one still works, change a
 hex in `style.css` and watch it go red.
@@ -11,6 +11,7 @@ hex in `style.css` and watch it go red.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -23,7 +24,7 @@ FONTS_DIR = ROOT / "python" / "hotcoco" / "_fonts"
 
 pytest.importorskip("matplotlib", reason="theme constants live behind the plot extra")
 
-from hotcoco.plot.theme import CHROME_DARK, EVAL_COLORS_DARK, SERIES_COLORS_DARK  # noqa: E402
+from hotcoco.plot.theme import CHROME_DARK, EVAL_COLORS, EVAL_COLORS_DARK, SERIES_COLORS_DARK, eval_colors  # noqa: E402
 
 
 def _root_tokens() -> dict[str, str]:
@@ -146,3 +147,100 @@ def test_the_vendored_weights_cover_what_the_code_asks_for():
         for ttf in sorted(FONTS_DIR.glob("IBMPlexSans-*.ttf"))
     }
     assert {400, 500, 600} <= weights, f"vendored weights: {sorted(weights)}"
+
+
+# ---------------------------------------------------------------------------
+# Matplotlib draws with literals unless something stops it. This is that thing.
+# ---------------------------------------------------------------------------
+
+PLOT_PKG = ROOT / "python" / "hotcoco" / "plot"
+
+# Not a color: `"none"` asks for transparency, so there is no theme value it
+# could have come from instead.
+_LITERAL_COLOR_OK = {"none"}
+
+
+def _color_literals(source: str) -> list[str]:
+    """Every hardcoded color handed to a drawing call in *source*.
+
+    Walks the AST rather than matching text, because matplotlib accepts a color
+    by three different spellings and a regex over one of them is a guard with
+    two doors open. All three are checked:
+
+    * ``ax.plot(..., color="gray")`` — a keyword whose name ends in ``color``
+    * ``ax.set_facecolor("#FFFFFF")`` — a ``set_*color`` setter
+    * ``gap_color = "firebrick"`` — a local later handed to one of the above
+
+    A palette *table* is deliberately not a finding. ``_THEMES`` and ``report``'s
+    ``_RC`` are literal by definition — they are where the values live. What must
+    never hold a literal is the call that draws, because that is a copy the table
+    cannot reach.
+    """
+    found = []
+
+    def record(node, label):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value.lower() not in _LITERAL_COLOR_OK:
+                found.append(f"{label}={node.value!r} (line {node.lineno})")
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg and kw.arg.lower().endswith(("color", "colors")):
+                    record(kw.value, kw.arg)
+            func = node.func
+            if isinstance(func, ast.Attribute) and re.fullmatch(r"set_\w*colors?", func.attr):
+                for arg in node.args:
+                    record(arg, func.attr)
+            # A dict built inline in a call is a drawing site, not a table:
+            # `ax.text(..., bbox={"facecolor": "white"})` reaches matplotlib
+            # under a keyword that is not itself named for a color.
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                for sub in ast.walk(arg):
+                    if isinstance(sub, ast.Dict):
+                        for key, value in zip(sub.keys, sub.values):
+                            if (
+                                isinstance(key, ast.Constant)
+                                and isinstance(key.value, str)
+                                and key.value.lower().endswith(("color", "colors"))
+                            ):
+                                record(value, key.value)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.lower().endswith(("color", "colors")):
+                    record(node.value, target.id)
+
+    return found
+
+
+@pytest.mark.parametrize("module", sorted(p.name for p in PLOT_PKG.glob("*.py")))
+def test_no_color_is_drawn_from_a_literal(module):
+    """Every drawn color resolves through the theme, so both grounds are covered.
+
+    The failure this prevents is not an off-brand chart, it is an invisible one:
+    `reliability_diagram` shipped a `facecolor="white"` annotation box that hid
+    its own text under the dark theme, and a `firebrick` gap that put a second
+    red in a system where red belongs to false positives. Neither was caught,
+    because the red rule was only ever asserted against `style.css` tokens.
+
+    Globbed, not enumerated. Unlike the layering allowlists in
+    `tests/architecture.rs`, "a module that draws" is not a category anyone
+    decides — it is every module in the package, so a new one must be covered by
+    default rather than by remembering to add it here.
+    """
+    offenders = _color_literals((PLOT_PKG / module).read_text())
+    assert not offenders, (
+        f"{module} draws with hardcoded color(s): {offenders}. "
+        f"Resolve through rcParams inside the rc_context, eval_colors(theme), "
+        f"or the module's own palette table."
+    )
+
+
+def test_eval_colors_resolves_per_ground():
+    """The FP red must differ by ground; one value cannot serve both."""
+    assert eval_colors("cyanotype") is EVAL_COLORS
+    assert eval_colors("cyanotype-dark") is EVAL_COLORS_DARK
+    for state in ("tp", "fp", "fn"):
+        assert not _same(eval_colors("cyanotype")[state], eval_colors("cyanotype-dark")[state])
+    with pytest.raises(ValueError, match="Unknown theme"):
+        eval_colors("cold-brew")

@@ -5,11 +5,11 @@ build-backend = "maturin"
 [project]
 name = "hotcoco"
 version = "1.0.0"
-description = "Drop-in pycocotools replacement — up to 23x faster COCO evaluation in pure Rust"
+description = "Perception evaluation toolkit — pycocotools-compatible detection metrics in pure Rust, up to 36× faster"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "Derek Allman", email = "derek.allman@yahoo.com" }]
-keywords = ["coco", "pycocotools", "object-detection", "evaluation", "computer-vision", "segmentation", "keypoints", "instance-segmentation"]
+keywords = ["coco", "pycocotools", "object-detection", "evaluation", "computer-vision", "segmentation", "keypoints", "instance-segmentation", "perception", "model-evaluation"]
 readme = "README.md"
 dependencies = [
     "numpy>=1.22",

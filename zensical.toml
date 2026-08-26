@@ -1,9 +1,10 @@
 [project]
 site_name = "hotcoco"
 site_url = "https://derekallman.github.io/hotcoco/"
-site_description = "A drop-in replacement for pycocotools, up to 36× faster."
+site_description = "Perception evaluation in pure Rust — pycocotools-compatible detection metrics up to 36× faster, plus diagnostics and dataset tools."
 repo_url = "https://github.com/derekallman/hotcoco"
 repo_name = "derekallman/hotcoco"
+copyright = "MIT licensed"
 
 nav = [
   { "Home" = "index.md" },
@@ -93,3 +94,20 @@ permalink = true
 alternate_style = true
 
 [project.markdown_extensions.pymdownx.details]
+
+# Footer links. Rendered by the theme's social partial into .md-footer-meta —
+# without these the footer carries nothing but "Made with Zensical".
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/derekallman/hotcoco"
+name = "hotcoco on GitHub"
+
+[[project.extra.social]]
+icon = "simple/pypi"
+link = "https://pypi.org/project/hotcoco/"
+name = "hotcoco on PyPI"
+
+[[project.extra.social]]
+icon = "simple/rust"
+link = "https://crates.io/crates/hotcoco"
+name = "hotcoco on crates.io"

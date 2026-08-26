@@ -9,6 +9,12 @@ extend-exclude = [
     # the directory would take 3.5k lines of first-party code out of the check.
     "*.min.js",
     "*.ttf",
+    # Same reasoning for the generated docs figures: a PNG's compressed bytes
+    # decode as words often enough to bury the real hits. `docs/assets/` also
+    # holds no text, but excluding by extension keeps the rule uniform with the
+    # two above and survives a future .md landing beside the images.
+    "*.png",
+    "*.webp",
 ]
 
 [default]
@@ -44,6 +50,9 @@ iscrowd = "iscrowd"
 dota = "dota"
 ded = "ded"
 nd = "nd"
+# Chart palette slot 6. A colour name, not a misspelling of "ocher" — the
+# cyanotype skill, plot/theme.py, and dashboard.py all spell it this way.
+ochre = "ochre"
 
 # `extend-identifiers`, not `extend-words`: this still flags `fo` as a *sub-word*
 # of a compound identifier, where `extend-words` would allowlist it everywhere.

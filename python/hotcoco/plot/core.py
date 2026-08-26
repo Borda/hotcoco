@@ -237,10 +237,16 @@ def _f1_peak(recall_pts, prec) -> "tuple[int, float] | None":
     return best, float(f1[best])
 
 
-def _annotate_f1_peak(ax, recall_pts, prec, line):
-    """Fill under a PR curve and mark the F1 peak."""
+def _annotate_f1_peak(ax, recall_pts, prec, line, *, fill: bool = True):
+    """Mark the F1 peak of a PR curve, optionally filling the area under it.
+
+    ``fill=False`` for a multi-curve plot. The fill runs from the curve down to
+    zero, so under the topmost curve of a sweep it tints every other curve's
+    area as well and washes the whole plot rather than delimiting anything.
+    """
     color = line.get_color()
-    ax.fill_between(recall_pts, prec, alpha=0.15, color=color)
+    if fill:
+        ax.fill_between(recall_pts, prec, alpha=0.15, color=color)
     peak = _f1_peak(recall_pts, prec)
     if peak is None:
         return

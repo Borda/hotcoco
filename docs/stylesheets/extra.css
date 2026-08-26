@@ -56,7 +56,9 @@
   --md-footer-fg-color:             #EAEAEA;
   --md-footer-fg-color--light:      #B0B0B3;
 
-  
+  /* Headings — darker than body, so hierarchy reads as *more* ink */
+  --hc-heading-color:               #0E0E10;
+
   /* Floating surfaces only; depth otherwise comes from rule weight. */
   --hc-shadow-sm:   none;
   --hc-shadow-md:   0 2px 10px rgba(20, 20, 21, 0.10);
@@ -112,6 +114,9 @@
   --md-footer-fg-color:             #EAEAEA;
   --md-footer-fg-color--light:      #8C8C90;
 
+  /* Headings — brighter than body, never pure white on graphite */
+  --hc-heading-color:               #F4F4F4;
+
   /* Shadows */
   --hc-shadow-sm:   none;
   --hc-shadow-md:   0 3px 12px rgba(0, 0, 0, 0.40);
@@ -144,9 +149,22 @@
    Layout — wider grid, better horizontal use
    ============================================================ */
 
-/* Widen the outer grid from Material's default ~61rem */
+/* Widen the outer grid from Material's default ~61rem.
+   The grid spans the sidebars too, so at 1400px a 1920px display gave the
+   content column 826px — 40% of the screen, with 520px of dead margin. This is
+   documentation for a desktop tool; it should use a desktop. */
 .md-grid {
-  max-width: 1320px;
+  /* The vw term keeps a margin at every size instead of going edge-to-edge on
+     the displays that happen to land exactly on the cap. */
+  max-width: min(1760px, 92vw);
+}
+
+/* 15px body is fine at 1280 and mean at 1920. Nudge the root, which everything
+   in Material is expressed against, rather than patching individual elements. */
+@media screen and (min-width: 100em) {
+  html {
+    font-size: 131.25%;
+  }
 }
 
 /* Give content more breathing room when sidebars are present */
@@ -154,14 +172,58 @@
   max-width: none;
 }
 
-/* Slightly tighter sidebar so content gets more width */
-.md-sidebar--primary {
-  width: 14rem;
+/* A wider column is for the wide things — comparison tables, parameter tables,
+   long CLI output. Prose gets a reading measure instead: at the full column
+   width a paragraph ran past 100 characters a line. Tables, fences, and
+   admonitions deliberately keep the whole column. */
+@media screen and (min-width: 76.25em) {
+  .md-typeset > p,
+  .md-typeset > ul,
+  .md-typeset > ol,
+  .md-typeset > blockquote,
+  .md-typeset > h1,
+  .md-typeset > h2,
+  .md-typeset > h3,
+  .md-typeset > h4 {
+    max-width: 70ch;   /* ~75 characters a line; 1ch is 10.3px in IBM Plex Sans here */
+  }
+
+  /* Code is read like prose, not scanned like a table. A fence stretched to the
+     full column puts `pip install hotcoco` in a 1760px band. Tables, figures and
+     admonitions still get the whole width, which is what it was widened for. */
+  .md-typeset > .highlight,
+  .md-typeset > pre,
+  .md-typeset > .tabbed-set,
+  .md-typeset > .highlighttable {
+    max-width: 1100px;
+  }
+}
+
+/* Slightly tighter sidebar so content gets more width.
+   Desktop-only: Material hides the mobile drawer with `left: -<its own width>`,
+   so overriding the width unscoped leaves the drawer jutting on-screen by the
+   difference — 38px of it, directly over the hamburger button. */
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary {
+    width: 14rem;
+  }
 }
 
 /* ============================================================
    Typography
    ============================================================ */
+
+/* Material leaves headings at pure #fff in slate, which reads cold against the
+   warm body text. One token, correct in both schemes. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  color: var(--hc-heading-color);
+}
+
 .md-typeset a {
   color: var(--md-accent-fg-color);
 }
@@ -187,19 +249,28 @@
   padding: 0.85em 1.1em;
 }
 
-/* Inline code */
+/* Inline code.
+   These docs run several code spans per sentence, so the chip carries one
+   signal (a tinted ground), not three. A border on top of a background on top
+   of a size drop turns ordinary prose into a ransom note. */
 .md-typeset code {
   background-color: var(--md-code-bg-color);
   color: var(--md-code-fg-color);
   border-radius: 0.25rem;
-  padding: 0.05em 0.3em;
-  font-size: 0.85em;
-  border: 1px solid var(--md-default-fg-color--lightest);
+  padding: 0.1em 0.32em;
+  font-size: 0.92em;
 }
 
-/* Don't double-border code inside pre */
+/* Material sizes admonition bodies at 0.64rem; inline code inside them then
+   compounds down to ~11px. Hold the floor. */
+.md-typeset .admonition,
+.md-typeset details {
+  font-size: 0.72rem;
+}
+
+/* Code inside a fence is already on its own ground */
 .md-typeset pre code {
-  border: none;
+  background-color: transparent;
   padding: 0;
   font-size: inherit;
 }
@@ -308,7 +379,7 @@
    ============================================================ */
 .md-typeset .hero {
   text-align: center;
-  padding: 3.5rem 2rem 2rem;
+  padding: 1.75rem 2rem 1.5rem;
   background: linear-gradient(
     150deg,
     var(--md-default-bg-color--lighter, var(--md-default-bg-color)) 0%,
@@ -320,24 +391,26 @@
 }
 
 .md-typeset .hero h1 {
-  font-size: 2.6rem;
+  font-size: 1.8rem;
   font-weight: 800;
-  margin-bottom: 0.5rem;
-  color: var(--md-primary-fg-color--dark, var(--md-primary-fg-color));
+  margin-bottom: 0.35rem;
+  color: var(--hc-heading-color);
   letter-spacing: -0.02em;
 }
 
 .md-typeset .hero .hero-tagline {
-  font-size: 1.15rem;
+  font-size: 1.02rem;
   opacity: 0.75;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.35rem;
 }
 
 .md-typeset .hero .hero-sub {
-  font-size: 0.92rem;
+  font-size: 0.86rem;
   opacity: 0.6;
-  margin-bottom: 2rem;
-  max-width: 640px;
+  margin-bottom: 1.1rem;
+  /* Wide enough to hold the sentence in two lines. At 620px it broke to four,
+     which was the single largest block in the hero. */
+  max-width: 780px;
   margin-left: auto;
   margin-right: auto;
 }
@@ -348,6 +421,18 @@
   justify-content: center;
   flex-wrap: wrap;
   margin-bottom: 0;
+}
+
+/* Markdown wraps the three links in a <p>, so the flex box above was laying out
+   one paragraph rather than three buttons, and that paragraph's 15px margins
+   added 30px of dead height. Make the paragraph the flex row instead. */
+.md-typeset .hero .hero-actions > p {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 0;
+  width: 100%;
 }
 
 /* Pill buttons */
@@ -392,7 +477,11 @@
    ============================================================ */
 .md-typeset .feature-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  /* Explicit counts, not auto-fit. A four-card set divides evenly into 1, 2 and
+     4 columns only — auto-fit picks 3 whenever the column happens to be wide
+     enough for three cards, stranding the fourth alone on its own row. There is
+     no minmax() floor that expresses "never three". */
+  grid-template-columns: 1fr;
   gap: 1rem;
   margin: 1.5rem 0 2rem;
 }
@@ -414,7 +503,7 @@
 .md-typeset .feature-card strong {
   display: block;
   margin-bottom: 0.3rem;
-  color: var(--md-primary-fg-color);
+  color: var(--hc-heading-color);
   font-size: 0.92rem;
 }
 
@@ -448,3 +537,155 @@
 .md-typeset .benchmark-table td:first-child {
   text-align: left;
 }
+
+/* ============================================================
+   Footer
+   ============================================================ */
+/* Zensical does not consume the --md-footer-* variables the way upstream
+   Material does, so all eight of them were inert and the meta strip fell
+   through to --md-default-fg-color--lightest (a muddy #C5BDB6 band). The
+   variables stay as the single source of truth; these rules apply them. */
+.md-footer {
+  background-color: var(--md-footer-bg-color);
+  color: var(--md-footer-fg-color);
+}
+
+.md-footer__link,
+.md-footer__title {
+  color: var(--md-footer-fg-color);
+}
+.md-footer__link:hover {
+  color: #FFF;
+  opacity: 1;
+}
+
+.md-footer-meta {
+  background-color: var(--md-footer-bg-color--dark);
+  color: var(--md-footer-fg-color--light);
+}
+.md-footer-meta .md-copyright,
+.md-footer-meta .md-copyright__highlight {
+  color: var(--md-footer-fg-color--light);
+}
+/* Material claims footer links at `html .md-footer-meta.md-typeset a:not(...)`,
+   which outranks a plain `.md-footer-meta a`. Match its shape or lose. */
+html .md-footer-meta.md-typeset a:not(:focus, :hover) {
+  color: var(--md-footer-fg-color--light);
+}
+html .md-footer-meta.md-typeset a:hover {
+  color: var(--md-footer-fg-color);
+}
+
+/* Social row — GitHub / PyPI / crates.io, from [[project.extra.social]].
+   Colors come from the footer-meta anchor rules above. */
+
+/* ============================================================
+   Figures
+   ============================================================ */
+/* The matplotlib figures ship on the cyanotype light ground (#F5F5F4), which is
+   correct on the light scheme and deliberately kept on the dark one: a chart is
+   a printed artifact, so it sits on its own paper rather than being recoloured
+   per theme. The frame is what makes that read as intentional. */
+.md-typeset figure {
+  /* Material gives figure `width: fit-content`, so it shrinks to the image and
+     needs auto inline margins to sit in the middle of the column. */
+  margin: 1.6em auto;
+  text-align: center;
+}
+
+.md-typeset figure img,
+.md-typeset p > img {
+  max-width: 100%;
+  /* Near-square charts (the PR curve, the per-category bars) would otherwise run
+     ~870px tall at full column width and swallow the page. Capping height lets
+     wide charts stay full-width while tall ones scale down. */
+  max-height: 640px;
+  width: auto;
+  height: auto;
+  /* Material sets display:block on figure images, so the figure's text-align
+     does not center them — they need their own auto margins. */
+  margin-inline: auto;
+  border-radius: 0.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  box-shadow: var(--hc-shadow-sm);
+}
+
+.md-typeset figure figcaption {
+  margin-top: 0.7em;
+  font-size: 0.68rem;
+  color: var(--md-default-fg-color--light);
+  line-height: 1.5;
+  max-width: 62ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Scheme-swapped figures. Every chart in docs/assets/ ships as a light/dark
+   pair (see scripts/gen_docs_assets.py); the page carries both and hides one.
+   Keyed off the palette toggle, not prefers-color-scheme, so it follows the
+   switch in the header rather than the OS. */
+[data-md-color-scheme="slate"] img[src$="#only-light"],
+[data-md-color-scheme="default"] img[src$="#only-dark"] {
+  display: none;
+}
+
+/* Both images live in one <p> inside the <figure>; without this the hidden one
+   still leaves its paragraph spacing behind. */
+.md-typeset figure p:empty {
+  display: none;
+}
+
+/* A UI screenshot is a picture of a screen, not paper — no paper frame. */
+.md-typeset figure.screenshot img {
+  border-color: var(--md-default-fg-color--lighter);
+  box-shadow: var(--hc-shadow-md);
+}
+
+/* ============================================================
+   Wide desktop
+   ============================================================ */
+/* Two up once there is room for two readable cards ... */
+@media screen and (min-width: 45em) {
+  .md-typeset .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ... and all four on one row once each card still clears ~290px. Switching at
+   the narrower 76.25em breakpoint instead gave 258px-wide, 290px-tall cards —
+   balanced, but cramped. Jumps straight from 2 to 4, so the orphan row cannot
+   happen at any width. */
+@media screen and (min-width: 85em) {
+  .md-typeset .feature-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+@media screen and (min-width: 100em) {
+
+  /* A wider column earns a slightly longer line before it starts to strain. */
+  .md-typeset > p,
+  .md-typeset > ul,
+  .md-typeset > ol,
+  .md-typeset > blockquote,
+  .md-typeset > h1,
+  .md-typeset > h2,
+  .md-typeset > h3,
+  .md-typeset > h4 {
+    max-width: 78ch;
+  }
+
+  /* The hero box spans the column, but its type does not grow with it: the
+     root font is already scaled up at this width, so a rem-sized heading gets
+     bigger for free. Stacking a larger rem count on top made it enormous. */
+  .md-typeset .hero {
+    padding: 2.5rem 2rem 2rem;
+  }
+  .md-typeset .hero .hero-sub,
+  .md-typeset .hero .hero-tagline {
+    max-width: 44rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+

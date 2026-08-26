@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Rust implementation of pycocotools — COCO dataset API for object detection, segmentation, and keypoint evaluation"
+description = "Perception evaluation in pure Rust — a pycocotools-compatible COCO/LVIS/Open Images engine with diagnostics and dataset tools"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,3 +1,17 @@
+"""Perception evaluation in pure Rust.
+
+Detection ships today — bbox, segmentation, keypoints, and oriented boxes
+across the COCO, LVIS, and Open Images protocols. The fastest way in is as a
+pycocotools replacement::
+
+    from hotcoco import init_as_pycocotools
+    init_as_pycocotools()
+
+Past that: TIDE error attribution, confusion matrices, calibration, per-image
+diagnostics, dataset tools, and metric functions callable on plain arrays.
+Docs: https://derekallman.github.io/hotcoco/
+"""
+
 from __future__ import annotations
 
 from .hotcoco import COCO, COCOeval, Hierarchy, Params, compare, init_as_lvis, init_as_pycocotools, mask  # noqa: F401

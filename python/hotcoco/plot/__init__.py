@@ -37,6 +37,7 @@ from .theme import (
     SEQUENTIAL_DARK,
     SERIES_COLORS,
     SERIES_COLORS_DARK,
+    eval_colors,
     style,
 )
 
@@ -60,6 +61,7 @@ __all__ = [
     "CHROME_DARK",
     "EVAL_COLORS",
     "EVAL_COLORS_DARK",
+    "eval_colors",
     "SEQUENTIAL",
     "SEQUENTIAL_DARK",
 ]

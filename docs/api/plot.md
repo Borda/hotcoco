@@ -35,12 +35,12 @@ pr_curve_iou_sweep(
 )
 ```
 
-Plot one precision-recall curve per IoU threshold, with precision averaged across all categories. The primary line (lowest IoU) gets an under-fill and F1 peak annotation.
+Plot one precision-recall curve per IoU threshold, with precision averaged across all categories. The primary line (lowest IoU) is annotated at its F1 peak, and filled under only when the plot has at most two curves — a fill runs to zero, so under the topmost curve of a wider sweep it would tint every other curve's area too. Past four curves the legend moves outside the axes rather than sitting on the data.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `coco_eval` | `COCOeval` | Must have `run()` called first. |
-| `iou_thrs` | <code>list[float] &#124; None</code> | IoU thresholds to include. Default: all thresholds in params. |
+| `iou_thrs` | <code>list[float] &#124; None</code> | IoU thresholds to include. Default: all thresholds in params. Matched against the run's grid within a tolerance, since the default grid stores 0.90 as `0.8999999999999999`. Raises `ValueError` for a threshold the run was not accumulated at. |
 | `area_rng` | `str` | Area range: `"all"`, `"small"`, `"medium"`, `"large"`. Default `"all"`. |
 | `max_det` | <code>int &#124; None</code> | Max detections. Default: last entry in `params.max_dets`. |
 
@@ -357,7 +357,7 @@ with style(paper_mode=True):
 The `cyanotype` theme constants are available for custom plots:
 
 ```python
-from hotcoco.plot import SERIES_COLORS, CHROME, SEQUENTIAL
+from hotcoco.plot import SERIES_COLORS, CHROME, SEQUENTIAL, eval_colors
 ```
 
 - `SERIES_COLORS` — 10 data series colors (Prussian, Madder, Olive, Viridian, Plum, Ochre, Cerulean, Vermilion, Fern, Graphite)
@@ -367,3 +367,23 @@ from hotcoco.plot import SERIES_COLORS, CHROME, SEQUENTIAL
 - `SEQUENTIAL` — 3-stop colormap for heatmaps (silver paper → Prussian → deep navy)
 - `SEQUENTIAL_DARK` — the inverted ramp for dark grounds
 - `CHROME_DARK` — dark-ground text/label/tick/grid/spine values
+
+### `eval_colors`
+
+```python
+eval_colors(theme="cyanotype") -> dict[str, str]
+```
+
+Return the TP/FP/FN colors for the ground `theme` renders against — `EVAL_COLORS`
+for a light theme, `EVAL_COLORS_DARK` for a dark one. Prefer this to naming either
+constant directly: the two are not interchangeable, and picking the wrong one gives
+an unreadable figure rather than an off-brand one, since `#B24A2E` disappears into
+`#141415` and `#F0A050` fails contrast on `#F5F5F4`. Raises `ValueError` for an
+unknown theme name.
+
+```python
+from hotcoco.plot import eval_colors
+
+eval_colors("cyanotype")["fp"]       # '#B24A2E'
+eval_colors("cyanotype-dark")["fp"]  # '#F0A050'
+```

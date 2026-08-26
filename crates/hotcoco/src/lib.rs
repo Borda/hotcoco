@@ -1,4 +1,8 @@
-//! A pure-Rust implementation of COCO-style evaluation.
+//! Perception evaluation in pure Rust.
+//!
+//! Detection ships today — bbox, segmentation, keypoints, and oriented boxes
+//! across the COCO, LVIS, and Open Images protocols — on a layered engine that
+//! other metric families will share.
 //!
 //! ```no_run
 //! use hotcoco::{COCO, COCOeval, params::IouType};

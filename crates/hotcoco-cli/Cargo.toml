@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "CLI for COCO dataset evaluation"
+description = "Command-line COCO/LVIS/Open Images evaluation, powered by hotcoco"
 
 [[bin]]
 name = "coco-eval"

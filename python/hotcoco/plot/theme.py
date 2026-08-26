@@ -83,6 +83,11 @@ def _build_rc(theme_name: str = "cyanotype", paper_mode: bool = False) -> dict:
     from cycler import cycler
 
     t = _get_theme(theme_name)
+    if paper_mode and t.get("dark"):
+        raise ValueError(
+            f"paper_mode=True forces a white background, which erases the {theme_name!r} "
+            f"theme's dark chrome and leaves unreadable text. Use a light theme for print."
+        )
     _ensure_cmap(t)
     bg = "#ffffff" if paper_mode else t["background"]
     plot_bg = t["background"] if paper_mode else t["plot_bg"]
@@ -148,6 +153,19 @@ CHROME_DARK: dict[str, str] = {
 # false positives, which is why the signature is blue and the caveat is plum.
 EVAL_COLORS: dict[str, str] = {"tp": "#47714E", "fp": "#B24A2E", "fn": "#5A5FB0"}
 EVAL_COLORS_DARK: dict[str, str] = {"tp": "#7FBC98", "fp": "#F0A050", "fn": "#9296EE"}
+
+
+def eval_colors(theme_name: str = "cyanotype") -> dict[str, str]:
+    """The TP/FP/FN semantics for the ground ``theme_name`` renders against.
+
+    The only mapping from a theme name to a set of eval colors. Picking the
+    wrong one is not an off-brand figure, it is an unreadable one: `#B24A2E`
+    disappears into `#141415` and `#F0A050` fails contrast on `#F5F5F4`.
+
+    Keyed off the theme's own ``dark`` flag rather than the name, so a future
+    dark theme is covered without a second string to keep in sync.
+    """
+    return EVAL_COLORS_DARK if _get_theme(theme_name).get("dark") else EVAL_COLORS
 
 
 @contextmanager

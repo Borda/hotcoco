@@ -19,7 +19,7 @@ from .core import (
     _top_confusion_keep,
 )
 from .data import PlotData
-from .theme import CHROME, _build_rc, _get_theme
+from .theme import CHROME, _build_rc, _get_theme, eval_colors
 
 
 def pr_curve_iou_sweep(
@@ -35,15 +35,18 @@ def pr_curve_iou_sweep(
 ) -> tuple:
     """Plot mean precision-recall across all IoU thresholds.
 
-    One line per IoU threshold, precision averaged across all categories.
-    The primary line (lowest IoU) gets an under-fill and F1 peak annotation.
+    One line per IoU threshold, precision averaged across all categories. The
+    primary line (lowest IoU) is annotated at its F1 peak, and filled under only
+    when the plot has at most two curves — a fill runs to zero, so under the
+    topmost curve of a wider sweep it tints every other curve's area too.
 
     Parameters
     ----------
     coco_eval : COCOeval
         Must have ``run()`` called first.
     iou_thrs : list[float], optional
-        IoU thresholds to include. Default: all thresholds in params.
+        IoU thresholds to include. Default: all thresholds in params. Raises
+        ``ValueError`` if a threshold is not in this run's grid.
     area_rng : str
         Area range label. Default ``"all"``.
     max_det : int, optional
@@ -64,24 +67,27 @@ def pr_curve_iou_sweep(
     a_idx = data.area_idx(area_rng)
     m_idx = data.max_det_idx(max_det)
 
-    t_indices = (
-        list(range(len(data.iou_thresholds)))
-        if iou_thrs is None
-        else [i for i, t in enumerate(data.iou_thresholds) if t in iou_thrs]
-    )
+    t_indices = list(range(len(data.iou_thresholds))) if iou_thrs is None else data.iou_indices(iou_thrs)
 
     with mpl.rc_context(_build_rc(theme, paper_mode)):
         fig, ax = _new_figure((6, 6), ax, layout="compressed")
 
+        n_curves = len(t_indices)
         for line_idx, t_idx in enumerate(t_indices):
             prec = data.mean_precision(t_idx, a_idx, m_idx)
             lw = 2 if line_idx == 0 else 1
             (line,) = ax.plot(data.recall_pts, prec, linewidth=lw, label=f"IoU={data.iou_thresholds[t_idx]:.2f}")
             if line_idx == 0:
-                _annotate_f1_peak(ax, data.recall_pts, prec, line)
+                _annotate_f1_peak(ax, data.recall_pts, prec, line, fill=n_curves <= 2)
 
         ax.set(xlim=(0, 1), ylim=(0, 1), aspect="equal", xlabel="Recall", ylabel="Precision")
-        ax.legend(fontsize=9, loc="lower left")
+        # A PR sweep fills its own lower-left corner, so an inside legend lands on
+        # the data as soon as there are more than a few lines. Past that, move it
+        # out of the axes entirely rather than drawing over the curves.
+        if n_curves > 4:
+            ax.legend(fontsize=9, loc="center left", bbox_to_anchor=(1.02, 0.5))
+        else:
+            ax.legend(fontsize=9, loc="lower left")
         _configure_axes(ax, "Precision-Recall", subtitle="mean over categories", value_axis="y")
     return _save_and_return(fig, ax, save_path)
 
@@ -695,14 +701,25 @@ def reliability_diagram(
     bin_width = bins[0]["bin_upper"] - bins[0]["bin_lower"] if bins else 0.1
     nonempty = counts > 0
 
+    # A miscalibration gap is false-positive mass, so it takes the FP semantic.
+    # Resolved by theme: `#B24A2E` is invisible on the dark ground.
+    gap_color = eval_colors(theme)["fp"]
+
     with mpl.rc_context(_build_rc(theme, paper_mode)):
+        # Chrome off the live rcParams, not the theme dict: _build_rc is the one
+        # place that resolves a theme, and paper_mode swaps the grounds there.
+        # Reading the dict instead re-derives that decision at the call site and
+        # ignores an enclosing style() or the caller's own rc_context.
+        rc = mpl.rcParams
+        tick, spine, ink = rc["xtick.color"], rc["axes.edgecolor"], rc["text.color"]
+
         fig, ax = _new_figure((6, 6), ax, layout="compressed")
 
         # Gap shading: over/under-confident regions
-        ax.fill_between([0, 1], [0, 1], [0, 0], alpha=0.06, color="gray", label="_nolegend_")
+        ax.fill_between([0, 1], [0, 1], [0, 0], alpha=0.06, color=tick, label="_nolegend_")
 
         # Perfect calibration diagonal
-        ax.plot([0, 1], [0, 1], "--", color="gray", linewidth=1, label="Perfect", zorder=1)
+        ax.plot([0, 1], [0, 1], "--", color=tick, linewidth=1, label="Perfect", zorder=1)
 
         # Accuracy bars
         ax.bar(midpoints[nonempty], accuracies[nonempty], width=bin_width * 0.85, alpha=0.7, label="Accuracy", zorder=2)
@@ -710,12 +727,18 @@ def reliability_diagram(
         # Gap bars -- calibration error in both directions.
         # Overconfident (accuracy < confidence): solid gap above the bar.
         # Underconfident (accuracy > confidence): hatched gap inside the bar.
+        #
+        # Both opaque, and deliberately so. The two land on different grounds --
+        # the solid gap on the plot background, the hatch on top of an accuracy
+        # bar -- so any alpha below 1 composites one semantic into two different
+        # colors. It also destroys the hue: the FP amber at 0.35 over `#141415`
+        # resolves to `#664A30`, a brown, which is the same "an amber dark
+        # enough drifts brown" failure the caveat color was chosen to avoid.
         mid = midpoints[nonempty]
         acc = accuracies[nonempty]
         conf = confidences[nonempty]
         gaps = conf - acc
         bar_w = bin_width * 0.85
-        gap_color = "firebrick"
         has_gap_label = False
 
         overconfident = gaps > 0
@@ -725,7 +748,6 @@ def reliability_diagram(
                 gaps[overconfident],
                 bottom=acc[overconfident],
                 width=bar_w,
-                alpha=0.35,
                 color=gap_color,
                 label="Gap",
                 zorder=3,
@@ -742,7 +764,6 @@ def reliability_diagram(
                 facecolor="none",
                 edgecolor=gap_color,
                 hatch="///",
-                alpha=0.5,
                 linewidth=0,
                 label="_nolegend_" if has_gap_label else "Gap",
                 zorder=3,
@@ -760,7 +781,15 @@ def reliability_diagram(
             fontsize=9,
             ha="right",
             va="bottom",
-            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.8, "edgecolor": "gray"},
+            color=ink,
+            bbox={
+                # The plot ground, not white: a white box under the dark theme's
+                # `#EAEAEA` text renders the two numbers invisible.
+                "boxstyle": "round,pad=0.3",
+                "facecolor": rc["axes.facecolor"],
+                "alpha": 0.85,
+                "edgecolor": spine,
+            },
         )
 
         _configure_axes(
@@ -915,7 +944,7 @@ def category_deltas(
         fig, ax = _new_figure((8, max(4, 0.3 * num_bars)), ax)
 
         ax.barh(range(num_bars), deltas, height=0.7, color=colors)
-        ax.axvline(0, color="gray", linewidth=0.8, linestyle="-")
+        ax.axvline(0, color=mpl.rcParams["axes.edgecolor"], linewidth=0.8, linestyle="-")
 
         ax.set_yticks(range(num_bars))
         ax.set_yticklabels(names)

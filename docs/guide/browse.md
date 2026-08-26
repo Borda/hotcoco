@@ -26,6 +26,13 @@ coco.browse()
 That's it. A local server starts and a browser tab opens showing a scrollable grid
 of annotated thumbnails with a lightbox for full-resolution detail.
 
+<figure class="screenshot" markdown>
+![The hotcoco dataset browser: a category filter sidebar beside a grid of thumbnails with colored annotation overlays](../assets/browse-ui.webp)
+<figcaption>The grid view. Every thumbnail is drawn with its annotations overlaid, one
+color per category, so you can scan a split for labeling problems without opening a
+single image.</figcaption>
+</figure>
+
 From the command line:
 
 ```bash

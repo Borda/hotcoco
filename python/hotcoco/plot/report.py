@@ -175,6 +175,10 @@ _RC = {
     "border_dk": CHROME["spine"],
     "block_bdr": CHROME["grid"],
     "kpi_bg": "#EBEBE9",
+    # The printed page. Derived, not spelled "#FFFFFF" at the two call sites
+    # that paint it — this table is the report's palette, and a literal in a
+    # drawing call is a copy that cannot follow it.
+    "page_bg": CHROME["plot_bg"],
     "legend_edge": CHROME["spine"],
     "pr_tick": CHROME["tick"],
     # Plum, chart palette #5 — see the cyanotype skill. dashboard.py takes the
@@ -266,7 +270,7 @@ def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, f1_peak_
     import numpy as np
     from matplotlib.lines import Line2D as _L2D
 
-    ax.set_facecolor("#FFFFFF")
+    ax.set_facecolor(_RC["page_bg"])
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
@@ -808,7 +812,7 @@ def report(
     page_h = sum(_row_heights) + 2 * _MARGIN_V
 
     fig = plt.figure(figsize=(_PAGE_W, page_h))
-    fig.patch.set_facecolor("#FFFFFF")
+    fig.patch.set_facecolor(_RC["page_bg"])
 
     try:
         with mpl.rc_context({"font.family": family}):

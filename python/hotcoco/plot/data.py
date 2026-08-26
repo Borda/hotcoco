@@ -8,6 +8,11 @@ import numpy as np
 
 from .core import _mask_invalid_prec
 
+# Widest gap between a threshold a caller would type and the grid's stored value
+# for it. The default grid is built by arithmetic, so 0.90 lands as
+# 0.8999999999999999 and exact comparison misses it.
+_IOU_TOL = 1e-6
+
 
 @dataclass
 class PlotData:
@@ -59,8 +64,35 @@ class PlotData:
         return self.max_dets.index(max(self.max_dets))
 
     def nearest_iou_idx(self, target: float) -> int:
-        """Return the IoU-threshold index closest to *target*."""
+        """Return the IoU-threshold index closest to *target*, always succeeding.
+
+        The lenient sibling of :meth:`iou_indices`. Use it when any nearby
+        threshold answers the question; use ``iou_indices`` when the caller
+        named specific thresholds and a near-miss would be a lie.
+        """
         return min(range(len(self.iou_thresholds)), key=lambda i: abs(self.iou_thresholds[i] - target))
+
+    def iou_indices(self, targets: list[float]) -> list[int]:
+        """Return grid indices for *targets*, in grid order, or raise.
+
+        Matched within ``_IOU_TOL`` rather than by equality: the grid is built by
+        arithmetic and stores 0.90 as 0.8999999999999999, so ``t in targets``
+        silently drops a threshold the caller explicitly asked for and draws an
+        empty axes. Grid order, not caller order, because callers give the first
+        index the primary line's weight and annotation.
+        """
+        matched = {
+            want: next((i for i, t in enumerate(self.iou_thresholds) if abs(t - want) < _IOU_TOL), None)
+            for want in targets
+        }
+        missing = [w for w, i in matched.items() if i is None]
+        if missing:
+            raise ValueError(
+                f"IoU threshold(s) {missing} are not in this evaluation's grid "
+                f"{[round(t, 2) for t in self.iou_thresholds]}. Pass a threshold the run "
+                f"was accumulated at, or re-run with params.iou_thrs covering it."
+            )
+        return sorted(i for i in matched.values() if i is not None)
 
     # ------------------------------------------------------------------
     # Aggregation

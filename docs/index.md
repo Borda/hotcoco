@@ -1,3 +1,9 @@
+---
+hide:
+  - navigation
+  - toc
+---
+
 <div class="hero" markdown>
 
 # hotcoco
@@ -7,7 +13,7 @@ Fast enough for every epoch, lean enough for every dataset.
 </p>
 
 <p class="hero-sub">
-A drop-in replacement for pycocotools that doesn't become the bottleneck — in your training loop or at foundation model scale. Up to 36× faster on standard COCO, 39× faster on Objects365, and fits comfortably in memory where alternatives run out.
+A drop-in replacement for pycocotools that doesn't become the bottleneck — in your training loop or at foundation model scale.
 </p>
 
 <div class="hero-actions" markdown>
@@ -16,30 +22,6 @@ A drop-in replacement for pycocotools that doesn't become the bottleneck — in 
 [API Reference](api/coco.md){ .md-button }
 [Open Notebook](https://github.com/derekallman/hotcoco/blob/main/examples/coco_evaluation_101.ipynb){ .md-button }
 
-</div>
-
-</div>
-
-<div class="feature-grid" markdown>
-
-<div class="feature-card" markdown>
-<strong>Eval in under a second</strong>
-<p>Up to 36× faster than pycocotools. Eval goes from a bottleneck to background noise.</p>
-</div>
-
-<div class="feature-card" markdown>
-<strong>Your metrics, unchanged</strong>
-<p>All 34 metrics match pycocotools to the limit of double precision. Your AP scores don't budge.</p>
-</div>
-
-<div class="feature-card" markdown>
-<strong>More than a metric</strong>
-<p>TIDE error breakdown, confusion matrix, per-category AP, confidence calibration, and publication-quality plots built in. Find out <em>why</em> your model falls short, not just by how much.</p>
-</div>
-
-<div class="feature-card" markdown>
-<strong>Already works with your stack</strong>
-<p><code>init_as_pycocotools()</code> patches imports in-place. Detectron2, mmdetection, RF-DETR — no code changes.</p>
 </div>
 
 </div>
@@ -95,14 +77,56 @@ pip install hotcoco
     ev.summarize();
     ```
 
+<div class="feature-grid" markdown>
+
+<div class="feature-card" markdown>
+<strong>Eval in under a second</strong>
+<p>Up to 36× faster than pycocotools. Eval goes from a bottleneck to background noise.</p>
+</div>
+
+<div class="feature-card" markdown>
+<strong>Your metrics, unchanged</strong>
+<p>All 34 metrics match pycocotools to the limit of double precision. Your AP scores don't budge.</p>
+</div>
+
+<div class="feature-card" markdown>
+<strong>More than a metric</strong>
+<p>TIDE error breakdown, confusion matrix, per-category AP, confidence calibration, and publication-quality plots built in. Find out <em>why</em> your model falls short, not just by how much.</p>
+</div>
+
+<div class="feature-card" markdown>
+<strong>Already works with your stack</strong>
+<p><code>init_as_pycocotools()</code> patches imports in-place. Detectron2, mmdetection, RF-DETR — no code changes.</p>
+</div>
+
+</div>
+
 ## Performance
 
 Bbox evaluation on COCO val2017 runs in **0.14s** against 5.11s for pycocotools — 36× faster. At Objects365 scale (80k images, 1.2M detections), it finishes in 18s where pycocotools takes 721s, using half the memory.
+
+<figure markdown>
+![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed.png#only-light)
+![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed-dark.png#only-dark)
+<figcaption>COCO val2017, 36,781 detections. Linear axis — the bars are to scale.</figcaption>
+</figure>
 
 All 34 metrics — 12 bbox, 12 segm, 10 keypoints — match pycocotools to the limit of double precision, and a hypothesis-based fuzzer separately checks ~10,000 generated datasets.
 
 See [Benchmarks](benchmarks.md) for the full tables, hardware, and parity verification.
 
-## License
+## Not just a number
 
-MIT
+AP tells you *how much* your model misses. It doesn't tell you *why*. hotcoco ships the
+diagnostics that do — TIDE error attribution, confusion matrices, calibration curves, and
+per-image breakdowns — as first-class outputs rather than a separate tool.
+
+<figure markdown>
+![Row-normalized confusion matrix showing which COCO categories get mistaken for each other](assets/confusion-matrix.png#only-light)
+![Row-normalized confusion matrix showing which COCO categories get mistaken for each other](assets/confusion-matrix-dark.png#only-dark)
+<figcaption>Which categories your model actually confuses, and how much of the loss is
+background rather than a mix-up. See the <a href="guide/diagnostics/">diagnostics guide</a>.</figcaption>
+</figure>
+
+Point it at a dataset with no detections at all and it becomes a browser — an annotated
+grid you can scan for labeling problems. See the [dataset browser](guide/browse.md).

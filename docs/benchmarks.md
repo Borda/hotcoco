@@ -33,6 +33,13 @@ absolute times are comparable only within a table; the speedup ratios are not af
 
 ### Results (1x detections)
 
+<figure markdown>
+![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed.png#only-light)
+![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed-dark.png#only-dark)
+<figcaption>The axis is linear, not logarithmic — hotcoco's bar really is that small next
+to pycocotools'. Chart drawn with <code>hotcoco.plot</code>.</figcaption>
+</figure>
+
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
 | bbox      | 5.11s | 1.21s (4.2×) | **0.14s (36.2×)** |
