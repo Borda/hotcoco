@@ -37,6 +37,12 @@ uv run python -c "import hotcoco; print(hotcoco.__version__)"
 
 All core logic lives in the Rust library. The Python package and Rust CLI are thin wrappers.
 
+The core is split by **what a function produces**, not by which family calls it, because
+detection is the first metric family rather than the only one. Panoptic and tracking are
+siblings of `detection/`, composing the same `primitives/` and `metrics/` layers — so a
+kernel or a formula that a second family would need belongs in a shared layer the day it
+is written, not the day the second family arrives.
+
 ```
                        ┌──→ PyO3 ──→ hotcoco (Python library + CLI)
 Rust Core (all logic) ─┤

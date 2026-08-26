@@ -3,6 +3,12 @@
 What's planned, in rough priority order. This page is forward-looking only — for
 what has already shipped, see the [CHANGELOG](CHANGELOG.md).
 
+hotcoco is a perception evaluation toolkit built as one engine with a family of metric
+drivers on top. **Detection ships today** — COCO, LVIS, and Open Images over bbox,
+segmentation, keypoints, and oriented boxes. **Panoptic is next, then tracking**, each a
+sibling of detection on the same `primitives` → `metrics` layering, each landing as an
+additive minor release. That ladder is what orders everything below.
+
 ## Near term
 
 - **HTML evaluation report** — one self-contained HTML file per eval run:

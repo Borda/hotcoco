@@ -9,11 +9,11 @@ hide:
 # hotcoco
 
 <p class="hero-tagline">
-Fast enough for every epoch, lean enough for every dataset.
+Evaluation that tells you why.
 </p>
 
 <p class="hero-sub">
-A drop-in replacement for pycocotools that doesn't become the bottleneck — in your training loop or at foundation model scale.
+A perception evaluation toolkit in pure Rust, built for Python. Detection metrics, model diagnostics, and dataset tools from one install — and a drop-in pycocotools replacement on the way in, up to 36× faster.
 </p>
 
 <div class="hero-actions" markdown>
@@ -85,18 +85,18 @@ pip install hotcoco
 </div>
 
 <div class="feature-card" markdown>
-<strong>Your metrics, unchanged</strong>
-<p>All 34 metrics match pycocotools to the limit of double precision. Your AP scores don't budge.</p>
+<strong>Drops into your stack</strong>
+<p>All 34 metrics match pycocotools to the limit of double precision. <code>init_as_pycocotools()</code> patches imports in place for Detectron2, mmdetection, and RF-DETR — no code changes.</p>
 </div>
 
 <div class="feature-card" markdown>
-<strong>More than a metric</strong>
-<p>TIDE error breakdown, confusion matrix, per-category AP, confidence calibration, and publication-quality plots built in. Find out <em>why</em> your model falls short, not just by how much.</p>
+<strong>Answers, not just a score</strong>
+<p>TIDE error attribution, confusion matrices, confidence calibration, per-image label errors. Find out <em>why</em> your model falls short, not just by how much.</p>
 </div>
 
 <div class="feature-card" markdown>
-<strong>Already works with your stack</strong>
-<p><code>init_as_pycocotools()</code> patches imports in-place. Detectron2, mmdetection, RF-DETR — no code changes.</p>
+<strong>One engine underneath</strong>
+<p>Similarity kernels, matchers, and metric functions are public and composable. Every family reports in one shape, with provenance saying whether a number is leaderboard-comparable.</p>
 </div>
 
 </div>
@@ -115,7 +115,7 @@ All 34 metrics — 12 bbox, 12 segm, 10 keypoints — match pycocotools to the l
 
 See [Benchmarks](benchmarks.md) for the full tables, hardware, and parity verification.
 
-## Not just a number
+## Why the model misses
 
 AP tells you *how much* your model misses. It doesn't tell you *why*. hotcoco ships the
 diagnostics that do — TIDE error attribution, confusion matrices, calibration curves, and
@@ -130,3 +130,33 @@ background rather than a mix-up. See the <a href="guide/diagnostics/">diagnostic
 
 Point it at a dataset with no detections at all and it becomes a browser — an annotated
 grid you can scan for labeling problems. See the [dataset browser](guide/browse.md).
+
+## One engine
+
+hotcoco is layered rather than monolithic. Similarity kernels and matchers live in
+`primitives`, the metric math lives in `metrics`, and a family driver composes them —
+`detection` today, panoptic and tracking next. Nothing is locked behind an evaluator:
+
+```python
+import numpy as np
+from hotcoco import metrics
+
+scores  = np.array([0.9, 0.8, 0.7, 0.6])
+matched = np.array([True, False, True, True])
+
+metrics.average_precision(scores, matched, num_gt=4)  # 0.6287
+metrics.calibration_error(scores, matched)            # (ece, mce)
+```
+
+`COCOeval` calls those same functions, so a number you derive by hand and a number
+hotcoco prints cannot drift apart. The layering is enforced, not merely intended — the
+test suite fails the build on a second IoU formula, a second matcher, or a call that
+crosses a layer boundary the wrong way.
+
+Every evaluation reports in one shape. `ev.report()` returns metrics, per-class and
+per-group breakdowns, plottable curves, and a `provenance` field stating whether the
+number is comparable to a published leaderboard or a hotcoco extension — so code that
+renders a detection report renders a panoptic or tracking one unchanged.
+
+Detection is the family that ships today. See the
+[roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md) for what follows.

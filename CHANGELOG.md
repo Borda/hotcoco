@@ -278,6 +278,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The top-level copy leads with the toolkit, not the substitute.** README, the docs
+  home page, and the roadmap now open on "a perception evaluation toolkit — evaluate,
+  diagnose, and explore vision datasets from one install," with the pycocotools
+  drop-in demoted from *definition* to *on-ramp* rather than deleted: it still appears
+  inside the first 200 characters of every surface, which is where the search traffic
+  lives. README's 20-feature list is regrouped under four verbs — Evaluate, Diagnose,
+  Explore your data, Compose and integrate — with no bullet rewritten, only sorted.
+  `docs/index.md` gains a **One engine** section showing `hotcoco.metrics` called on
+  plain numpy arrays, and its four feature cards swap two negations ("More than a
+  metric", "Already works with your stack") for assertions. The section heading "Not
+  just a number" becomes "Why the model misses" for the same reason. Copy only — no
+  API, feature, or benchmark number changed.
+- **`ROADMAP.md` states the family ladder.** Detection ships today; panoptic is next,
+  then tracking, each a sibling on the same `primitives` → `metrics` layering. The
+  ordering was previously implicit.
+- **`CONTRIBUTING.md` explains why the crate is layered the way it is** — detection is
+  the first metric family rather than the only one, so a kernel a second family would
+  need belongs in a shared layer the day it is written.
 - **Every documentation surface was brought onto the Google style guide.** Page
   titles, section headings, and `zensical.toml` nav labels moved to sentence case
   (`# Mask operations`, `# Working with results`); `&` became `and` in headings and
