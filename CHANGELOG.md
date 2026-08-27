@@ -278,21 +278,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **The top-level copy leads with the toolkit, not the substitute.** README, the docs
-  home page, and the roadmap now open on "a perception evaluation toolkit — evaluate,
-  diagnose, and explore vision datasets from one install," with the pycocotools
-  drop-in demoted from *definition* to *on-ramp* rather than deleted: it still appears
-  inside the first 200 characters of every surface, which is where the search traffic
-  lives. README's 20-feature list is regrouped under four verbs — Evaluate, Diagnose,
-  Explore your data, Compose and integrate — with no bullet rewritten, only sorted.
-  `docs/index.md` gains a **One engine** section showing `hotcoco.metrics` called on
-  plain numpy arrays, and its four feature cards swap two negations ("More than a
-  metric", "Already works with your stack") for assertions. The section heading "Not
-  just a number" becomes "Why the model misses" for the same reason. Copy only — no
-  API, feature, or benchmark number changed.
-- **`ROADMAP.md` states the family ladder.** Detection ships today; panoptic is next,
-  then tracking, each a sibling on the same `primitives` → `metrics` layering. The
-  ordering was previously implicit.
+- **The top-level copy defines hotcoco as a perception evaluation toolkit, in plain
+  words.** README, the docs home page, and `help(hotcoco)` now open on what the
+  toolkit is and does — "hotcoco is a perception evaluation toolkit, written in Rust
+  with Python bindings" — with the pycocotools drop-in demoted from *definition* to
+  *stated fact* rather than deleted: it still appears inside the first 200 characters
+  of every surface, which is where the search traffic lives. Slogan copy is gone
+  ("Evaluation that tells you why", "fast enough for every epoch, lean enough for
+  every dataset"); every sentence states a concrete fact. README's 20-feature list is
+  grouped under four verbs — Evaluate, Diagnose, Explore your data, Compose and
+  integrate — and the docs home page's four cards mirror them. The home page runs
+  Quick start → Performance → Error analysis → The dataset browser → Use the metrics
+  directly: a two-up figure gallery (confusion matrix beside per-category AP, via a
+  new `.figure-gallery` grid in `extra.css`), the browse UI screenshot with three
+  sentences of context, and `hotcoco.metrics` called on plain numpy arrays. Metric
+  counts ("all 34 metrics") became "every COCO metric" on all surfaces — a total
+  summed across three iou_types explained nothing. Copy only — no API, feature, or
+  benchmark number changed.
+- **`ROADMAP.md` states the 1.x ladder.** Detection ships today; 1.1 panoptic, 1.2
+  tracking, 1.3 concepts (gated on a feasibility spike), each a sibling on the same
+  `primitives` → `metrics` layering, with the verification reference named per family
+  (panopticapi, TrackEval). A **Not planned** section records what stays out of
+  scope — caption metrics and model-in-the-loop metrics — and why no parity claim is
+  possible for them.
+- **`STYLE.md` records the style-guide choice as settled.** Alternatives — Microsoft,
+  Red Hat, GitLab, and the Diátaxis framework — were reviewed in 2026-08 and Google
+  was reaffirmed; the intro now says so to keep the choice from being re-litigated.
+  The voice summary adds "plain rather than promotional".
 - **`CONTRIBUTING.md` explains why the crate is layered the way it is** — detection is
   the first metric family rather than the only one, so a kernel a second family would
   need belongs in a shared layer the day it is written.

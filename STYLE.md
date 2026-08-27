@@ -7,6 +7,12 @@ this file is silent, follow Google. When Google is silent, follow the
 [Google word list](https://developers.google.com/style/word-list) and then the
 Chicago Manual of Style.
 
+The choice was cross-shopped in 2026-08 against the alternatives — Microsoft,
+Red Hat, GitLab, and the Diátaxis framework — and Google was reaffirmed. Don't
+re-litigate it. Diátaxis is a structure framework, not a style guide; the
+guide/API page split already follows its discipline, and no further adoption is
+planned.
+
 **Scope.** These rules govern published prose: `docs/`, `README.md`, `CONTRIBUTING.md`,
 Rust `///` and `//!` doc comments, PyO3 `#[doc = "..."]` strings, Python docstrings,
 `.pyi` stubs, CLI `help=` text, and user-facing warning and error messages. They do not
@@ -16,7 +22,7 @@ govern `//` and `#` implementation comments, which answer to the *why, not what*
 ## Voice
 
 The `docs` skill owns the hotcoco voice — Python-first, singular and confident, lean,
-why-not-what. Nothing here overrides it. Google supplies the mechanical rules that voice
+why-not-what, and plain rather than promotional. Nothing here overrides it. Google supplies the mechanical rules that voice
 guidance leaves open.
 
 ## Rules

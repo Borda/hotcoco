@@ -9,11 +9,11 @@ hide:
 # hotcoco
 
 <p class="hero-tagline">
-Evaluation that tells you why.
+Perception evaluation for Python, written in Rust.
 </p>
 
 <p class="hero-sub">
-A perception evaluation toolkit in pure Rust, built for Python. Detection metrics, model diagnostics, and dataset tools from one install — and a drop-in pycocotools replacement on the way in, up to 36× faster.
+hotcoco evaluates perception models, starting with detection: boxes, masks, keypoints, and oriented boxes on the COCO, LVIS, and Open Images protocols. It's a drop-in replacement for pycocotools — same numbers to double precision, up to 36× faster — and it includes the analysis you'd otherwise need separate tools for: TIDE error analysis, confusion matrices, calibration, model comparison, and a dataset browser.
 </p>
 
 <div class="hero-actions" markdown>
@@ -80,62 +80,82 @@ pip install hotcoco
 <div class="feature-grid" markdown>
 
 <div class="feature-card" markdown>
-<strong>Eval in under a second</strong>
-<p>Up to 36× faster than pycocotools. Eval goes from a bottleneck to background noise.</p>
+<strong>Evaluate</strong>
+<p>COCO, LVIS, and Open Images protocols over boxes, masks, keypoints, and oriented boxes. <code>init_as_pycocotools()</code> patches existing pycocotools imports in place — no code changes.</p>
 </div>
 
 <div class="feature-card" markdown>
-<strong>Drops into your stack</strong>
-<p>All 34 metrics match pycocotools to the limit of double precision. <code>init_as_pycocotools()</code> patches imports in place for Detectron2, mmdetection, and RF-DETR — no code changes.</p>
+<strong>Diagnose</strong>
+<p>TIDE error analysis, confusion matrices, confidence calibration, and per-image label-error detection — see what's actually costing you AP.</p>
 </div>
 
 <div class="feature-card" markdown>
-<strong>Answers, not just a score</strong>
-<p>TIDE error attribution, confusion matrices, confidence calibration, per-image label errors. Find out <em>why</em> your model falls short, not just by how much.</p>
+<strong>Explore your data</strong>
+<p>Browse any COCO dataset in a local web UI with annotation overlays, run a dataset healthcheck, and convert between COCO, YOLO, Pascal VOC, CVAT, DOTA, and Open Images CSV.</p>
 </div>
 
 <div class="feature-card" markdown>
-<strong>One engine underneath</strong>
-<p>Similarity kernels, matchers, and metric functions are public and composable. Every family reports in one shape, with provenance saying whether a number is leaderboard-comparable.</p>
+<strong>Compose</strong>
+<p>IoU kernels, matchers, and metric functions are public and work on plain numpy arrays. Every evaluation returns the same report shape, and each number is marked as standard or a hotcoco extension.</p>
 </div>
 
 </div>
 
 ## Performance
 
-Bbox evaluation on COCO val2017 runs in **0.14s** against 5.11s for pycocotools — 36× faster. At Objects365 scale (80k images, 1.2M detections), it finishes in 18s where pycocotools takes 721s, using half the memory.
+Bbox evaluation on COCO val2017 takes **0.14s**; pycocotools takes 5.11s. Every COCO
+metric matches pycocotools to the limit of double precision.
 
 <figure markdown>
 ![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed.png#only-light)
 ![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed-dark.png#only-dark)
-<figcaption>COCO val2017, 36,781 detections. Linear axis — the bars are to scale.</figcaption>
+<figcaption>COCO val2017, 36,781 detections.</figcaption>
 </figure>
 
-All 34 metrics — 12 bbox, 12 segm, 10 keypoints — match pycocotools to the limit of double precision, and a hypothesis-based fuzzer separately checks ~10,000 generated datasets.
+Full tables, hardware, memory, and parity verification are in [Benchmarks](benchmarks.md).
 
-See [Benchmarks](benchmarks.md) for the full tables, hardware, and parity verification.
+## Error analysis
 
-## Why the model misses
+mAP tells you that your model misses; it doesn't tell you what to fix. hotcoco computes
+the breakdowns from the same evaluation pass: which error types cost the most AP (TIDE),
+which categories get confused with each other, whether the confidence scores are
+calibrated, and which images the model does worst on.
 
-AP tells you *how much* your model misses. It doesn't tell you *why*. hotcoco ships the
-diagnostics that do — TIDE error attribution, confusion matrices, calibration curves, and
-per-image breakdowns — as first-class outputs rather than a separate tool.
+<div class="figure-gallery" markdown>
 
 <figure markdown>
 ![Row-normalized confusion matrix showing which COCO categories get mistaken for each other](assets/confusion-matrix.png#only-light)
 ![Row-normalized confusion matrix showing which COCO categories get mistaken for each other](assets/confusion-matrix-dark.png#only-dark)
-<figcaption>Which categories your model actually confuses, and how much of the loss is
-background rather than a mix-up. See the <a href="guide/diagnostics/">diagnostics guide</a>.</figcaption>
+<figcaption>Which categories the model confuses, and how much of the loss is background
+rather than a mix-up. See the <a href="guide/diagnostics/#confusion-matrix">confusion matrix guide</a>.</figcaption>
 </figure>
 
-Point it at a dataset with no detections at all and it becomes a browser — an annotated
-grid you can scan for labeling problems. See the [dataset browser](guide/browse.md).
+<figure markdown>
+![Per-category AP as horizontal bars, best to worst](assets/per-category-ap.png#only-light)
+![Per-category AP as horizontal bars, best to worst](assets/per-category-ap-dark.png#only-dark)
+<figcaption>The 0.70 mean AP spans 0.96 (bed) to 0.14 (sports ball). See
+<a href="guide/results/#extracting-per-category-ap">per-category AP</a>.</figcaption>
+</figure>
 
-## One engine
+</div>
 
-hotcoco is layered rather than monolithic. Similarity kernels and matchers live in
-`primitives`, the metric math lives in `metrics`, and a family driver composes them —
-`detection` today, panoptic and tracking next. Nothing is locked behind an evaluator:
+## The dataset browser
+
+`coco.browse()` opens a local web UI that shows every image with its annotations
+overlaid, one color per category. Filter by category, zoom in, and scan a split for
+labeling problems without opening files one by one. Pass `eval=` and the same UI adds
+an interactive dashboard — PR curves, confusion matrix, TIDE errors, and per-image
+scores next to the images they come from.
+
+<figure class="screenshot" markdown>
+![The hotcoco dataset browser: a category filter sidebar beside a grid of thumbnails with colored annotation overlays](assets/browse-ui.webp)
+<figcaption>Every thumbnail is drawn with its annotations already overlaid. See the
+<a href="guide/browse/">dataset browser guide</a>.</figcaption>
+</figure>
+
+## Use the metrics directly
+
+The metric functions don't require an evaluator — they're plain functions over arrays:
 
 ```python
 import numpy as np
@@ -148,15 +168,10 @@ metrics.average_precision(scores, matched, num_gt=4)  # 0.6287
 metrics.calibration_error(scores, matched)            # (ece, mce)
 ```
 
-`COCOeval` calls those same functions, so a number you derive by hand and a number
-hotcoco prints cannot drift apart. The layering is enforced, not merely intended — the
-test suite fails the build on a second IoU formula, a second matcher, or a call that
-crosses a layer boundary the wrong way.
+`COCOeval` calls these same functions internally, so numbers you compute by hand match
+what `summarize()` prints. For everything at once, `ev.report()` returns metrics,
+per-class breakdowns, and PR curves in one structure, with a `provenance` field that
+says whether each number is comparable to published results.
 
-Every evaluation reports in one shape. `ev.report()` returns metrics, per-class and
-per-group breakdowns, plottable curves, and a `provenance` field stating whether the
-number is comparable to a published leaderboard or a hotcoco extension — so code that
-renders a detection report renders a panoptic or tracking one unchanged.
-
-Detection is the family that ships today. See the
-[roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md) for what follows.
+Panoptic and tracking are next, on the same engine —
+see the [roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md).

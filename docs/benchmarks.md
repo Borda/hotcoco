@@ -5,7 +5,7 @@
 | Feature | pycocotools | faster-coco-eval | hotcoco |
 |---------|-------------|------------------|---------|
 | **Installation** | Prebuilt wheels available | Prebuilt wheels available | Prebuilt wheels — `pip install` just works |
-| **Metric parity** | Reference | Exact | All 34 metrics exact to float precision (≤3.7e-14) |
+| **Metric parity** | Reference | Exact | All metrics exact to float precision (≤3.7e-14) |
 | **LVIS evaluation** | No | Yes — via `lvis_style=True` flag | Yes — 13 metrics, `LVISeval` class, `init_as_lvis()` |
 | **TIDE error analysis** | No | No | Yes — 6 error types, ΔAP per type |
 | **Confusion matrix** | No | No | Yes — cross-category, configurable threshold |
@@ -119,7 +119,7 @@ Peak RAM is the peak working set (physical memory). Committed includes swap — 
 [ppwwyyxx/cocoapi](https://github.com/ppwwyyxx/cocoapi), the same inputs pycocotools uses in its own
 tests. Both are fetched by `just download-coco` — `data/` is not checked into the repository.
 
-**All 34 metrics agree to within 3.7e-14** — floating-point noise, the last few
+**Every metric agrees to within 3.7e-14** — floating-point noise, the last few
 bits a `f64` can represent. The diffs in the following tables are raw measured differences, not rounded.
 
 ### Bounding box
@@ -220,6 +220,10 @@ threshold the project's own parity gate uses.
 
 The same shape works for `hotcoco.mask` against `pycocotools.mask`; the repo's
 `scripts/parity_mask.py` does exactly that, operation by operation.
+
+Beyond val2017, a hypothesis-based fuzzer (`scripts/fuzz_parity.py`) checks
+~10,000 generated datasets — including degenerate zero-area boxes and other
+edge cases hand-written tests miss — against pycocotools at a 1e-10 tolerance.
 
 ## Methodology
 

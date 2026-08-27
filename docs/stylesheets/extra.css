@@ -635,6 +635,25 @@ html .md-footer-meta.md-typeset a:hover {
   display: none;
 }
 
+/* Side-by-side chart pairs. Each cell is an ordinary <figure>, so the paper
+   frame, caption style, and scheme swap all apply unchanged; the grid supplies
+   the outer spacing, and the images fill their cell so both columns render at
+   equal width even when the charts' aspect ratios differ. */
+.md-typeset .figure-gallery {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0 1.25rem;
+  align-items: start;
+  margin: 1.6em 0;
+}
+.md-typeset .figure-gallery figure {
+  margin: 0.8em 0;
+  width: 100%;
+}
+.md-typeset .figure-gallery figure img {
+  width: 100%;
+}
+
 /* A UI screenshot is a picture of a screen, not paper — no paper frame. */
 .md-typeset figure.screenshot img {
   border-color: var(--md-default-fg-color--lighter);
@@ -647,6 +666,9 @@ html .md-footer-meta.md-typeset a:hover {
 /* Two up once there is room for two readable cards ... */
 @media screen and (min-width: 45em) {
   .md-typeset .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .md-typeset .figure-gallery {
     grid-template-columns: repeat(2, 1fr);
   }
 }

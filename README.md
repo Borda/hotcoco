@@ -5,13 +5,9 @@
 [![Crates.io](https://img.shields.io/crates/v/hotcoco)](https://crates.io/crates/hotcoco)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**A perception evaluation toolkit — evaluate, diagnose, and explore vision datasets from one install.** The fastest way in is as a drop-in [pycocotools](https://github.com/ppwwyyxx/cocoapi) replacement, up to 36× faster.
+**hotcoco is a perception evaluation toolkit, written in Rust with Python bindings.** It's a drop-in replacement for [pycocotools](https://github.com/ppwwyyxx/cocoapi) — same numbers to double precision, up to 36× faster — plus the analysis that usually lives in separate tools: TIDE error analysis, confusion matrices, confidence calibration, model comparison, label-error detection, and a dataset browser.
 
-hotcoco answers not just how much your model misses, but where, why, and whether the number is comparable to anyone else's. Detection ships today across bbox, segmentation, keypoints, and oriented boxes, on the COCO, LVIS, and Open Images protocols. Panoptic and tracking are next, on the same engine.
-
-Coming from pycocotools, `init_as_pycocotools()` patches imports in place — no code changes, metrics identical to the limit of double precision, up to 36× faster on COCO and 39× on Objects365 in half the memory. Fast enough for every epoch, lean enough for every dataset.
-
-What you get past the on-ramp is the reason to stay: TIDE error attribution, confusion matrices, confidence calibration, per-image label-error detection, model comparison with bootstrap intervals, a dataset browser, and metric functions callable on plain arrays. All from the same evaluation pass, in the same `pip install`.
+It covers detection today — boxes, masks, keypoints, and oriented boxes on the COCO, LVIS, and Open Images protocols. Panoptic and tracking are planned, on the same engine.
 
 Pure Rust, available as a **Python package**, **CLI tool**, and **Rust library** — no Cython, no C compiler, no Microsoft Build Tools. Prebuilt wheels for Linux, macOS, and Windows.
 
@@ -21,7 +17,7 @@ Pure Rust, available as a **Python package**, **CLI tool**, and **Rust library**
 
 Bbox evaluation on COCO val2017 runs in **0.14s** against 5.11s for pycocotools — **36× faster** (segm and keypoints see ~20×). At Objects365 scale (80k images, 1.2M detections) hotcoco finishes in **18s** where pycocotools takes 721s, using half the memory.
 
-All 34 COCO metrics match pycocotools to floating-point precision on val2017 — worst measured difference 3.7e-14, so your AP scores don't change. A hypothesis-based fuzzer separately checks ~10,000 generated datasets against pycocotools at 1e-10.
+Every COCO metric matches pycocotools to floating-point precision on val2017 — worst measured difference 3.7e-14, so your AP scores don't change. A hypothesis-based fuzzer separately checks ~10,000 generated datasets against pycocotools at 1e-10.
 
 Full tables, hardware, phase breakdowns, and parity verification: [Benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
 
@@ -61,7 +57,7 @@ ev.run()
 
 ### Diagnose
 
-- **TIDE error analysis** — breaks down every FP and FN into six error types so you know *why* your model falls short, not just by how much. See [TIDE errors](https://derekallman.github.io/hotcoco/guide/diagnostics/#tide-error-analysis).
+- **TIDE error analysis** — classifies every false positive and false negative into one of six error types and reports how much AP each type costs. See [TIDE errors](https://derekallman.github.io/hotcoco/guide/diagnostics/#tide-error-analysis).
 - **Confusion matrix** — cross-category matching with per-class breakdowns. See [confusion matrix](https://derekallman.github.io/hotcoco/guide/diagnostics/#confusion-matrix).
 - **Confidence calibration** — ECE/MCE metrics and reliability diagrams measure whether your model's confidence scores are meaningful. See [calibration](https://derekallman.github.io/hotcoco/guide/diagnostics/#confidence-calibration).
 - **Per-image diagnostics and label errors** — per-image F1/AP scores, automatic detection of wrong labels and missing annotations in your ground truth. See [diagnostics](https://derekallman.github.io/hotcoco/guide/diagnostics/#per-image-diagnostics-and-label-error-detection).
@@ -72,7 +68,7 @@ ev.run()
 
 ### Explore your data
 
-- **Dataset browser** — `coco.browse()` / `coco explore` opens a local browser with category filter, annotation overlays (bbox/segm/keypoints), hover-to-highlight, zoom/pan, and detection comparison. Pass `eval=` to enable an interactive eval dashboard with PR curves, confusion matrix, TIDE errors, calibration, and per-image F1. `pip install hotcoco[browse]`. See [Dataset browser](https://derekallman.github.io/hotcoco/guide/browse/).
+- **Dataset browser** — `coco.browse()` / `coco explore` opens a local browser with category filter, annotation overlays (bbox/segm/keypoints/OBB), hover-to-highlight, zoom/pan, and detection comparison. Pass `eval=` to enable an interactive eval dashboard with PR curves, confusion matrix, TIDE errors, calibration, and per-image F1. `pip install hotcoco[browse]`. See [Dataset browser](https://derekallman.github.io/hotcoco/guide/browse/).
 - **Dataset healthcheck** — 4-layer validation (structural, quality, distribution, GT/DT compatibility) catches duplicate IDs, degenerate bboxes, category imbalance, and more. See [healthcheck](https://derekallman.github.io/hotcoco/guide/datasets/#healthcheck).
 - **Format conversion** — COCO ↔ YOLO, Pascal VOC, CVAT, DOTA (oriented boxes), and Open Images CSV, from Python or the CLI. Open Images detections load with `gt.load_res_oid("predictions.csv")`, so a CSV benchmark evaluates without writing a parser. See [format conversion](https://derekallman.github.io/hotcoco/guide/datasets/#convert).
 

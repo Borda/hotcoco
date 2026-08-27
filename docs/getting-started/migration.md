@@ -109,7 +109,7 @@ coco.createIndex()                  # supported, but a formality after assignmen
 
 ## Metric parity
 
-All 34 COCO metrics match pycocotools to floating-point precision — your AP and AR scores don't change. Verified on COCO val2017 across bbox, segmentation, and keypoints.
+Every COCO metric matches pycocotools to floating-point precision — your AP and AR scores don't change. Verified on COCO val2017 across bbox, segmentation, and keypoints.
 
 You don't have to take that on faith. [Benchmarks](../benchmarks.md#verify-it-yourself) has a short script that runs your own ground truth and detections through both libraries and prints the per-metric difference.
 
