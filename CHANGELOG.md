@@ -758,6 +758,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **CI tested a package nobody installs.** The Python job built its wheel from
+  inside `crates/hotcoco-pyo3`, which yields a bare extension module with no
+  `hotcoco.plot`, `cli`, or `integrations`, so every test of the Python layer
+  either never ran or failed — the first `v1.0.0` tag failed its own verify gate
+  on `ModuleNotFoundError: hotcoco.plot`, and CI on `main` had been green for
+  months against the wrong artifact. The job now builds from the repo root, where
+  `pyproject.toml`'s `python-source` pulls in the package, installs matplotlib, and
+  runs the theme tests too. The GitHub Release job also waited on nothing but the
+  wheel builds under `always()`, so it created a release page with zero assets for
+  a tag that published nothing; it now depends on both publish jobs.
+
 - **Result files carrying both `segmentation` and `keypoints` are typed as
   segmentation**, matching pycocotools' `elif` precedence — previously keypoints
   won, a silent parity divergence.

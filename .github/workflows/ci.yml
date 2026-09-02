@@ -131,13 +131,18 @@ jobs:
           source .venv/bin/activate
           # pycocotools and lvis are the references the differential suites compare
           # against. Without them, CI's only correctness check was a length
-          # assertion, which cannot catch a wrong number.
-          pip install maturin numpy pytest pycocotools lvis
+          # assertion, which cannot catch a wrong number. matplotlib is the `plot`
+          # extra: the provenance and theme tests import `hotcoco.plot`.
+          pip install maturin numpy pytest pycocotools lvis matplotlib
 
-      - name: Build Python extension
-        working-directory: crates/hotcoco-pyo3
+      # Built from the repo root, where pyproject.toml's `python-source` pulls in
+      # the pure-Python package. Building inside crates/hotcoco-pyo3 produces a
+      # bare extension wheel with no `hotcoco.plot`, `cli`, or `integrations` —
+      # the 1.0.0 tag failed its own gate on exactly that, after CI had been
+      # green for months against a package nobody installs.
+      - name: Build Python package
         run: |
-          source ../../.venv/bin/activate
+          source .venv/bin/activate
           maturin build --release --out dist
           pip install dist/*.whl
 
@@ -207,3 +212,8 @@ jobs:
         run: |
           source .venv/bin/activate
           pytest scripts/test_stubs.py -q
+
+      - name: Plot theme contract
+        run: |
+          source .venv/bin/activate
+          pytest scripts/test_theme.py -q

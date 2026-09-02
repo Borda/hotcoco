@@ -130,10 +130,12 @@ jobs:
           verbose: true
 
   # ── GitHub Release ─────────────────────────────────────────────────────
+  # Runs only after both registries have the release. It used to run on
+  # `always()`, which created a v1.0.0 release page with zero assets for a tag
+  # whose verify job had failed and published nothing.
   github-release:
     name: Create GitHub Release
-    needs: [build-wheels, build-sdist]
-    if: always() && !cancelled()
+    needs: [publish-crates, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
