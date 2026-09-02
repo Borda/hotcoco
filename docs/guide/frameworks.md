@@ -7,7 +7,7 @@ from hotcoco import init_as_pycocotools
 init_as_pycocotools()
 ```
 
-This patches `sys.modules` so that `from pycocotools.coco import COCO` and similar imports resolve to hotcoco instead. Everything downstream works unchanged.
+This patches `sys.modules` so that `pycocotools`, `pycocotools.coco`, `pycocotools.cocoeval`, and `pycocotools.mask` all resolve to their hotcoco equivalents. Call it before any import that pulls in pycocotools — the top of your entry point script is the best place. Everything downstream works unchanged.
 
 | Framework | Uses | `init_as_pycocotools()` |
 |-----------|------|------------------------|
@@ -20,7 +20,7 @@ This patches `sys.modules` so that `from pycocotools.coco import COCO` and simil
 
 ## Detectron2
 
-Detectron2's `COCOEvaluator` imports from `pycocotools` directly. Add `init_as_pycocotools()` before any detectron2 imports:
+Detectron2's `COCOEvaluator` imports from `pycocotools` directly:
 
 ```python
 from hotcoco import init_as_pycocotools
@@ -55,7 +55,7 @@ print(inference_on_dataset(model, val_loader, evaluator))
 
 ## MMDetection / MMDetection3
 
-MMDetection's `CocoMetric` goes through `mmdet.datasets.api_wrappers`, which wraps pycocotools. Add `init_as_pycocotools()` to your entrypoint before `mmdet` is imported:
+MMDetection's `CocoMetric` goes through `mmdet.datasets.api_wrappers`, which wraps pycocotools:
 
 ```python
 # tools/train.py (or your custom entrypoint)
@@ -73,7 +73,7 @@ from mmengine.runner import Runner
 
 ## RF-DETR
 
-RF-DETR imports `pycocotools.cocoeval.COCOeval` directly. Add `init_as_pycocotools()` before instantiating the model:
+RF-DETR imports `pycocotools.cocoeval.COCOeval` directly:
 
 ```python
 from hotcoco import init_as_pycocotools
@@ -110,24 +110,6 @@ ev.get_results()
 ```
 
 This gives you access to hotcoco's full feature set (TIDE analysis, per-class AP, confusion matrix, results export) on top of Ultralytics predictions.
-
----
-
-## Any other pycocotools-based pipeline
-
-The same one-line pattern works for any script that imports from `pycocotools`:
-
-```python
-from hotcoco import init_as_pycocotools
-init_as_pycocotools()
-
-# All subsequent imports route to hotcoco
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
-from pycocotools import mask
-```
-
-Add this as early as possible in your entrypoint — before any framework imports — so the patch is in place when those modules are first loaded.
 
 ---
 

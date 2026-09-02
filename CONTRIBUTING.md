@@ -88,7 +88,7 @@ Verify metric parity against pycocotools on COCO val2017:
 just parity
 ```
 
-Tolerance: 1e-12 for every iou_type. Measured worst case is 3.7e-14, so the gate is sized to floating-point noise and nothing else.
+Tolerance: 1e-12 for every iou_type — sized to floating-point noise and nothing else; the measured worst case is recorded in [Metric parity](docs/benchmarks.md#metric-parity).
 
 Specialized protocols have their own gates: `just parity-lvis`, `just parity-tide`, `just parity-mask`, and `just parity-oid` (Open Images vs the TF Object Detection API; `just gen-oid-fixtures` regenerates its fixtures). `just parity-all` runs everything.
 

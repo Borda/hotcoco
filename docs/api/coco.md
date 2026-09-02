@@ -70,21 +70,9 @@ print(coco.image_dir)  # "/data/coco/images"
 ### `dataset`
 
 The full dataset with `images`, `annotations`, and `categories`. Writable in
-Python: assigning a dataset dict replaces the contents and rebuilds the index,
-which is how pycocotools consumers construct in-memory datasets
-(`coco = COCO(); coco.dataset = d; coco.createIndex()` — `createIndex()`
-re-indexes, and is a formality after assignment since the setter already
-indexed).
-
-Reading `coco.dataset` returns a **fresh copy** on every access — mutating it in
-place is a no-op. To modify a dataset, pull the dict out, edit it, and assign it
-back:
-
-```python
-d = coco.dataset
-d["annotations"].append(new_ann)
-coco.dataset = d          # applies the change and rebuilds the index
-```
+Python: assigning a dataset dict replaces the contents and rebuilds the index.
+Reading it returns a copy, so edit the dict and assign it back — see
+[Getters return copies — assign back to apply](../getting-started/migration.md#getters-return-copies-assign-back-to-apply).
 
 Keys outside the COCO schema (custom metadata on images, annotations, or
 categories) are preserved through load, dataset ops, and `save` — see
@@ -110,10 +98,9 @@ categories) are preserved through load, dataset ops, and `save` — see
 
 ### `load_warnings`
 
-Warnings collected while loading and indexing — duplicate annotation ids,
-non-finite JSON values normalized to `null`, orphaned result ids. Empty for a
-clean load. Each warning is also printed to stderr at load time; this property
-keeps them inspectable afterwards.
+The warnings the loader printed to stderr, kept inspectable afterwards; empty
+for a clean load. What the loader tolerates and flags is listed under
+[Loading quirks worth knowing](../getting-started/coco-format.md#loading-quirks-worth-knowing).
 
 ```python
 coco = COCO("annotations.json")
@@ -341,7 +328,16 @@ Load images by their IDs.
 
 ### `load_res`
 
-Load detection results into a new `COCO` object. Images and categories are copied from the ground truth. Missing fields (`area`, `segmentation`) are computed automatically.
+Load detection results into a new `COCO` object. Images and categories are
+copied from the ground truth. Missing fields are computed from the detection
+type:
+
+| Detection type | Auto-computed fields |
+|---------------|---------------------|
+| bbox | `area` from bbox, polygon `segmentation` from bbox |
+| segm | `area` from RLE mask |
+| keypoints | `area` from keypoint extent bbox |
+| obb | `area` from width × height, axis-aligned `bbox` enclosing the rotated box |
 
 === "Python"
 
@@ -387,7 +383,7 @@ Load detection results into a new `COCO` object. Images and categories are copie
     ```
 
 !!! tip
-    `load_res` automatically computes missing fields: `area` from bounding boxes or segmentation masks, and polygon segmentations from bbox results. This matches pycocotools behavior — including precedence: a result carrying both `segmentation` and `keypoints` is treated as a segmentation result.
+    A result carrying both `segmentation` and `keypoints` is treated as a segmentation result, matching pycocotools precedence.
 
 ---
 
@@ -550,10 +546,9 @@ Validate a dataset before training or evaluation.
 
     The Python method dispatches to `healthcheck_compatibility` when `dt` is given.
 
-Four layers run in order: structural (duplicate IDs, orphaned references — errors),
-quality (degenerate boxes, out-of-bounds, near-duplicates), distribution (category
-imbalance), and — with `dt` — GT/DT compatibility. See the
-[healthcheck guide](../guide/datasets.md#healthcheck).
+Four layers run in order — structural, quality, distribution, and, with `dt`,
+GT/DT compatibility. The [healthcheck guide](../guide/datasets.md#healthcheck)
+lists what each layer catches.
 
 ---
 
@@ -585,22 +580,9 @@ browse(
 | `batch_size` | `int` | `12` | Number of images loaded per batch. |
 | `port` | `int` | `7860` | Local server port. |
 
-Launches inline in Jupyter (via IFrame); opens a browser tab otherwise.
-
 ```python
 coco = COCO("instances_val2017.json", image_dir="/data/coco/images")
-coco.browse()
-
-# With detection overlay
 coco.browse(dt="bbox_results.json")
-
-# With the eval dashboard
-ev = COCOeval(coco, coco.load_res("bbox_results.json"), "bbox")
-ev.run()
-coco.browse(dt="bbox_results.json", eval=ev)
-
-# Custom port
-coco.browse(port=7861)
 ```
 
 Passing `eval=` without `dt=` shows the dashboard but leaves the gallery without
@@ -829,10 +811,11 @@ All ten converters share one contract:
   bbox-only format, say) are skipped and **counted** in the returned stats dict
   under a `skipped_<reason>` key — nothing vanishes uncounted.
 - **Missing image dimensions are an error wherever geometry must scale.**
-  `from_yolo` and `to_oid` need real `width`/`height` (YOLO and Open Images store
-  normalized coordinates) and raise without them. Two documented exceptions:
-  `from_oid` without `images_dir` keeps boxes normalized against a 1×1 image, and
-  DOTA works in absolute pixels so dimensions are metadata only.
+  `to_yolo`, `from_yolo`, and `to_oid` need real `width`/`height` (YOLO and Open
+  Images store normalized coordinates) and raise `ValueError` without them. Two
+  documented exceptions: `from_oid` without `images_dir` keeps boxes normalized
+  against a 1×1 image, and DOTA works in absolute pixels so dimensions are
+  metadata only.
 - **`file_name` is never invented.** Formats that record it (CVAT, VOC) round-trip
   it verbatim; formats keyed by file stem (YOLO, DOTA, Open Images) import the bare
   stem with no fabricated extension.
@@ -873,8 +856,8 @@ Export the dataset to YOLO label format.
     # {'images': 5000, 'annotations': 36781, 'skipped_crowd': 12, 'skipped_no_bbox': 0}
     ```
 
-    Raises `ValueError` if any image has zero or unknown `width`/`height` — YOLO
-    coordinates are normalized, so export cannot scale without them.
+    Raises `ValueError` if any image lacks `width`/`height` — see the
+    [converter contract](#convert).
 
 === "Rust"
 
@@ -911,15 +894,13 @@ Load a YOLO label directory as a COCO dataset. Class method.
     coco.save("reconstructed.json")
     ```
 
-    YOLO labels are normalized to the image size, so real dimensions are
-    required: importing an image whose dimensions cannot be determined raises
-    `ValueError` rather than producing degenerate 0×0 geometry. `data.yaml`
-    `names` is accepted in all three common forms — the flow list
+    `data.yaml` `names` is accepted in all three common forms — the flow list
     (`names: [a, b]`), the block list, and the Ultralytics index-keyed dict
-    (`names:\n  0: person`). Imported `file_name`s are the bare label-file stem
-    (YOLO does not record the image extension).
+    (`names:\n  0: person`).
 
-    Raises `ImportError` if `images_dir` is given but Pillow is not installed.
+    Raises `ValueError` for an image whose dimensions cannot be determined — see
+    the [converter contract](#convert). Raises `ImportError` if `images_dir` is
+    given but Pillow is not installed.
 
 === "Rust"
 
@@ -981,7 +962,8 @@ Load a Pascal VOC annotation directory as a COCO dataset.
     Image dimensions come from each XML's `<size>` element. Coordinates can be
     integers or floats and are converted from VOC's 1-based inclusive convention
     (`x = xmin − 1`, `w = xmax − xmin + 1` — the exact inverse of `to_voc`);
-    `<difficult>1</difficult>` imports as `iscrowd`.
+    `<difficult>1</difficult>` imports as `iscrowd`. `<truncated>` has no COCO
+    counterpart and is dropped.
 
     ```python
     coco = COCO.from_voc("VOCdevkit/VOC2012/")
@@ -1069,8 +1051,9 @@ Export oriented bounding boxes to DOTA label format.
     ```
 
     Writes one `.txt` per image: 8 corner coordinates, category name, difficulty
-    flag. Only annotations carrying an `obb` are written. Returns a stats dict
-    with keys: `images`, `annotations`, `skipped_no_obb`.
+    flag (COCO `iscrowd` exports as difficulty `1`, and imports back as
+    `iscrowd`). Only annotations carrying an `obb` are written. Returns a stats
+    dict with keys: `images`, `annotations`, `skipped_no_obb`.
 
     ```python
     stats = coco.to_dota("labelTxt/")
@@ -1100,11 +1083,9 @@ Load a DOTA label directory as a COCO dataset with oriented boxes.
     ```
 
     Each annotation gets both an `obb` and its axis-aligned `bbox` envelope.
-    DOTA coordinates are absolute pixels, so `images_dir` only populates
-    `width`/`height` on the image records (they stay `0` without it — metadata
-    only, evaluation is unaffected). Imported `file_name`s are the bare
-    label-file stem. Without `categories`, category names are discovered from
-    the label files and sorted.
+    `images_dir` only fills `width`/`height` on the image records (they stay `0`
+    without it). Without `categories`, category names are discovered from the
+    label files and sorted.
 
     ```python
     coco = COCO.from_dota("labelTxt/", images_dir="images/")
@@ -1134,10 +1115,8 @@ Export the dataset to Open Images challenge CSV format.
     Writes `ImageID,LabelName,XMin,XMax,YMin,YMax,IsGroupOf` — Open
     Images puts `XMax` before `YMin` — with coordinates normalized to `[0, 1]`.
     A `Score` column is added when any annotation carries a score, so detection
-    files round-trip too. Coordinates are normalized, so every referenced image
-    needs real `width`/`height` — missing dimensions raise `ValueError`. Returns
-    a stats dict with keys: `images`, `annotations`, `group_of`,
-    `skipped_no_bbox`.
+    files round-trip too. Returns a stats dict with keys: `images`,
+    `annotations`, `group_of`, `skipped_no_bbox`.
 
     ```python
     stats = coco.to_oid("boxes.csv")
@@ -1169,8 +1148,7 @@ Load an Open Images annotation CSV as a COCO dataset.
     Reads the full V6 layout and the challenge subset alike — columns are
     resolved by name, not position. `IsGroupOf` becomes the `is_group_of`
     annotation field. `class_descriptions` resolves `LabelName` MIDs such as
-    `/m/0cmf2` to names such as `Beer`. Imported `file_name`s are the bare
-    `ImageID` (Open Images does not record an extension).
+    `/m/0cmf2` to names such as `Beer`; without it, category names stay as MIDs.
 
     Without `images_dir`, boxes stay in `[0, 1]` against a 1×1 image; see the
     [conversion guide](../guide/datasets.md#open-images) for what that does and

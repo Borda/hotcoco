@@ -52,16 +52,6 @@ An RLE dict looks like:
     rle = mask.encode(m_c)  # same result
     ```
 
-!!! warning "RLE `counts` is bytes, not a string"
-    `mask.encode()` returns `counts` as a `bytes` object, matching pycocotools. `load_res()` accepts either form in memory, but JSON cannot hold bytes — when writing RLE dicts into a COCO JSON file yourself, convert first:
-
-    ```python
-    if isinstance(rle["counts"], bytes):
-        rle["counts"] = rle["counts"].decode("utf-8")
-    ```
-
-    Some third-party mask libraries, such as older versions of pycocotools, also return `bytes`. Apply the same fix before passing those dicts to hotcoco.
-
 === "Rust"
 
     ```rust
@@ -80,6 +70,20 @@ An RLE dict looks like:
     assert_eq!(pixels, decoded);
     ```
 
+## RLE `counts` is bytes, not a string
+
+`mask.encode()` returns `counts` as a `bytes` object, matching pycocotools.
+`load_res()` accepts either form in memory, but JSON cannot hold bytes — when
+writing RLE dicts into a COCO JSON file yourself, convert first:
+
+```python
+if isinstance(rle["counts"], bytes):
+    rle["counts"] = rle["counts"].decode("utf-8")
+```
+
+Some third-party mask libraries, such as older versions of pycocotools, also
+return `bytes`. Apply the same fix before passing those dicts to hotcoco.
+
 ## Area and bounding box
 
 === "Python"
@@ -90,7 +94,7 @@ An RLE dict looks like:
     bbox = mask.to_bbox(rle)    # numpy array, shape (4,)
 
     # Batch
-    areas = mask.area(rles)     # numpy uint64 array
+    areas = mask.area(rles)     # numpy uint32 array
     bboxes = mask.to_bbox(rles) # numpy float64 array, shape (N, 4)
     ```
 
@@ -146,7 +150,9 @@ Compute pairwise IoU between two lists of masks:
     let ious = mask::bbox_iou(&dt_boxes, &gt_boxes, &vec![false; gt_boxes.len()]);
     ```
 
-The `iscrowd` parameter controls how IoU is computed for crowd annotations. When `iscrowd[j]` is `true`, the IoU for GT `j` uses `intersection / area(dt)` instead of `intersection / union`, which prevents penalizing detections that only partially cover a crowd region.
+The `iscrowd` parameter switches a crowd GT to the crowd convention defined
+under [`primitives.bbox_iou`](../api/primitives.md#bbox_iou), so a detection
+that covers only part of a crowd region is not penalized for it.
 
 ## Creating masks from geometry
 

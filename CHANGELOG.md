@@ -287,6 +287,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Every documented fact now has one owning page.** A redundancy audit of the
+  README and all 27 docs pages found the same content on two to four pages in
+  about 40 places, some already drifting. API pages now hold signatures,
+  parameters, and return shapes; guides hold worked examples and interpretation;
+  the benchmarks page owns every parity figure, including new TIDE and Open
+  Images subsections moved from the guides; every other surface links. The pass
+  also fixed what the drift exposed: batch `mask.area` returns `uint32`, not
+  `uint64`; plots save at 200 DPI, not 150; `report()`'s title derives from the
+  eval mode rather than defaulting to a fixed string; `use_cats=False` does warn;
+  LVIS "frequent" is more than 100 training images, not 100 or more; `coco
+  explore` takes no `--json`; the CLI JSON shape lists `provenance` and
+  `reference_deviations`; loader warnings print rather than staying silent;
+  `CocoEvaluator` accepts a single `iou_type` string; and `hotcoco.metrics`'
+  `is_computed`/`is_missing` are documented. Net effect: about 560 fewer lines of
+  documentation saying the same things.
 - **`COCOeval.eval` is the same dict object on every access**, as in
   pycocotools, rather than a fresh copy per read. In-place edits persist across
   reads; `summarize()`, `stats`, and `results()` read the evaluator's own

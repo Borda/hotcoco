@@ -191,7 +191,7 @@ pub fn decode(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 /// ----------
 /// rle : dict or list[dict]
 ///     Single RLE dict → scalar uint64.
-///     List of RLE dicts → numpy uint64 array.
+///     List of RLE dicts → numpy uint32 array, matching pycocotools.
 #[pyfunction]
 #[pyo3(text_signature = "(rle)")]
 pub fn area(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {

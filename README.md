@@ -9,17 +9,15 @@
 
 It covers detection today — boxes, masks, keypoints, and oriented boxes on the COCO, LVIS, and Open Images protocols. Panoptic and tracking are planned, on the same engine.
 
-Pure Rust, available as a **Python package**, **CLI tool**, and **Rust library** — no Cython, no C compiler, no Microsoft Build Tools. Prebuilt wheels for Linux, macOS, and Windows.
+Pure Rust, available as a **Python package**, **CLI tool**, and **Rust library**.
 
 **[Documentation](https://derekallman.github.io/hotcoco/)** | **[Changelog](CHANGELOG.md)** | **[Roadmap](ROADMAP.md)**
 
 ## Performance
 
-Bbox evaluation on COCO val2017 runs in **0.14s** against 5.11s for pycocotools — **36× faster** (segm and keypoints see ~20×). At Objects365 scale (80k images, 1.2M detections) hotcoco finishes in **18s** where pycocotools takes 721s, using half the memory.
+Bbox evaluation on COCO val2017 runs in **0.14s** against 5.11s for pycocotools; segm and keypoints see ~20×. Every COCO metric matches pycocotools to the limit of double precision, so your AP scores don't change.
 
-Every COCO metric matches pycocotools to floating-point precision on val2017 — worst measured difference 3.7e-14, so your AP scores don't change. A hypothesis-based fuzzer separately checks ~10,000 generated datasets against pycocotools at 1e-10.
-
-Full tables, hardware, phase breakdowns, and parity verification: [Benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
+Full tables, hardware, the Objects365 scale run, phase breakdowns, and parity verification: [Benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
 
 ## Get started
 
@@ -53,7 +51,7 @@ ev.run()
 ### Evaluate
 
 - **COCO, LVIS, and Open Images evaluation** — bbox, segmentation, keypoints, and oriented bounding box (OBB); all standard metrics plus LVIS federated eval (APr/APc/APf) and Open Images hierarchy-aware eval (group-of matching, GT expansion). OBB evaluation uses rotated IoU via polygon clipping for aerial imagery, document analysis, and scene text. See the [evaluation guide](https://derekallman.github.io/hotcoco/guide/evaluation/) and [LVIS and Open Images](https://derekallman.github.io/hotcoco/guide/lvis-open-images/).
-- **Evaluation reports** — `ev.report()` returns metrics, per-class and per-group breakdowns, plottable PR curves, and a `provenance` field telling you whether a number is comparable to a published leaderboard or a hotcoco extension. Every metric family reports in this shape, and every surface that draws the numbers — the PDF report, the browse dashboard, `coco eval --json` — carries the marker with them. `ev.provenance()` answers before you evaluate. See [the evaluation report](https://derekallman.github.io/hotcoco/guide/results/#the-evaluation-report).
+- **Evaluation reports** — `ev.report()` returns metrics, per-class and per-group breakdowns, plottable PR curves, and a `provenance` field that says whether each number is comparable to a published leaderboard or is a hotcoco extension. See [the evaluation report](https://derekallman.github.io/hotcoco/guide/results/#the-evaluation-report).
 
 ### Diagnose
 
@@ -70,25 +68,23 @@ ev.run()
 
 - **Dataset browser** — `coco.browse()` / `coco explore` opens a local browser with category filter, annotation overlays (bbox/segm/keypoints/OBB), hover-to-highlight, zoom/pan, and detection comparison. Pass `eval=` to enable an interactive eval dashboard with PR curves, confusion matrix, TIDE errors, calibration, and per-image F1. `pip install hotcoco[browse]`. See [Dataset browser](https://derekallman.github.io/hotcoco/guide/browse/).
 - **Dataset healthcheck** — 4-layer validation (structural, quality, distribution, GT/DT compatibility) catches duplicate IDs, degenerate bboxes, category imbalance, and more. See [healthcheck](https://derekallman.github.io/hotcoco/guide/datasets/#healthcheck).
-- **Format conversion** — COCO ↔ YOLO, Pascal VOC, CVAT, DOTA (oriented boxes), and Open Images CSV, from Python or the CLI. Open Images detections load with `gt.load_res_oid("predictions.csv")`, so a CSV benchmark evaluates without writing a parser. See [format conversion](https://derekallman.github.io/hotcoco/guide/datasets/#convert).
+- **Format conversion** — COCO ↔ YOLO, Pascal VOC, CVAT, DOTA (oriented boxes), and Open Images CSV, from Python or the CLI. See [format conversion](https://derekallman.github.io/hotcoco/guide/datasets/#convert).
 
 ### Compose and integrate
 
-- **Metric functions on plain arrays** — `hotcoco.metrics` and `hotcoco.primitives` expose the engine as free functions, the way `sklearn.metrics` and `torchmetrics.functional` do. No evaluator, no dataset, no COCO JSON: `metrics.average_precision(scores, matched, num_gt=...)`, `metrics.calibration_error(scores, matched)`, `metrics.confusion_matrix(gt, dt, num_classes=...)`, `primitives.lsap(cost)`. `COCOeval` calls the same functions, so the numbers cannot diverge. See [metrics](https://derekallman.github.io/hotcoco/api/metrics/) and [primitives](https://derekallman.github.io/hotcoco/api/primitives/).
-- **PyTorch integrations** — `CocoDetection` and `CocoEvaluator` drop-in replacements for torchvision's detection classes; no torchvision or pycocotools dependency required. See [PyTorch integration](https://derekallman.github.io/hotcoco/api/integrations/).
+- **Metric functions on plain arrays** — `hotcoco.metrics` and `hotcoco.primitives` expose the engine as free functions, the way `sklearn.metrics` and `torchmetrics.functional` do. No evaluator, no dataset, no COCO JSON: `metrics.average_precision(scores, matched, num_gt=...)`, `primitives.lsap(cost)`. `COCOeval` calls the same functions, so the numbers cannot diverge. See [metrics](https://derekallman.github.io/hotcoco/api/metrics/) and [primitives](https://derekallman.github.io/hotcoco/api/primitives/).
+- **PyTorch integrations** — `CocoDetection` and `CocoEvaluator` drop-in replacements for torchvision's detection classes; no torchvision or pycocotools dependency required. See [PyTorch integration](https://derekallman.github.io/hotcoco/guide/pytorch/).
 - **Experiment tracker integration** — `get_results(prefix="val/bbox", per_class=True)` returns a flat dict ready for W&B, MLflow, or any logger. See [logging metrics](https://derekallman.github.io/hotcoco/guide/results/#logging-metrics).
 - **Python CLI** (`coco`) — included with `pip install hotcoco`; `eval`, `healthcheck`, `stats`, `filter`, `merge`, `split`, `sample`, `convert`, `compare`, and `explore` subcommands. See [CLI reference](https://derekallman.github.io/hotcoco/cli/).
 - **Rust CLI** (`coco-eval`) — lightweight eval-only binary; `cargo install hotcoco-cli`. See [CLI reference](https://derekallman.github.io/hotcoco/cli/).
 - **Type stubs** — ships with `.pyi` stubs and `py.typed` marker for full autocomplete and type checking in VS Code, PyCharm, and other IDEs.
 - **Rust library** — use hotcoco directly in your Rust projects via `cargo add hotcoco`. See [Rust API](https://docs.rs/hotcoco).
 
-See the [documentation](https://derekallman.github.io/hotcoco/) for full API reference and examples.
-
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the architecture overview, build and test workflow, and pre-commit checks.
 
-Parity with pycocotools is a hard requirement — if your change touches evaluation logic, verify metrics haven't shifted with `just parity`.
+Parity with pycocotools is a hard requirement for any change to evaluation logic; `CONTRIBUTING.md` describes how to verify it.
 
 ## License
 

@@ -6,7 +6,9 @@ Drop-in replacements for torchvision's detection reference classes, backed by ho
 from hotcoco.integrations import CocoDetection, CocoEvaluator
 ```
 
-PyTorch and Pillow are optional — only imported when actually used (`CocoDetection.__getitem__` needs Pillow; `synchronize_between_processes` needs `torch.distributed`).
+PyTorch and Pillow are optional — only imported when used (`CocoDetection.__getitem__` needs Pillow; `synchronize_between_processes` needs `torch.distributed`).
+
+Worked examples — a `DataLoader` setup, an epoch loop, and the migration from torchvision — are in the [PyTorch integration guide](../guide/pytorch.md).
 
 ---
 
@@ -34,24 +36,7 @@ CocoDetection(
 
 **Returns** `(image, annotations)` tuples where `annotations` is a list of COCO annotation dicts.
 
-**Example**
-
-```python
-from hotcoco.integrations import CocoDetection
-from torchvision import transforms
-
-dataset = CocoDetection(
-    root="coco/val2017",
-    ann_file="coco/annotations/instances_val2017.json",
-    transform=transforms.ToTensor(),
-)
-
-image, targets = dataset[0]
-# image: Tensor(3, H, W)
-# targets: list of annotation dicts with bbox, category_id, and so on
-
-loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=lambda b: tuple(zip(*b)))
-```
+Worked example: [CocoDetection in the guide](../guide/pytorch.md#cocodetection).
 
 ---
 
@@ -62,33 +47,16 @@ Distributed COCO evaluator for PyTorch training loops. Wraps `COCOeval` with a t
 ```python
 CocoEvaluator(
     coco_gt: COCO,
-    iou_types: list[str],
+    iou_types: str | list[str],
 )
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `coco_gt` | `COCO` | Ground-truth COCO object |
-| `iou_types` | `list[str]` | IoU types to evaluate, for example `["bbox"]` or `["bbox", "segm"]` |
+| `iou_types` | <code>str &#124; list[str]</code> | IoU types to evaluate, for example `"bbox"` or `["bbox", "segm"]` |
 
-**Example**
-
-```python
-from hotcoco import COCO
-from hotcoco.integrations import CocoEvaluator
-
-coco_gt = COCO("instances_val2017.json")
-evaluator = CocoEvaluator(coco_gt, ["bbox"])
-
-for images, targets in data_loader:
-    outputs = model(images)
-    predictions = {t["image_id"]: o for t, o in zip(targets, outputs)}
-    evaluator.update(predictions)
-
-evaluator.synchronize_between_processes()  # no-op if not distributed
-evaluator.accumulate()
-evaluator.summarize()
-```
+Worked examples: [an epoch loop](../guide/pytorch.md#basic-usage) and [distributed training](../guide/pytorch.md#distributed-training) in the guide.
 
 ### Methods
 
@@ -104,9 +72,11 @@ Prediction dict keys by `iou_type`:
 
 | `iou_type` | Required keys | Notes |
 |------------|---------------|-------|
-| `"bbox"` | `boxes`, `scores`, `labels` | Boxes in **XYXY** format; converted to XYWH internally |
-| `"segm"` | `masks`, `scores`, `labels` | `masks` shape `(N, 1, H, W)`; thresholded at 0.5 and RLE-encoded |
-| `"keypoints"` | `keypoints`, `scores`, `labels` | `keypoints` shape `(N, K, 3)` |
+| `"bbox"` | `boxes`, `scores`, `labels` | `boxes` shape `(N, 4)` in **XYXY** format; converted to XYWH internally |
+| `"segm"` | `masks`, `scores`, `labels` | `masks` shape `(N, 1, H, W)`, float in `[0, 1]`; thresholded at 0.5 and RLE-encoded |
+| `"keypoints"` | `keypoints`, `scores`, `labels` | `keypoints` shape `(N, K, 3)` — x, y, visibility |
+
+`scores` has shape `(N,)`; `labels` has shape `(N,)` and holds COCO category IDs.
 
 #### `synchronize_between_processes()`
 
@@ -122,7 +92,7 @@ Prints the standard COCO metrics table for each `iou_type`.
 
 #### `get_results()`
 
-Returns metrics as a nested dict.
+Returns metrics as a nested dict, one entry per `iou_type`.
 
 ```python
 results = evaluator.get_results()
@@ -133,11 +103,4 @@ results = evaluator.get_results()
 
 ## Replacing torchvision references
 
-Both classes swap in without any other code changes, and no pycocotools install:
-
-```python
-from hotcoco.integrations import CocoDetection, CocoEvaluator
-```
-
-See the [PyTorch integration guide](../guide/pytorch.md) for the full migration,
-including the distributed-training path.
+Both classes swap in for their torchvision equivalents with an import change and no pycocotools install — see [Migrating from torchvision](../guide/pytorch.md#migrating-from-torchvision).

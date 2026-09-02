@@ -17,7 +17,7 @@ from hotcoco import COCO, COCOeval
 from hotcoco import mask as mask_util
 ```
 
-Everything else stays the same. The classes, methods, and return types are identical.
+Everything else stays the same.
 
 ## Option 2: Zero-code drop-in
 
@@ -33,10 +33,7 @@ from pycocotools.cocoeval import COCOeval  # → hotcoco.COCOeval
 from pycocotools import mask               # → hotcoco.mask
 ```
 
-This patches `sys.modules` so that `pycocotools`, `pycocotools.coco`, `pycocotools.cocoeval`, and `pycocotools.mask` all resolve to their hotcoco equivalents.
-
-!!! tip
-    Call `init_as_pycocotools()` before any `pycocotools` imports. The best place is the top of your entry point script.
+How the patch works, where to call it, and per-framework notes are in [Framework integrations](../guide/frameworks.md).
 
 ## Method naming
 
@@ -100,18 +97,16 @@ coco.createIndex()                  # supported, but a formality after assignmen
 
 | Behavior | pycocotools | hotcoco |
 |----------|-------------|-----------|
-| Print on load | Prints "loading annotations..." to stdout | Silent (warnings collected on `coco.load_warnings`) |
+| Print on load | Prints "loading annotations..." to stdout | No progress output; loader warnings go to stderr and `coco.load_warnings` |
 | `COCO()` with no args | Creates empty instance with print statements | Creates empty instance silently |
 | Annotation IDs | Requires unique positive integers | Also accepts 0-based IDs |
 | `getAnnIds(areaRng=...)` on annotations missing `area` | Raises `KeyError` | Excludes them from the query |
-| Mutating `coco.dataset` / `ev.params` internals in place | Mutates shared state | No-op on a copy — assign back to apply (see above) |
+| Mutating `coco.dataset` / `ev.params` internals in place | Mutates shared state | No-op on a copy — [assign back to apply](#getters-return-copies-assign-back-to-apply) |
 | Performance | Single-threaded C + Python | Multi-threaded Rust |
 
 ## Metric parity
 
-Every COCO metric matches pycocotools to floating-point precision — your AP and AR scores don't change. Verified on COCO val2017 across bbox, segmentation, and keypoints.
-
-You don't have to take that on faith. [Benchmarks](../benchmarks.md#verify-it-yourself) has a short script that runs your own ground truth and detections through both libraries and prints the per-metric difference.
+Every COCO metric matches pycocotools to floating-point precision — the measured differences on COCO val2017, and a script to check your own data, are in [Metric parity](../benchmarks.md#metric-parity).
 
 ## Rust: module paths renamed in 1.0
 

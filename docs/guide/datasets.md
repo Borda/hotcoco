@@ -9,15 +9,9 @@ so you can chain filter → split → sample in a single expression.
     Run `coco.stats()` first to understand your dataset before reshaping it. See the
     [`stats` API reference](../api/coco.md#stats) for the full return structure.
 
-!!! note "Non-standard `NaN`/`Infinity` values"
-    Python's `json` module writes and reads bare `NaN`, `Infinity`, and `-Infinity`
-    values, so annotation files produced by pycocotools or numpy pipelines sometimes
-    contain them even though they are not valid JSON. `COCO(...)` tolerates these:
-    non-finite values are normalized to `null` on load (becoming `None` on fields like
-    `area` and `score`), matching pycocotools' behavior. A one-line notice is printed
-    reporting how many values were normalized, and the same notice is kept on
-    [`coco.load_warnings`](../api/coco.md#load_warnings) alongside any other loader
-    warnings (duplicate annotation ids, orphaned result ids).
+Files that are not quite valid JSON — bare `NaN`/`Infinity` from Python's `json`
+module — still load; see
+[Loading quirks worth knowing](../getting-started/coco-format.md#loading-quirks-worth-knowing).
 
 ---
 
@@ -83,9 +77,6 @@ Add a test set with a second fraction:
 train, val, test = coco.split(val_frac=0.15, test_frac=0.15, seed=42)
 # train ~70%, val ~15%, test ~15%
 ```
-
-`test_frac=0.0` is honored as a three-way split with an empty test set — useful
-when a pipeline always expects three files. Omit it (`None`) for a two-way split.
 
 The same `seed` always produces the same split — important for reproducibility
 across experiments. The guarantee holds per installed hotcoco version (not across
@@ -216,11 +207,9 @@ coco2.save("reconstructed.json")
 
 Bbox values round-trip within floating-point precision (under 0.0001 px for
 typical image sizes). YOLO coordinates are normalized to the image size, so both
-directions need real dimensions: `to_yolo` raises if an image records none, and
-`from_yolo` raises for an image whose dimensions it cannot determine (pass
-`images_dir` so Pillow can read them). `data.yaml` is accepted in the flow-list,
-block-list, and Ultralytics dict forms of `names:`. Because YOLO does not record
-image extensions, re-imported `file_name`s are bare stems.
+directions need real dimensions — `images_dir` is how the import gets them. What
+[`from_yolo`](../api/coco.md#from_yolo) accepts in `data.yaml` and how it names
+images is in the API reference.
 
 ### Pascal VOC
 
@@ -230,12 +219,10 @@ coco2 = COCO.from_voc("voc_output/")
 ```
 
 VOC is bbox-only and writes integer pixel coordinates in the devkit's 1-based
-inclusive convention; hotcoco applies it in both directions (import
-`x = xmin − 1`, `w = xmax − xmin + 1`; export the inverse), so a COCO→VOC→COCO
-round-trip is bounded only by the integer rounding on export. Float coordinates
-in the XML are accepted on import. COCO `iscrowd` maps to VOC `<difficult>` on
-export and back to `iscrowd` on import; `<truncated>` has no COCO counterpart
-and is dropped.
+inclusive convention, which hotcoco applies in both directions, so a
+COCO→VOC→COCO round-trip is bounded only by the integer rounding on export. The
+coordinate formula and the `iscrowd`/`<difficult>` mapping are in
+[`to_voc`](../api/coco.md#to_voc) and [`from_voc`](../api/coco.md#from_voc).
 
 ### CVAT
 
@@ -244,10 +231,9 @@ coco.to_cvat("annotations.xml")   # CVAT for Images 1.1, single XML file
 coco2 = COCO.from_cvat("annotations.xml")
 ```
 
-Bounding boxes and polygon segmentations convert in both directions — including
-shapes CVAT writes as open/close pairs when they carry `<attribute>` children.
-`<polyline>`, `<points>`, and `<cuboid>` elements and degenerate polygons are
-skipped with a `UserWarning` reporting the count.
+Bounding boxes and polygon segmentations convert in both directions; shapes
+COCO cannot express are skipped and counted — [`from_cvat`](../api/coco.md#from_cvat)
+lists which.
 
 ### DOTA {#dota}
 
@@ -262,9 +248,9 @@ coco2 = COCO.from_dota("labelTxt/", images_dir="images/")
 ```
 
 Corner coordinates are written to one decimal place, which bounds a
-COCO→DOTA→COCO round-trip at ≤0.1 px per coordinate. Each imported annotation
-gets both an `obb` and its axis-aligned `bbox` envelope, so the result evaluates
-under either `iou_type`. COCO `iscrowd` maps to DOTA's difficulty flag.
+COCO→DOTA→COCO round-trip at ≤0.1 px per coordinate. An imported dataset
+evaluates under either `iou_type`, because [`from_dota`](../api/coco.md#from_dota)
+fills in the axis-aligned envelope as well.
 
 Categories are discovered from the label files and sorted. Pass
 `categories=[...]` to fix the numbering instead — two splits of one dataset
@@ -285,20 +271,16 @@ ev = COCOeval(gt, dt, "bbox", oid_style=True)
 ev.run()
 ```
 
-`from_oid` reads both the full V6 layout and the challenge subset — columns are
-resolved by name, so the two orderings need no flag. `IsGroupOf` becomes the
-`is_group_of` annotation field, which [Open Images evaluation](lvis-open-images.md)
-matches by IoA rather than IoU.
+`IsGroupOf` boxes become `is_group_of` annotations, which
+[Open Images evaluation](lvis-open-images.md) matches by IoA rather than IoU.
 
-`class_descriptions` is optional and resolves `LabelName` MIDs such as `/m/0cmf2`
-to readable names such as `Beer`. Without it, category names stay as MIDs. Pass
-the same file to `load_res_oid` that you passed to `from_oid`, so detections
-resolve to the same categories.
+`class_descriptions` is optional. Pass the same file to `load_res_oid` that you
+passed to `from_oid`, so detections resolve to the same categories.
 
-`load_res_oid` is the Open Images counterpart to `load_res`: it aligns detections
-onto the ground truth's image and category IDs. A detection naming an image or
-category the ground truth doesn't have raises rather than being dropped —
-silently discarding detections moves recall, and nothing downstream would show it.
+[`load_res_oid`](../api/coco.md#load_res_oid) aligns detections onto the ground
+truth's image and category IDs, and treats a detection it cannot place as an
+error — silently discarding detections moves recall, and nothing downstream
+would show it.
 
 !!! note "Image dimensions are optional, with one consequence"
 
@@ -342,23 +324,6 @@ dt = coco.load_res("detections.json")
 report = coco.healthcheck(dt)
 ```
 
-### From the CLI
-
-```bash
-# Dataset only
-coco healthcheck annotations.json
-
-# With detections
-coco healthcheck annotations.json --dt detections.json
-
-# As a pre-flight check before evaluation
-coco eval --gt annotations.json --dt detections.json --healthcheck
-```
-
-`coco healthcheck` exits `1` when any ERROR-level finding is present, so it can
-gate a CI step; warnings alone exit `0`. See the
-[CLI reference](../cli.md#coco-healthcheck).
-
 ---
 
 ## CLI
@@ -374,4 +339,9 @@ coco sample  person.json --n 500 --seed 0 -o person_sample.json
 coco merge   batch1.json batch2.json -o combined.json
 coco convert --from coco --to yolo --input instances_val2017.json --output labels/
 coco convert --from yolo --to coco --input labels/ --output reconstructed.json
+coco healthcheck annotations.json --dt detections.json
+coco eval --gt annotations.json --dt detections.json --healthcheck   # pre-flight check
 ```
+
+`coco healthcheck` has an exit status a CI step can gate on — see
+[`coco healthcheck`](../cli.md#coco-healthcheck).

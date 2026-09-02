@@ -169,9 +169,7 @@ metrics.calibration_error(scores, matched)            # (ece, mce)
 ```
 
 `COCOeval` calls these same functions internally, so numbers you compute by hand match
-what `summarize()` prints. For everything at once, `ev.report()` returns metrics,
-per-class breakdowns, and PR curves in one structure, with a `provenance` field that
-says whether each number is comparable to published results.
+what `summarize()` prints.
 
 Panoptic and tracking are next, on the same engine —
 see the [roadmap](https://github.com/derekallman/hotcoco/blob/main/ROADMAP.md).

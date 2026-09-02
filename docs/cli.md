@@ -3,7 +3,7 @@
 hotcoco ships two CLI tools:
 
 - **`coco`** — Python CLI. Installed with `pip install hotcoco`. Covers dataset management (filter, merge, split, sample, stats) and is the primary tool for most workflows.
-- **`coco-eval`** — Rust CLI. Installed with `cargo install hotcoco-cli`. Evaluation only, no Python required.
+- **`coco-eval`** — Rust CLI. Installed with `cargo install hotcoco-cli`.
 
 ---
 
@@ -15,7 +15,7 @@ pip install hotcoco
 
 ### JSON output mode
 
-Every subcommand accepts a `--json` flag that writes a single JSON object to stdout
+Every subcommand except `coco explore` accepts a `--json` flag that writes a single JSON object to stdout
 instead of human-readable text. stderr (progress, warnings, errors) is untouched.
 
 ```bash
@@ -84,7 +84,7 @@ coco eval --gt <gt.json> --dt <dt.json> [options]
 | `--calibration` | Compute confidence calibration (ECE/MCE) after standard metrics | off |
 | `--cal-bins` | Number of calibration bins | `10` |
 | `--cal-iou-thr` | IoU threshold for calibration TP/FP classification | `0.5` |
-| `--json` | Write results as JSON to stdout instead of human-readable text | off |
+| `--json` | Results as JSON | off |
 
 ```bash
 # Bounding box evaluation
@@ -129,8 +129,10 @@ coco eval --gt instances_val2017.json --dt bbox_results.json --tide --slices sli
 ```json
 {
   "hotcoco_version": "1.0.0",
+  "provenance": "parity_verified",
   "params": { "iou_type": "bbox", "iou_thresholds": [...], "area_ranges": {...}, ... },
   "metrics": { "AP": 0.578, "AP50": 0.861, "AP75": 0.600, "APs": 0.327, ... },
+  "reference_deviations": [],
   "tide": { "delta_ap": {...}, "counts": {...}, "ap_base": 0.578, ... },
   "slices": { "daytime": { "AP": 0.61, ... }, "_overall": { ... } },
   "healthcheck": { "errors": [], "warnings": [] }
@@ -156,7 +158,7 @@ coco healthcheck <annotation_file> [--dt <detections.json>]
 | Flag | Description |
 |------|-------------|
 | `--dt <path>` | Detection results JSON — enables GT/DT compatibility checks |
-| `--json` | Write results as JSON to stdout |
+| `--json` | Results as JSON |
 
 **Exit status:** exits `1` when any ERROR-level finding is present (in both human
 and `--json` modes), so it can gate a CI step. Warnings alone exit `0`.
@@ -198,7 +200,7 @@ coco filter <file> -o <output> [options]
 | `--area-rng MIN,MAX` | Keep annotations within this area range (inclusive) |
 | `--keep-empty-images` | Preserve images with no matching annotations |
 | `-o / --output` | Output JSON path *(required)* |
-| `--json` | Write before/after counts as JSON to stdout |
+| `--json` | Before/after counts as JSON |
 
 ```bash
 # Keep only "person" (category 1)
@@ -226,7 +228,7 @@ coco split <file> -o <prefix> [options]
 | `--test-frac` | Fraction for a test set (omit for two-way split; `0.0` gives a three-way split with an empty test file) | — |
 | `--seed` | Random seed for reproducibility | `42` |
 | `-o / --output` | Output prefix | *(required)* |
-| `--json` | Write per-split counts as JSON to stdout | off |
+| `--json` | Per-split counts as JSON | off |
 
 Writes `<prefix>_train.json`, `<prefix>_val.json`, and optionally `<prefix>_test.json`.
 
@@ -268,7 +270,7 @@ coco sample <file> -o <output> [options]
 | `--frac F` | Fraction of images to sample |
 | `--seed` | Random seed (default `42`) |
 | `-o / --output` | Output JSON path *(required)* |
-| `--json` | Write before/after counts as JSON to stdout | |
+| `--json` | Before/after counts as JSON |
 
 ```bash
 # Sample 500 images
@@ -315,8 +317,7 @@ coco explore --gt gt.json --images imgs/ --dt results.json --iou-type segm --iou
 coco explore --gt instances_val2017.json --images /data/images/ --port 7861
 ```
 
-Opens a sidebar with category filter and shuffle. Click any thumbnail to open a
-full-resolution lightbox with canvas annotation overlay. See the [Dataset browser guide](guide/browse.md).
+The [Dataset browser guide](guide/browse.md) describes the UI.
 
 ---
 
@@ -340,7 +341,7 @@ coco compare --gt <annotations.json> --dt-a <model_a.json> --dt-b <model_b.json>
 | `--confidence` | Confidence level for CIs | `0.95` |
 | `--name-a` | Display name for model A | `Model A` |
 | `--name-b` | Display name for model B | `Model B` |
-| `--json` | JSON output for CI/CD pipelines | off |
+| `--json` | Comparison as JSON | off |
 
 ```bash
 # Basic comparison
@@ -425,9 +426,9 @@ coco convert --from oid --to coco --input <boxes.csv> --output <annotations.json
 | `--to` | Target format: `coco`, `yolo`, `voc`, `cvat`, `dota`, or `oid` |
 | `--input` | Input path — JSON file (COCO), CSV file (Open Images), XML file (CVAT), or label directory (YOLO, VOC, DOTA) |
 | `--output` | Output path — JSON file (COCO), CSV file (Open Images), XML file (CVAT), or label directory (YOLO, VOC, DOTA) |
-| `--images-dir` | *(YOLO, DOTA, Open Images → COCO)* Directory of source images, read by Pillow. YOLO and Open Images store normalized coordinates, so this is what converts them to pixels; for DOTA, which is already in pixels, it only fills in `width`/`height`. Requires `pip install Pillow`. |
-| `--class-descriptions` | *(Open Images → COCO only)* Path to `class-descriptions-boxable.csv`, resolving `LabelName` MIDs such as `/m/0cmf2` to names such as `Beer`. Without it, category names stay as MIDs. |
-| `--json` | Write conversion stats as JSON to stdout |
+| `--images-dir` | *(YOLO, DOTA, Open Images → COCO)* Directory of source images, read by Pillow for `width`/`height` — which formats need it and why is in [Format conversion](api/coco.md#convert). Requires `pip install Pillow`. |
+| `--class-descriptions` | *(Open Images → COCO only)* Path to `class-descriptions-boxable.csv`; see [`from_oid`](api/coco.md#from_oid). |
+| `--json` | Conversion stats as JSON |
 
 ```bash
 # Export val2017 to YOLO labels
@@ -476,7 +477,7 @@ coco convert --from oid --to coco \
 
 Detections are a Python-side step: the CLI converts annotation files, but
 pairing an Open Images predictions CSV with its ground truth needs
-[`load_res_oid`](guide/datasets.md#open-images).
+[`load_res_oid`](api/coco.md#load_res_oid).
 
 ---
 
@@ -503,16 +504,10 @@ where the intent should be obvious:
 coco-eval eval --gt annotations.json --dt detections.json --iou-type bbox
 ```
 
-### Subcommands
-
-| Command | Description |
-|---------|-------------|
-| `eval` | Evaluate detections against ground truth (the default action) |
-| `completions <shell>` | Print a shell completion script |
-
 ### Options
 
-These apply to `eval` and to the bare form.
+These apply to `eval` and to the bare form. The only other subcommand is
+`completions`, covered under [Shell completions](#shell-completions).
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -523,9 +518,6 @@ These apply to `eval` and to the bare form.
 | `--cat-ids <ids>` | Filter to specific category IDs (comma-separated) | all categories |
 | `--no-cats` | Pool all categories (disable per-category evaluation) | off |
 | `-o / --output <path>` | Write evaluation results to a JSON file | off |
-
-Tab completion is set up with `coco-eval completions <shell>` — see
-[Shell completions](#shell-completions).
 
 ### Examples
 
@@ -551,22 +543,15 @@ coco-eval --gt instances_val2017.json --dt bbox_results.json --output results.js
 
 ### Output
 
-The standard 12 COCO metrics (10 for keypoints):
+The standard 12 COCO metrics (10 for keypoints), in pycocotools' table layout:
 
 ```
  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.783
  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.971
- Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.849
- Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.621
- Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.893
- Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.988
- Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.502
- Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.835
- Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.854
- Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.701
- Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.935
- Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.997
+ ...
 ```
+
+A full run is shown in the [quick start](getting-started/quickstart.md#4-run-evaluation).
 
 ---
 

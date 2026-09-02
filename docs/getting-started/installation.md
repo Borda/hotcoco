@@ -28,7 +28,7 @@ For a standalone binary with no Python dependency, install the Rust CLI:
 cargo install hotcoco-cli
 ```
 
-This installs the `coco-eval` binary, which does evaluation only.
+This installs the `coco-eval` binary — see [`coco-eval` — Rust CLI](../cli.md#coco-eval-rust-cli) for what it covers.
 
 ## Rust library
 

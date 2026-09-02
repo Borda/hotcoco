@@ -7,9 +7,8 @@ Install the optional dependency:
 pip install hotcoco[plot]
 ```
 
-All plot functions return `(Figure, Axes)` for further customization,
-accept an optional `ax` to draw on existing axes, and accept `save_path`
-to write directly to disk.
+The arguments every function shares and what they return are under
+[common parameters](../api/plot.md#common-parameters) in the API reference.
 
 ## PDF evaluation report
 
@@ -27,9 +26,7 @@ ev.run()
 report(ev, save_path="report.pdf", gt_path="instances_val2017.json", dt_path="bbox_results.json")
 ```
 
-The report includes a run context block (dataset paths, eval params, image/annotation counts),
-a full metrics table, precision-recall curves at IoU 0.50, 0.75, and the mean, F1 peak,
-and a per-category AP bar chart sorted from best to worst.
+The sections of the report are listed under [`report`](../api/plot.md#report).
 
 Every report carries a **provenance** line stating whether its numbers are comparable
 to a published leaderboard. A parity-verified run says so quietly; anything else is
@@ -42,7 +39,7 @@ caveat means the run was checked rather than that the caveat was omitted. See
 Works with all three evaluation modes — the metrics table picks the right rows for
 each automatically ([which rows](../api/plot.md#report)).
 
-Or from the CLI (requires `pip install hotcoco[plot]`):
+Or from the CLI:
 
 ```bash
 coco eval --gt instances_val2017.json --dt bbox_results.json --report report.pdf
@@ -99,10 +96,6 @@ results = ev.results(per_class=True)
 fig, ax = per_category_ap(results)
 ```
 
-Shows horizontal bars sorted by AP with a mean AP reference line.
-When there are many categories, the top 20 and bottom 5 are shown
-with a visual break.
-
 <figure markdown>
 ![Per-category AP as horizontal bars, best to worst](../assets/per-category-ap.png#only-light)
 ![Per-category AP as horizontal bars, best to worst](../assets/per-category-ap-dark.png#only-dark)
@@ -126,8 +119,7 @@ fig, ax = confusion_matrix(ev.confusion_matrix())
 column carry detections with no ground truth and ground truth with no detection.</figcaption>
 </figure>
 
-For datasets with many categories (>30), the matrix auto-filters to
-the 25 most confused categories. You can also aggregate by supercategory:
+To aggregate by supercategory:
 
 ```python
 # Build supercategory groups from the dataset
@@ -186,23 +178,16 @@ AP deltas sorted by magnitude — green for improvements, red for regressions.
 
 ## Themes
 
-Every plot function accepts a `theme` argument — `"cyanotype"` (the default)
-or `"cyanotype-dark"`. See
-[themes](../api/plot.md#themes) for what each looks like.
+Every plot function takes `theme` and `paper_mode` — see
+[Themes](../api/plot.md#themes) in the API reference for what each does.
 
 Every figure on this page is drawn twice — `"cyanotype"` and `"cyanotype-dark"` —
 and the site swaps them with the palette toggle in the header. Flip it to see the
 dark theme.
 
 ```python
-fig, ax = pr_curve(ev, theme="cyanotype-dark")
-fig, ax = per_category_ap(results, theme="cyanotype")
-```
-
-Add `paper_mode=True` to force white backgrounds — useful when embedding in LaTeX or PowerPoint:
-
-```python
-fig, ax = pr_curve(ev, paper_mode=True, save_path="pr.pdf")
+fig, ax = per_category_ap(results, theme="cyanotype-dark")   # dark slides, dark notebooks
+fig, ax = pr_curve(ev, paper_mode=True, save_path="pr.pdf")  # white ground for a paper or slide deck
 ```
 
 To apply a theme to your own matplotlib code, use the `style()` context manager:

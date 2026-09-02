@@ -8,22 +8,7 @@ COCO's protocol is not the only one hotcoco speaks. LVIS needs federated evaluat
 
 ### Drop-in replacement for lvis-api
 
-If your pipeline uses lvis-api (Detectron2, MMDetection, or any code that does `from lvis import LVISEval`), call `init_as_lvis()` once at startup:
-
-```python
-from hotcoco import init_as_lvis
-init_as_lvis()
-
-# Existing lvis-api code works unchanged
-from lvis import LVIS, LVISEval, LVISResults
-
-lvis_gt = LVIS("lvis_v1_val.json")
-lvis_dt = LVISResults(lvis_gt, "detections.json")
-ev = LVISEval(lvis_gt, lvis_dt, "bbox")
-ev.run()
-ev.print_results()
-results = ev.get_results()
-```
+If your pipeline already uses lvis-api, see [LVIS-based pipelines](frameworks.md#lvis-based-pipelines).
 
 ### Direct usage
 
@@ -60,18 +45,18 @@ results = ev.get_results()
 | AP | mAP @ IoU[0.5:0.05:0.95] |
 | AP50 | mAP @ IoU=0.5 |
 | AP75 | mAP @ IoU=0.75 |
-| APs | AP for small objects (area < 32²) |
-| APm | AP for medium objects (32² ≤ area < 96²) |
-| APl | AP for large objects (area ≥ 96²) |
+| APs | AP for small objects |
+| APm | AP for medium objects |
+| APl | AP for large objects |
 | APr | AP for rare categories (1–10 training images) |
 | APc | AP for common categories (11–100 training images) |
-| APf | AP for frequent categories (100+ training images) |
+| APf | AP for frequent categories (more than 100 training images) |
 | AR@300 | Mean recall @ max 300 detections per image |
 | ARs@300 | AR for small objects |
 | ARm@300 | AR for medium objects |
 | ARl@300 | AR for large objects |
 
-The frequency split (rare / common / frequent) is determined by the `frequency` field on each category in the LVIS annotation file (`"r"`, `"c"`, `"f"`). These correspond to the number of training images in which the category appears, as defined in the LVIS paper.
+Small, medium, and large are the COCO area ranges — see [`area_rng`](../api/params.md#area_rng). The frequency split (rare / common / frequent) is determined by the `frequency` field on each category in the LVIS annotation file (`"r"`, `"c"`, `"f"`). These correspond to the number of training images in which the category appears, as defined in the LVIS paper.
 
 `get_results()` returns all 13 metrics as a dict for programmatic access.
 
@@ -94,27 +79,9 @@ result = ev.get_results()
 # {"AP": 0.573}
 ```
 
-Starting from the CSV files Open Images actually ships, rather than from COCO
-JSON, load them directly:
+`oid_style=True` evaluates at a single IoU threshold of 0.50, over the `all` area range only, with 100 max detections — so `summarize()` prints one line and `get_results()` returns `{"AP": <float>}`.
 
-```python
-coco_gt = COCO.from_oid(
-    "challenge-2019-validation-detection-bbox.csv",
-    class_descriptions="class-descriptions-boxable.csv",
-)
-coco_dt = coco_gt.load_res_oid("predictions.csv")
-```
-
-`IsGroupOf` carries through to the matching rules in
-[Group-of annotations](#group-of-annotations). The readers, their optional arguments, and what
-happens without image dimensions are documented under
-[format conversion](datasets.md#open-images).
-
-`oid_style=True` sets:
-
-- IoU threshold = 0.5 (single threshold, no sweep)
-- Area range = "all" only
-- Max detections = 100
+Starting from the CSV files Open Images ships rather than from COCO JSON, load them with `COCO.from_oid` and `load_res_oid` — see [Open Images](datasets.md#open-images) for the readers, their options, and what happens without image dimensions. `IsGroupOf` carries through to the matching rules in [Group-of annotations](#group-of-annotations).
 
 ### Category hierarchy
 
@@ -131,47 +98,21 @@ ev = COCOeval(coco_gt, coco_dt, "bbox", oid_style=True, hierarchy=h)
 ev.run()
 ```
 
-If you don't have a hierarchy JSON, omit `hierarchy=` entirely. `oid_style=True` then
-derives one from the `supercategory` field of each category:
-
-```python
-# Parent→child relationships come from Category.supercategory
-ev = COCOeval(coco_gt, coco_dt, "bbox", oid_style=True)
-ev.run()
-```
-
-Categories without a `supercategory` produce a flat hierarchy, which makes expansion a
-no-op — matching still uses OID semantics (group-of handling, a single IoU threshold).
-
-Or build a hierarchy manually from a parent map:
-
-```python
-h = Hierarchy.from_parent_map({
-    3: 1,   # cat 3's parent is cat 1
-    4: 1,   # cat 4's parent is cat 1
-    5: 2,   # cat 5's parent is cat 2
-})
-```
+If you don't have a hierarchy JSON, omit `hierarchy=` entirely and `oid_style=True` derives one from each category's `supercategory` field. A hierarchy can also be built from an explicit parent map or an in-memory dict — see [Hierarchy](../api/hierarchy.md) for the constructors and the derivation rules.
 
 ### Detection expansion
 
-By default only GT annotations are expanded up the hierarchy. To also expand detections (so a "Dog" detection also counts as an "Animal" detection):
-
-```python
-ev = COCOeval(coco_gt, coco_dt, "bbox", oid_style=True, hierarchy=h)
-ev.params.expand_dt = True
-ev.run()
-```
+By default only GT annotations are expanded up the hierarchy; set [`expand_dt`](../api/params.md#expand_dt) to also expand detections, so a "Dog" detection counts as an "Animal" detection too.
 
 ### Group-of annotations
 
 OID uses `is_group_of: true` on annotations covering a *cluster* of objects — five or more instances of the same class, occluding each other, where no individual box can be drawn. A cluster is one thing you either found or didn't:
 
-- **A group-of box is worth exactly one ground truth.** The best-scoring detection inside it is a true positive. Every other detection inside it is ignored — neither true positive nor false positive. Detecting the pile twice earns nothing extra.
+- **A group-of box is worth exactly one ground truth.** The best-scoring detection inside it is a true positive. Every other detection inside it is ignored — neither true positive nor false positive. Detecting the pile twice earns nothing extra. This is where it differs from COCO's `iscrowd`: a crowd region is dropped from the denominator, while a group-of box is counted once and can be found.
 - **Missing it costs one false negative.** An undetected group-of box counts once against recall.
-- **"Inside" is IoA, not IoU** — intersection divided by the *detection's* area. A detection wholly inside the box qualifies however small it is, which is the point: individual objects are much smaller than the cluster that contains them.
+- **"Inside" is IoA, not IoU** — intersection divided by the *detection's* area, the same measure COCO uses for `iscrowd`. A detection wholly inside the box qualifies however small it is, which is the point: individual objects are much smaller than the cluster that contains them.
 
-This is the [Open Images Challenge protocol](https://storage.googleapis.com/openimages/web/evaluation.html), equivalently TensorFlow's `group_of_weight = 1.0`, and it is what FiftyOne implements. It is checked against the TensorFlow Object Detection API on every commit — see [Verification](#verification).
+This is the [Open Images Challenge protocol](https://storage.googleapis.com/openimages/web/evaluation.html), equivalently TensorFlow's `group_of_weight = 1.0`, and it is what FiftyOne implements. It is checked against the TensorFlow Object Detection API — see [Verification](#verification).
 
 Open Images AP also uses **VOC 2010 all-points integration** — the exact area under the precision-recall curve — rather than COCO's 101-point recall grid. The protocol specifies it and both reference implementations do it, so an OID number here is not directly comparable to a COCO number computed on the same data.
 
@@ -179,27 +120,10 @@ Open Images AP also uses **VOC 2010 all-points integration** — the exact area 
 
     The older V2 detection metric ignored group-of boxes entirely — they contributed to neither the numerator nor the denominator (`group_of_weight = 0.0`). Both are real published protocols. hotcoco implements the Challenge metric, so **numbers here don't match a V2-era leaderboard**.
 
-Mechanically this is COCO's `iscrowd` with the scoring changed: same intersection-over-area measure, same "many detections may fall inside one region", but where a crowd region is dropped from the denominator, a group-of box is counted once and can be found.
-
 Your annotations need `"is_group_of": true` in the JSON for this to take effect. Standard annotations without this field default to `false`.
-
-### The OID metric
-
-`summarize()` reports a single metric:
-
-| Metric | IoU | Area | MaxDets |
-|--------|-----|------|---------|
-| **AP** | 0.50 | all | 100 |
-
-`get_results()` returns `{"AP": <float>}`.
 
 ### Verification
 
-Open Images evaluation is compared against the [TensorFlow Object Detection API](https://github.com/tensorflow/models/tree/master/research/object_detection) — the reference the official protocol page points to — over 70 cases covering group-of absorption, IoA containment at and around the 0.5 boundary, undetected group-of boxes, overlapping group-of boxes, and randomized multi-class scenes. Both mAP and per-class AP are compared, and **every case agrees to within one ulp** (worst difference 1.11e-16). It runs in CI on every commit.
-
-Two things that comparison does **not** cover, and why `provenance` still reports `"extension"`:
-
-- **Non-exhaustive image-level labels.** The challenge ignores detections of a class not verified on an image, and counts detections of a negatively-labeled class as false positives. hotcoco does not implement this — it needs per-image label data that COCO-format JSON cannot carry. A real challenge submission would score differently.
-- **Hierarchy expansion** is applied to annotations before evaluation rather than inside it, so it sits outside the compared surface.
+Open Images evaluation is compared against the TensorFlow Object Detection API, and every case agrees to within one ulp — the cases, the figures, and the two things the comparison does not cover (which is why `provenance` still reports `"extension"`) are in [Open Images parity](../benchmarks.md#open-images).
 
 See [Hierarchy](../api/hierarchy.md) in the API reference for full construction and query methods.

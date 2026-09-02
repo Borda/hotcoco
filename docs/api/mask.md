@@ -16,13 +16,16 @@ Low-level mask operations on Run-Length Encoded (RLE) binary masks.
 
 For background on RLE and usage patterns, see the [Mask operations](../guide/masks.md) guide.
 
-!!! tip "pycocotools drop-in"
-    The Python `mask` module is a drop-in replacement for `pycocotools.mask`.
-    All functions accept and return the same types — `encode` returns
-    `{"size": [h, w], "counts": b"..."}`, `decode` returns Fortran-order arrays,
-    and batch functions accept single values or lists.
+Two conventions hold for every function here, both matching pycocotools:
 
-The functions that exist in `pycocotools.mask` under a camelCase name are available under both spellings — `toBbox`/`to_bbox`, `frBbox`/`fr_bbox`, `frPoly`/`fr_poly`, `frPyObjects`/`fr_py_objects`. Everything else (`encode`, `decode`, `area`, `iou`, `merge`, `bbox_iou`, `rle_to_string`, `rle_from_string`) has one spelling. See the [alias table](../getting-started/migration.md#method-naming).
+- **Arrays are Fortran-order** (column-major). Mask arrays are returned
+  Fortran-order; C-order input is accepted and transposed internally.
+- **Return types are pycocotools' types** — `counts` is `bytes`, batch areas are
+  `uint32`, boxes are `float64`.
+
+The functions that have a camelCase name in `pycocotools.mask` are available
+under both spellings; everything else has one. camelCase aliases: see the
+[alias table](../getting-started/migration.md#method-naming).
 
 ---
 
@@ -47,27 +50,9 @@ Encode a binary mask to RLE.
     - 2-D input → `dict` with `"size"` (`[H, W]`) and `"counts"` (`bytes`)
     - 3-D input → `list[dict]` of *N* RLE dicts
 
-    Accepts both Fortran-order (pycocotools convention) and C-order arrays.
-
     ```python
-    import numpy as np
-    from hotcoco import mask
-
-    # Single mask (Fortran-order, matching pycocotools)
-    m = np.zeros((100, 100), dtype=np.uint8, order="F")
-    m[10:50, 20:80] = 1
-    rle = mask.encode(m)
+    rle = mask.encode(m)   # m: (H, W) uint8 array
     # {"size": [100, 100], "counts": b"..."}
-
-    # Batch of N masks
-    m3 = np.zeros((100, 100, 3), dtype=np.uint8, order="F")
-    m3[10:50, 20:80, 0] = 1
-    rles = mask.encode(m3)  # list of 3 RLE dicts
-
-    # C-order also works (auto-transposed internally)
-    m_c = np.zeros((100, 100), dtype=np.uint8)
-    m_c[10:50, 20:80] = 1
-    rle = mask.encode(m_c)
     ```
 
 === "Rust"
@@ -102,8 +87,8 @@ Decode an RLE to a binary mask.
 
     | Input | Returns |
     |-------|---------|
-    | Single dict | `(H, W)` uint8 Fortran-order array |
-    | List of *N* dicts | `(H, W, N)` uint8 Fortran-order array |
+    | Single dict | `(H, W)` uint8 array |
+    | List of *N* dicts | `(H, W, N)` uint8 array |
 
     ```python
     m = mask.decode(rle)          # (H, W)
@@ -137,7 +122,7 @@ Compute the area (number of foreground pixels) of RLE mask(s).
     | Input | Returns |
     |-------|---------|
     | Single dict | `int` |
-    | List of dicts | `numpy.ndarray` of uint32 (matching pycocotools) |
+    | List of dicts | `numpy.ndarray` of uint32 |
 
     ```python
     a = mask.area(rle)        # scalar
@@ -259,7 +244,8 @@ Compute pairwise IoU between two lists of RLE masks.
     let ious = mask::iou(&dt_rles, &gt_rles, &vec![false; gt_rles.len()]);
     ```
 
-When `iscrowd[j]` is `true`, uses `intersection / area(dt)` instead of standard IoU for GT `j`.
+`iscrowd` selects the crowd convention per GT — defined under
+[`primitives.bbox_iou`](primitives.md#bbox_iou).
 
 ---
 

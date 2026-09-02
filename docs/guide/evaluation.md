@@ -73,7 +73,7 @@ Detection format — each result needs `image_id`, `category_id`, `segmentation`
 ]
 ```
 
-**What is RLE?** Run-Length Encoding stores a binary mask as the lengths of alternating runs of 0s and 1s — `size` is `[height, width]` and `counts` is a compact string (`str` in JSON files, `bytes` from `mask.encode`; `load_res` accepts either). For encoding masks from numpy arrays, see the [Mask operations guide](masks.md).
+For what RLE is and how to encode masks from numpy arrays, see [Mask operations](masks.md).
 
 IoU is computed on the binary masks after RLE decoding.
 
@@ -104,9 +104,7 @@ Similarity is measured using Object Keypoint Similarity ([OKS](https://cocodatas
 
 **Differences from bbox/segm:**
 
-- 10 metrics instead of 12 (no small area range — keypoints are only meaningful on medium and large objects)
-- Default max detections is `[20]` instead of `[1, 10, 100]`
-- Ground truth annotations with `num_keypoints == 0` are automatically ignored
+Keypoint evaluation reports 10 metrics instead of 12. There is no small area range — keypoints are only meaningful on medium and large objects — and the default [`max_dets`](../api/params.md#max_dets) is `[20]` rather than `[1, 10, 100]`, so the recall rows are `AR`, `AR50`, and `AR75` rather than an `AR1`/`AR10`/`AR100` sweep. The keypoint defaults for [`area_rng`](../api/params.md#area_rng) and [`kpt_oks_sigmas`](../api/params.md#kpt_oks_sigmas) are in the Params reference. Ground truth annotations with `num_keypoints == 0` are ignored.
 
 ## Oriented bounding box (OBB) evaluation
 
@@ -133,9 +131,8 @@ IoU is computed via polygon intersection of the two rotated rectangles (Sutherla
 
 **Differences from bbox:**
 
-- Uses rotated IoU instead of axis-aligned IoU
 - Same 12 metrics as bbox/segm
-- `load_res` automatically computes `area` (w × h) and an axis-aligned `bbox` (for area-range filtering) from the OBB
+- [`load_res`](../api/coco.md#load_res) computes `area` and an axis-aligned `bbox` from the OBB
 - No pycocotools equivalent exists — hotcoco defines the evaluation protocol
 
 Conversion to and from DOTA, the standard aerial-detection label format, is built in — `COCO.from_dota()` / `to_dota()` in Python, `coco convert --from dota` on the CLI, and the `hotcoco::convert` functions in Rust. See [format conversion](datasets.md#dota).
@@ -159,7 +156,7 @@ Conversion to and from DOTA, the standard aerial-detection label format, is buil
 | 10 | AR | 0.50:0.95 | medium | 100 |
 | 11 | AR | 0.50:0.95 | large | 100 |
 
-Reading the table: a detection counts only when its IoU with a ground truth clears the threshold — the headline **AP** averages over thresholds 0.50–0.95, while AP50 and AP75 fix a single one. **AR** is the recall achieved with at most 1, 10, or 100 detections per image. The small/medium/large rows restrict to objects under 32², between 32² and 96², and over 96² pixels respectively — models often perform very differently across sizes. For a full treatment of the underlying concepts, see the [COCO evaluation spec](https://cocodataset.org/#detection-eval).
+Reading the table: a detection counts only when its IoU with a ground truth clears the threshold — the headline **AP** averages over thresholds 0.50–0.95, while AP50 and AP75 fix a single one. **AR** is the recall achieved with at most 1, 10, or 100 detections per image. The small/medium/large rows restrict to objects under 32², between 32² and 96², and over 96² pixels respectively — models often perform very differently across sizes.
 
 ## Customizing parameters
 
@@ -207,7 +204,7 @@ Modify `ev.params` before calling `evaluate()`:
     ```
 
 !!! note
-    Changing `iou_thrs`, `max_dets`, or `area_rng` from their defaults affects what `summarize()` can display. The 12-metric output format is fixed — for example, AP50 looks for IoU=0.50 in your thresholds and shows `-1.000` if it's not there. A `UserWarning` is emitted when your parameters don't match the expected defaults. Filtering by `img_ids`, `cat_ids`, or setting `use_cats` is safe and won't trigger warnings.
+    Changing `iou_thrs`, `max_dets`, or `area_rng` from their defaults affects what `summarize()` can display. The 12-metric output format is fixed — for example, AP50 looks for IoU=0.50 in your thresholds and shows `-1.000` if it's not there. A `UserWarning` is emitted when your parameters don't match the expected defaults. Filtering by `img_ids` or `cat_ids` is safe and won't trigger warnings; `use_cats=False` pools detections across categories, which marks the run as an extension and warns.
 
 See [Params](../api/params.md) for the full list of configurable parameters.
 

@@ -12,16 +12,20 @@ from hotcoco.plot import (
 
 Requires `pip install hotcoco[plot]` (matplotlib >= 3.5).
 
-All functions share these common parameters:
+## Common parameters
+
+Every plot function except `report` takes these keyword arguments:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `theme` | `str` | Visual theme: `"cyanotype"` (default) or `"cyanotype-dark"`. |
-| `paper_mode` | `bool` | Set both figure and axes background to white. Useful for LaTeX / PowerPoint. Default `False`. |
+| `theme` | `str` | Visual theme — see [Themes](#themes). Default `"cyanotype"`. |
+| `paper_mode` | `bool` | White figure and axes backgrounds — see [Themes](#themes). Default `False`. |
 | `ax` | <code>Axes &#124; None</code> | Draw on an existing axes. If `None`, creates a new figure. |
-| `save_path` | <code>str &#124; Path &#124; None</code> | Save figure to this path (150 DPI). |
+| `save_path` | <code>str &#124; Path &#124; None</code> | Save figure to this path (200 DPI). |
 
-All functions return `(Figure, Axes)`.
+Every plot function except `report` returns `(Figure, Axes)`.
+
+The precision-recall functions also take `max_det`, which defaults to the last entry in `params.max_dets`.
 
 ---
 
@@ -42,7 +46,7 @@ Plot one precision-recall curve per IoU threshold, with precision averaged acros
 | `coco_eval` | `COCOeval` | Must have `run()` called first. |
 | `iou_thrs` | <code>list[float] &#124; None</code> | IoU thresholds to include. Default: all thresholds in params. Matched against the run's grid within a tolerance, since the default grid stores 0.90 as `0.8999999999999999`. Raises `ValueError` for a threshold the run was not accumulated at. |
 | `area_rng` | `str` | Area range: `"all"`, `"small"`, `"medium"`, `"large"`. Default `"all"`. |
-| `max_det` | <code>int &#124; None</code> | Max detections. Default: last entry in `params.max_dets`. |
+| `max_det` | <code>int &#124; None</code> | Max detections. |
 
 ---
 
@@ -64,7 +68,7 @@ Plot the precision-recall curve for a single category at a fixed IoU threshold, 
 | `cat_id` | `int` | Category ID to plot. |
 | `iou_thr` | `float` | IoU threshold. Default `0.5`. |
 | `area_rng` | `str` | Area range. Default `"all"`. |
-| `max_det` | <code>int &#124; None</code> | Max detections. Default: last entry in `params.max_dets`. |
+| `max_det` | <code>int &#124; None</code> | Max detections. |
 
 ---
 
@@ -87,7 +91,7 @@ Plot precision-recall curves for multiple categories on one axes. When `cat_ids`
 | `top_n` | `int` | Number of top categories when `cat_ids` is omitted. Default `10`. |
 | `iou_thr` | `float` | IoU threshold. Default `0.5`. |
 | `area_rng` | `str` | Area range. Default `"all"`. |
-| `max_det` | <code>int &#124; None</code> | Max detections. Default: last entry in `params.max_dets`. |
+| `max_det` | <code>int &#124; None</code> | Max detections. |
 
 ---
 
@@ -117,7 +121,7 @@ Convenience dispatcher — inspects the arguments and calls the appropriate name
 | `iou_thr` | <code>float &#124; None</code> | Fixed IoU for single/multi-category modes. Default 0.50. |
 | `top_n` | `int` | Top N categories by AP. Default 10. |
 | `area_rng` | `str` | Area range: `"all"`, `"small"`, `"medium"`, `"large"`. |
-| `max_det` | <code>int &#124; None</code> | Max detections. Default: last in params. |
+| `max_det` | <code>int &#124; None</code> | Max detections. |
 
 ---
 
@@ -219,16 +223,11 @@ Plot a reliability diagram — predicted confidence vs actual accuracy per bin, 
 | `iou_threshold` | `float` | IoU threshold (only used when `cal_or_eval` is a `COCOeval`). Default `0.5`. |
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
-ev.evaluate()
-
-# From a calibration dict
-cal = ev.calibration(n_bins=15)
-fig, ax = reliability_diagram(cal)
-
-# Or directly from a COCOeval
-fig, ax = reliability_diagram(ev, n_bins=15)
+fig, ax = reliability_diagram(ev.calibration(n_bins=15))
+fig, ax = reliability_diagram(ev, n_bins=15)  # same, from the COCOeval
 ```
+
+Worked example: [Reliability diagram](../guide/diagnostics.md#reliability-diagram) in the diagnostics guide.
 
 ---
 
@@ -247,12 +246,11 @@ comparison_bar(
 Grouped bar chart comparing all metrics between two models. When the compare result includes bootstrap CIs, error bars are drawn on the model B bars.
 
 ```python
-from hotcoco import compare
-from hotcoco.plot import comparison_bar
-
 result = compare(ev_a, ev_b, n_bootstrap=1000)
-fig, ax = comparison_bar(result, save_path="comparison.png")
+fig, ax = comparison_bar(result)
 ```
+
+Worked example: [Model comparison](../guide/plotting.md#model-comparison) in the plotting guide.
 
 ---
 
@@ -272,12 +270,11 @@ category_deltas(
 Horizontal bar chart of per-category AP deltas (B − A), sorted by magnitude. Green bars are improvements, red bars are regressions. Shows `top_k` categories from each end.
 
 ```python
-from hotcoco import compare
-from hotcoco.plot import category_deltas
-
 result = compare(ev_a, ev_b)
-fig, ax = category_deltas(result, top_k=10, save_path="deltas.png")
+fig, ax = category_deltas(result, top_k=10)
 ```
+
+Worked example: [Model comparison](../guide/plotting.md#model-comparison) in the plotting guide.
 
 ---
 
@@ -289,7 +286,7 @@ report(
     save_path,
     gt_path=None,
     dt_path=None,
-    title="COCO Evaluation Report",
+    title=None,
 )
 ```
 
@@ -299,7 +296,8 @@ The report contains:
 
 - **Header** — title and timestamp
 - **Run context** — GT/DT file paths, eval params, and dataset statistics (images, annotations, categories, detections)
-- **Summary metrics** — AP and AR tables with a PR-curve panel and KPI tiles
+- **Provenance** — whether the numbers are leaderboard-comparable, with the reasons when they are not
+- **Summary metrics** — AP and AR tables, KPI tiles, and a PR-curve panel at IoU 0.50, 0.75, and the mean, with the F1 peak marked
 - **Per-category AP** — bar chart sorted descending, three columns
 
 The metric rows adapt automatically to the evaluation mode:
@@ -308,7 +306,7 @@ The metric rows adapt automatically to the evaluation mode:
 |------|---------|---------|
 | `bbox` / `segm` | AP AP50 AP75 APs APm APl | AR1 AR10 AR100 ARs ARm ARl |
 | `keypoints` | AP AP50 AP75 APm APl | AR AR50 AR75 ARm ARl |
-| LVIS | AP AP50 AP75 APs APm APl APr APc APf | AR@300 ARs@300 ARm@300 ARl@300 |
+| LVIS | [The 13 LVIS metrics](../guide/lvis-open-images.md#the-13-lvis-metrics), split into AP and AR rows | |
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -316,7 +314,7 @@ The metric rows adapt automatically to the evaluation mode:
 | `save_path` | <code>str &#124; Path</code> | Output PDF path. |
 | `gt_path` | <code>str &#124; None</code> | Ground-truth JSON path shown in the run context block. |
 | `dt_path` | <code>str &#124; None</code> | Detections JSON path shown in the run context block. |
-| `title` | `str` | Report title shown in the header. Default `"COCO Evaluation Report"`. |
+| `title` | <code>str &#124; None</code> | Report title shown in the header. `None` derives one from the eval mode. |
 
 Returns `None`. Raises on I/O error or if `run()` was not called first.
 
@@ -331,26 +329,17 @@ Two built-in themes:
 | `"cyanotype"` | Default. Silver-paper background, neutral chrome, 10-color palette led by Prussian blue. |
 | `"cyanotype-dark"` | The same ten hues on a graphite background, lifted to hold against a dark ground. For dark notebooks, dark slides, and dark documentation. |
 
-Pass `paper_mode=True` to set figure and axes backgrounds to white, keeping all other theme colors intact. Useful when embedding plots in LaTeX documents or PowerPoint slides. It is rejected on `"cyanotype-dark"` — a white background would erase that theme's chrome and leave unreadable text.
+`paper_mode=True` sets the figure and axes backgrounds to white and keeps every other theme color intact. It is rejected on `"cyanotype-dark"` — a white background would erase that theme's chrome and leave unreadable text.
+
+Worked examples of both, and of theming your own matplotlib code, are under [Themes](../guide/plotting.md#themes) in the plotting guide.
+
+### `style`
 
 ```python
-# Academic paper
-fig, ax = pr_curve(ev, paper_mode=True, save_path="pr.pdf")
-
-# Dark ground, for slides and dark docs
-fig, ax = per_category_ap(results, theme="cyanotype-dark", save_path="ap.png")
+style(theme="cyanotype", paper_mode=False)
 ```
 
-Use the `style()` context manager to apply a theme to your own matplotlib code:
-
-```python
-from hotcoco.plot import style
-
-with style(paper_mode=True):
-    fig, ax = plt.subplots()
-    ax.plot(recall, precision)
-    fig.savefig("custom.pdf")
-```
+Context manager that applies a theme's rcParams to matplotlib code run inside it. Takes the same `theme` and `paper_mode` values as the plot functions.
 
 ## Color palette
 

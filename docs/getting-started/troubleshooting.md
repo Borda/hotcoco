@@ -50,22 +50,7 @@ To use hotcoco as a drop-in without changing any imports, call `init_as_pycocoto
 
 ### `load_res` raises a `KeyError` or returns empty results
 
-Your detection file is missing a required field. Every detection dict must have:
-
-| Field | Required for |
-|-------|-------------|
-| `image_id` | All types |
-| `category_id` | All types |
-| `score` | All types |
-| `bbox` | `"bbox"` type — `[x, y, width, height]` |
-| `segmentation` | `"segm"` type — RLE dict with `counts` and `size` |
-| `keypoints` | `"keypoints"` type — flat list `[x1, y1, v1, x2, y2, v2, ...]` |
-
-A minimal valid bbox detection:
-
-```python
-{"image_id": 42, "category_id": 1, "bbox": [10.0, 20.0, 100.0, 80.0], "score": 0.95}
-```
+Your detection file is missing a required field. The fields each `iou_type` needs, with a minimal example, are in [Bounding box evaluation](../guide/evaluation.md#bounding-box-evaluation) and the segmentation and keypoint sections of the same page; if the boxes load but the numbers look wrong, check [Bbox format](#bbox-format-x1-y1-x2-y2-vs-x-y-w-h).
 
 ---
 
@@ -106,9 +91,31 @@ if missing:
 
 ---
 
-### All metrics are `-1.000`
+## Segmentation issues
 
-This usually means `evaluate()` found no matching (image_id, category_id) pairs between GT and DT. Common causes:
+### RLE `counts` field: bytes vs string
+
+`mask.encode` returns `counts` as `bytes`, and JSON cannot hold bytes — the conversion is in [RLE `counts` is bytes, not a string](../guide/masks.md#rle-counts-is-bytes-not-a-string).
+
+---
+
+### `size` field order: `[height, width]`
+
+COCO RLE uses `[height, width]` order, not `[width, height]`. If your masks look wrong or you get shape mismatches, check that `size` matches the image dimensions in `[H, W]` order.
+
+---
+
+## Evaluation results
+
+### Metrics differ slightly from pycocotools
+
+First check that `ev.params` matches the configuration you expect — mismatched `iou_thrs` or `area_rng` is the usual cause. With default parameters, hotcoco matches pycocotools to the last bits of a `float64` (see [Benchmarks](../benchmarks.md#metric-parity)); anything above about 1e-12 is a bug worth reporting.
+
+---
+
+### `summarize()` prints `-1.000`
+
+**Every metric is `-1.000`.** `evaluate()` found no matching (image_id, category_id) pairs between GT and DT. Common causes:
 
 - Wrong `iou_type` — for example, passing segmentation results to `COCOeval(..., "bbox")`
 - `category_id` mismatch — model uses 0-indexed classes but COCO uses 1-indexed IDs
@@ -124,60 +131,13 @@ if missing_cats:
     print(f"Unknown category IDs in detections: {missing_cats}")
 ```
 
----
-
-## Segmentation issues
-
-### RLE `counts` field: bytes vs string
-
-`mask.encode` returns `counts` as `bytes` (matching pycocotools), and `load_res`
-accepts either `bytes` or `str` in memory. JSON files, however, cannot hold
-bytes — decode before serializing an RLE dict yourself:
-
-```python
-import hotcoco.mask as mask_utils
-import numpy as np
-
-rle = mask_utils.encode(np.asfortranarray(binary_mask))
-
-# bytes → str, only needed before json.dump
-if isinstance(rle["counts"], bytes):
-    rle["counts"] = rle["counts"].decode("utf-8")
-```
-
----
-
-### `size` field order: `[height, width]`
-
-COCO RLE uses `[height, width]` order, not `[width, height]`. If your masks look wrong or you get shape mismatches, check that `size` matches the image dimensions in `[H, W]` order.
-
----
-
-## Evaluation results
-
-### Metrics differ slightly from pycocotools
-
-hotcoco is verified to match pycocotools to floating-point precision on val2017 (see [Benchmarks](../benchmarks.md#metric-parity)). Differences at the last bits of a `float64` are expected; anything larger is a bug worth reporting.
-
-If you see differences larger than these tolerances, the most common cause is mismatched `iou_thrs` or `area_rng` — double-check that `ev.params` matches your expected configuration.
-
----
-
-### `summarize()` prints `-1.000` for some metrics
-
-A metric shows `-1.000` when its required IoU threshold or area range isn't in `ev.params`. For example, AP50 requires `0.50` to be in `ev.params.iou_thrs`. If you've customized `iou_thrs`, the standard 12-metric output format shows `-1.000` for thresholds not in your list. This is expected — use `ev.get_results()` to access only the metrics that were actually computed.
+**Some metrics are `-1.000`.** You customized `iou_thrs`, `max_dets`, or `area_rng`, and the fixed 12-line display has no value for that slot — AP50 needs `0.50` in `ev.params.iou_thrs`, for example. This is expected; `ev.get_results()` returns only the metrics that were computed. See [`summarize`](../api/cocoeval.md#summarize).
 
 ---
 
 ### `tide_errors()` raises `RuntimeError`
 
-`tide_errors()` requires `evaluate()` to have been called first:
-
-```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
-ev.evaluate()          # required before tide_errors
-result = ev.tide_errors()
-```
+`tide_errors()` needs `evaluate()` to have run first — see [`tide_errors`](../api/cocoeval.md#tide_errors).
 
 ---
 

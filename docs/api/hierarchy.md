@@ -33,11 +33,6 @@ The JSON uses nested `LabelName` / `Subcategory` fields. `label_to_id` maps OID 
 | `path` | `str` | — | Path to the OID hierarchy JSON file |
 | `label_to_id` | <code>dict &#124; None</code> | `None` | Maps OID label strings to category IDs; `None` assigns virtual IDs to all labels |
 
-```python
-label_to_id = {cat["name"]: cat["id"] for cat in coco_gt.dataset["categories"]}
-h = Hierarchy.from_file("bbox_labels_600_hierarchy.json", label_to_id=label_to_id)
-```
-
 ---
 
 ### `from_dict`
@@ -92,7 +87,9 @@ ev = COCOeval(coco_gt, coco_dt, "bbox", oid_style=True)   # hierarchy derived
 
 Each category with a `supercategory` is linked to the category of that name; when
 no such category exists a virtual node is created, and self-referencing
-supercategories (`name == supercategory`) are skipped.
+supercategories (`name == supercategory`) are skipped. Categories without a
+`supercategory` produce a flat hierarchy, which makes expansion a no-op — matching
+still uses Open Images semantics (group-of handling, a single IoU threshold).
 
 !!! note "Rust-only constructor"
     The explicit form, `Hierarchy::from_categories(&categories)`, is available in

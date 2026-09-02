@@ -4,25 +4,11 @@ A complete COCO evaluation in under a minute.
 
 ## 1. Install
 
-=== "Python"
+```bash
+pip install hotcoco
+```
 
-    ```bash
-    pip install hotcoco
-    ```
-
-=== "Rust"
-
-    ```bash
-    cargo add hotcoco
-    ```
-
-=== "CLI"
-
-    ```bash
-    pip install hotcoco   # includes the `coco` command
-    ```
-
-    For a standalone binary with no Python: `cargo install hotcoco-cli`.
+Rust and CLI installs: [Installation](installation.md).
 
 ## 2. Load ground truth
 
@@ -81,15 +67,7 @@ Your results file should be a JSON array of detection dicts:
 ```
 
 !!! warning "Bbox format: `[x, y, width, height]` — not `[x1, y1, x2, y2]`"
-    COCO bounding boxes are `[x, y, width, height]` in pixel coordinates. Many model frameworks output `[x1, y1, x2, y2]` (top-left and bottom-right corners). Passing the wrong format produces plausible-looking but incorrect metrics with no error or warning. Convert with:
-
-    ```python
-    # x1y1x2y2 → xywh
-    bbox = [x1, y1, x2 - x1, y2 - y1]
-    ```
-
-!!! tip
-    `load_res` automatically computes missing `area` fields from bounding boxes or segmentation masks.
+    The wrong box format produces plausible-looking but incorrect metrics with no error or warning — see [Bbox format](troubleshooting.md#bbox-format-x1-y1-x2-y2-vs-x-y-w-h) for the conversion.
 
 ## 4. Run evaluation
 
@@ -149,13 +127,7 @@ Output:
     ap_50 = results["AP50"]
     ```
 
-    For per-class breakdowns or experiment tracker integration:
-
-    ```python
-    import wandb
-    wandb.log(ev.get_results(prefix="val/bbox", per_class=True), step=epoch)
-    # {"val/bbox/AP": 0.382, ..., "val/bbox/AP/person": 0.72, ...}
-    ```
+    For per-class breakdowns or experiment trackers, see [Logging metrics](../guide/results.md#logging-metrics).
 
 === "Rust"
 
@@ -170,43 +142,7 @@ Output:
 
 ## 6. Customize evaluation
 
-=== "Python"
-
-    ```python
-    ev = COCOeval(coco_gt, coco_dt, "bbox")
-
-    # Evaluate only specific categories
-    ev.params.cat_ids = [1, 2, 3]
-
-    # Evaluate only specific images
-    ev.params.img_ids = [42, 139, 285]
-
-    # Change max detections
-    ev.params.max_dets = [1, 10, 50]
-
-    ev.evaluate()
-    ev.accumulate()
-    ev.summarize()
-    ```
-
-=== "Rust"
-
-    ```rust
-    let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
-
-    // Evaluate only specific categories
-    ev.params.cat_ids = vec![1, 2, 3];
-
-    // Evaluate only specific images
-    ev.params.img_ids = vec![42, 139, 285];
-
-    // Change max detections
-    ev.params.max_dets = vec![1, 10, 50];
-
-    ev.evaluate();
-    ev.accumulate();
-    ev.summarize();
-    ```
+Set `ev.params` — categories, images, IoU thresholds, max detections — before calling `evaluate()`; see [Customizing parameters](../guide/evaluation.md#customizing-parameters).
 
 ## Next steps
 

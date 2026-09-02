@@ -50,13 +50,7 @@ and categories copied from the ground truth. It accepts three input formats:
     let coco_dt = coco_gt.load_res_anns(my_annotations)?;
     ```
 
-`load_res` automatically computes missing fields based on the detection format:
-
-| Detection type | Auto-computed fields |
-|---------------|---------------------|
-| bbox | `area` from bbox, polygon `segmentation` from bbox |
-| segm | `area` from RLE mask |
-| keypoints | `area` from keypoint extent bbox |
+`load_res` fills in fields the detection format leaves out, such as `area` — the per-format list is in the [`load_res` API reference](../api/coco.md#load_res).
 
 ## Per-image evaluation results
 
@@ -91,25 +85,7 @@ After calling `evaluate()`, the `eval_imgs` field contains per-image, per-catego
     }
     ```
 
-Each `eval_img` entry is a dict whose keys match pycocotools' `evalImgs` —
-`image_id` and `category_id` in snake_case, everything else camelCase (there are
-no snake_case variants of the camelCase keys):
-
-| Key | Description |
-|-----|-------------|
-| `image_id` | Image ID |
-| `category_id` | Category ID |
-| `aRng` | Area range `[min, max]` this entry was evaluated under |
-| `maxDet` | Max-detections cap applied |
-| `dtIds` | Detection annotation IDs, score-descending |
-| `gtIds` | Ground-truth annotation IDs |
-| `dtMatches` | Per IoU threshold: matched GT id per detection (0 = unmatched) |
-| `gtMatches` | Per IoU threshold: matched DT id per ground truth (0 = unmatched) |
-| `dtScores` | Detection confidence scores |
-| `dtIgnore` | Per IoU threshold: whether each detection was ignored |
-| `gtIgnore` | Whether each GT was ignored (crowd or out of area range) |
-| `dtMatched` / `gtMatched` | hotcoco extension: per-threshold boolean match flags |
-| `gtInDenominator` | hotcoco extension: whether each GT counts in the recall denominator (differs from `gtIgnore` for Open Images group-of boxes) |
+The keys match pycocotools' `evalImgs`; the full list is in the [`eval_imgs` API reference](../api/cocoeval.md#eval_imgs).
 
 ## Precision and recall arrays
 
@@ -155,17 +131,7 @@ After calling `accumulate()`, the full precision/recall curves are available:
     }
     ```
 
-### Array dimensions
-
-| Dimension | Name | Default size | Description |
-|-----------|------|-------------|-------------|
-| T | IoU thresholds | 10 | `[0.50, 0.55, ..., 0.95]` |
-| R | Recall thresholds | 101 | `[0.00, 0.01, ..., 1.00]` |
-| K | Categories | varies | Number of evaluated categories |
-| A | Area ranges | 4 | `[all, small, medium, large]` |
-| M | Max detections | 3 | `[1, 10, 100]` |
-
-Precision has shape `[T x R x K x A x M]`. Recall has shape `[T x K x A x M]`. A value of `-1` means no data — for example, no ground truth annotations for that category and area combination.
+The five dimensions and their default sizes are in the [`eval` API reference](../api/cocoeval.md#eval).
 
 ## The evaluation report
 
@@ -199,9 +165,8 @@ parameters**. `"extension"` means a real metric or configuration with no referen
 it. That covers more than geometry:
 
 - oriented bounding boxes — no reference protocol exists to check against
-- Open Images — group-of handling and AP *are* checked against the TensorFlow
-  Object Detection API, but the challenge's non-exhaustive image-level-label rule
-  is not implemented, so a real challenge submission would still differ
+- Open Images — the group-of protocol is checked, but the challenge's image-level-label
+  rule is not implemented; see [Verification](lvis-open-images.md#verification)
 - any run with non-default `iou_thrs`, `rec_thrs`, `max_dets`, area-range labels
   or bounds, `use_cats=False`, or custom `kpt_oks_sigmas` — the metric is real,
   but nobody checked *that* configuration against a reference
@@ -263,19 +228,19 @@ plt.legend()
 
 These are averaged over categories at `area="all"` and the largest `max_dets` — the
 slice a chart draws. For per-category curves, read the `eval["precision"]` array
-directly, as the next section shows.
+directly, as [Extracting per-category AP](#extracting-per-category-ap) shows; on COCO
+that array is roughly a million floats, which is why the report carries only the
+aggregate.
 
 ## Extracting per-category AP
 
-The simplest way is `get_results(per_class=True)`, which returns a flat dict with one entry per category:
+The simplest way is `get_results(per_class=True)`, which adds one `"AP/{category}"` entry per category to the flat dict shown in [Logging metrics](#logging-metrics):
 
 ```python
 ev = COCOeval(coco_gt, coco_dt, "bbox")
 ev.run()
 
 per_class = ev.get_results(per_class=True)
-# {"AP": 0.382, ..., "AP/person": 0.72, "AP/car": 0.41, ...}
-
 for key, val in per_class.items():
     if key.startswith("AP/"):
         print(f"{key[3:]}: {val:.3f}")
@@ -356,41 +321,11 @@ ev.save_results("results.json")
 ev.save_results("results.json", per_class=True)
 ```
 
-The JSON structure:
+The JSON structure is in the [`results()` API reference](../api/cocoeval.md#results).
+`reference_deviations` travels with the file, so a saved results file explains its
+own provenance — see [Checking before you evaluate](#checking-before-you-evaluate).
 
-```json
-{
-  "hotcoco_version": "1.0.0",
-  "provenance": "parity_verified",
-  "params": {
-    "iou_type": "bbox",
-    "eval_mode": "coco",
-    "iou_thresholds": [0.5, 0.55, ...],
-    "recall_thresholds": [0.0, 0.01, ...],
-    "area_ranges": {"all": [0, 10000000000.0], "small": [0, 1024.0], ...},
-    "max_dets": [1, 10, 100],
-    "use_cats": true,
-    "kpt_oks_sigmas": [0.026, 0.025, ...],
-    "reference_deviations": []
-  },
-  "metrics": {
-    "AP": 0.378, "AP50": 0.584, "AP75": 0.412, ...
-  },
-  "per_class": {
-    "person": 0.58, "car": 0.41, ...
-  }
-}
-```
-
-`reference_deviations` lists one sentence per way the run departed from the
-reference configuration (empty when parity-verified), so a saved results file
-explains its own provenance.
-
-From the `coco-eval` CLI, pass `--output <path>` to write the same JSON automatically (always includes per-category AP):
-
-```bash
-coco-eval --gt instances_val2017.json --dt bbox_results.json --output results.json
-```
+The `--output` flag of the [`coco-eval` Rust CLI](../cli.md#coco-eval-rust-cli) writes the same JSON.
 
 ## Logging metrics
 

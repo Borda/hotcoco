@@ -5,13 +5,15 @@ hotcoco ships two classes in `hotcoco.integrations` that replace their torchvisi
 - **`CocoDetection`** — a `DataLoader`-compatible dataset that loads images and COCO annotations
 - **`CocoEvaluator`** — accumulates batch predictions during a training loop and runs COCO evaluation at the end of each epoch
 
+Signatures and parameter tables are in the [PyTorch integrations reference](../api/integrations.md).
+
 ## Installation
 
 ```bash
 pip install hotcoco
 ```
 
-PyTorch and Pillow are optional dependencies — only needed when you actually load images or run distributed synchronization:
+PyTorch and Pillow are optional — the [reference](../api/integrations.md) says which class needs which. To load images and train:
 
 ```bash
 pip install hotcoco torch pillow
@@ -63,13 +65,7 @@ Each `__getitem__` call returns `(image, target)` where:
 
 ### Transforms
 
-`CocoDetection` accepts three transform arguments, applied in order:
-
-| Parameter | Applied to | When to use |
-|-----------|-----------|-------------|
-| `transform` | image only | Pixel-level augmentations (normalize, resize) |
-| `target_transform` | annotations only | Annotation-level filtering or format changes |
-| `transforms` | `(image, target)` jointly | Geometric augmentations that must affect both |
+`CocoDetection` accepts three transform arguments, applied in order. Use `transform` for pixel-level work on the image alone (normalize, resize); `target_transform` for annotation-level filtering or format changes; and `transforms` for geometric augmentations that must move the annotations with the pixels, since it receives `(image, target)` together. Their signatures are under [CocoDetection](../api/integrations.md#cocodetection).
 
 ```python
 def filter_crowds(anns):
@@ -124,44 +120,10 @@ evaluator.summarize()
 
 ### Prediction format
 
-The `predictions` dict maps `image_id → output_dict`. The keys expected in the output dict depend on the iou_type.
+The `predictions` dict maps `image_id → output_dict`. The keys and tensor shapes expected in the output dict for each `iou_type` are in the [`update` reference](../api/integrations.md#updatepredictions).
 
 !!! tip "torchvision detection models"
-    Standard torchvision models (Faster R-CNN, RetinaNet, FCOS, and others) already return dicts with `boxes`, `labels`, and `scores` in the expected format. The `update()` call in the preceding example works without modification — torchvision models output XYXY boxes, and `CocoEvaluator` converts them to XYWH automatically.
-
-=== "bbox"
-
-    ```python
-    {
-        "boxes":  torch.Tensor,   # shape (N, 4), XYXY format
-        "scores": torch.Tensor,   # shape (N,)
-        "labels": torch.Tensor,   # shape (N,), COCO category IDs
-    }
-    ```
-
-    Boxes are automatically converted from XYXY to XYWH before evaluation.
-
-=== "segm"
-
-    ```python
-    {
-        "masks":  torch.Tensor,   # shape (N, 1, H, W), float in [0, 1]
-        "scores": torch.Tensor,   # shape (N,)
-        "labels": torch.Tensor,   # shape (N,), COCO category IDs
-    }
-    ```
-
-    Masks are thresholded at 0.5 and RLE-encoded automatically.
-
-=== "keypoints"
-
-    ```python
-    {
-        "keypoints": torch.Tensor,  # shape (N, K, 3) — x, y, visibility
-        "scores":    torch.Tensor,  # shape (N,)
-        "labels":    torch.Tensor,  # shape (N,), COCO category IDs
-    }
-    ```
+    Standard torchvision models (Faster R-CNN, RetinaNet, FCOS, and others) already return dicts in the expected format. The `update()` call in the preceding example works without modification.
 
 ### Multiple iou_types
 
@@ -182,12 +144,12 @@ evaluator.summarize()
 
 ### Getting results programmatically
 
+`get_results()` returns one metrics dict per `iou_type` — the shape is in the [`get_results` reference](../api/integrations.md#get_results).
+
 ```python
 evaluator.accumulate()
 
 results = evaluator.get_results()
-# {"bbox": {"AP": 0.42, "AP50": 0.64, ...}}
-
 ap = results["bbox"]["AP"]
 print(f"Validation AP: {ap:.4f}")
 ```
@@ -208,13 +170,13 @@ for iou_type, metrics in results.items():
 ```python
 evaluator.update(predictions)              # last batch of the epoch
 
-evaluator.synchronize_between_processes()  # no-op if not using torch.distributed
+evaluator.synchronize_between_processes()
 
 evaluator.accumulate()
 evaluator.summarize()
 ```
 
-`synchronize_between_processes()` is a no-op when `torch.distributed` is not initialized, so the same training loop works in both single-GPU and multi-GPU settings.
+The same loop runs unchanged on a single GPU — see [`synchronize_between_processes`](../api/integrations.md#synchronize_between_processes) for what it does outside a distributed run.
 
 ## Migrating from torchvision
 
@@ -230,6 +192,3 @@ from hotcoco.integrations import CocoDetection, CocoEvaluator
 ```
 
 No other changes are needed — the API is identical.
-
-!!! note
-    torchvision's `CocoDetection` requires pycocotools. hotcoco's version does not, so you can also remove pycocotools from your dependencies entirely.

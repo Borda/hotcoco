@@ -85,8 +85,6 @@ Run COCO evaluation to compute AP/AR metrics.
     | `iou_type` | `IouType` | `IouType::Bbox`, `IouType::Segm`, `IouType::Keypoints`, or `IouType::Obb` |
     | `hierarchy` | `Option<Hierarchy>` | Category hierarchy for GT expansion; `None` to skip expansion |
 
-`"obb"` evaluates oriented boxes with a rotated IoU kernel — see [OBB evaluation](../guide/evaluation.md#oriented-bounding-box-obb-evaluation).
-
 The same classes are also reachable under `hotcoco.detection` (`from hotcoco.detection import COCOeval`), an explicit namespace for the detection metric family. Both spellings return the same objects.
 
 ---
@@ -103,25 +101,13 @@ The same classes are also reachable under `hotcoco.detection` (`from hotcoco.det
 
     Evaluation parameters. Modify before calling `evaluate()`.
 
-    ```python
-    ev = COCOeval(coco_gt, coco_dt, "bbox")
-    ev.params.cat_ids = [1, 2, 3]
-    ev.params.max_dets = [1, 10, 100]
-    ```
-
 === "Rust"
 
     ```rust
     pub params: Params
     ```
 
-    ```rust
-    let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
-    ev.params.cat_ids = vec![1, 2, 3];
-    ev.params.max_dets = vec![1, 10, 100];
-    ```
-
-See [Params](params.md) for all configurable fields.
+See [Params](params.md) for every configurable field and an example of changing them.
 
 ---
 
@@ -130,7 +116,7 @@ See [Params](params.md) for all configurable fields.
 === "Python"
 
     ```python
-    stats: np.ndarray
+    stats: np.ndarray | list[float]
     ```
 
     The 12 summary metrics (10 for keypoints) as a `float64` numpy array, populated after `summarize()`. An empty list before `summarize()` is called — both states match pycocotools.
@@ -159,7 +145,7 @@ See [Params](params.md) for all configurable fields.
 
 ### `eval_imgs`
 
-Per-image evaluation results, populated after `evaluate()`. See [Working with results](../guide/results.md) for details.
+Per-image, per-category, per-area-range evaluation results, populated after `evaluate()`. Entries are `None` where an image has neither ground truth nor detections for that category, as in pycocotools.
 
 === "Python"
 
@@ -173,11 +159,33 @@ Per-image evaluation results, populated after `evaluate()`. See [Working with re
     fn eval_imgs(&self) -> &[Option<EvalImg>]
     ```
 
+Each entry is a dict whose keys match pycocotools' `evalImgs` — `image_id` and
+`category_id` in snake_case, everything else camelCase (there are no snake_case
+variants of the camelCase keys):
+
+| Key | Description |
+|-----|-------------|
+| `image_id` | Image ID |
+| `category_id` | Category ID |
+| `aRng` | Area range `[min, max]` this entry was evaluated under |
+| `maxDet` | Max-detections cap applied |
+| `dtIds` | Detection annotation IDs, score-descending |
+| `gtIds` | Ground-truth annotation IDs |
+| `dtMatches` | Per IoU threshold: matched GT id per detection (0 = unmatched) |
+| `gtMatches` | Per IoU threshold: matched DT id per ground truth (0 = unmatched) |
+| `dtScores` | Detection confidence scores |
+| `dtIgnore` | Per IoU threshold: whether each detection was ignored |
+| `gtIgnore` | Whether each GT was ignored (crowd or out of area range) |
+| `dtMatched` / `gtMatched` | hotcoco extension: per-threshold boolean match flags |
+| `gtInDenominator` | hotcoco extension: whether each GT counts in the recall denominator (differs from `gtIgnore` for Open Images group-of boxes) |
+
+For a worked example, see [Per-image evaluation results](../guide/results.md#per-image-evaluation-results).
+
 ---
 
 ### `eval`
 
-Accumulated precision/recall arrays, populated after `accumulate()`. See [Working with results](../guide/results.md) for details.
+Accumulated precision/recall arrays, populated after `accumulate()`.
 
 === "Python"
 
@@ -195,9 +203,32 @@ Accumulated precision/recall arrays, populated after `accumulate()`. See [Workin
 
     Access elements with `precision_idx(t, r, k, a, m)` and `recall_idx(t, k, a, m)`.
 
+`precision` and `scores` have shape `[T x R x K x A x M]`; `recall` has shape `[T x K x A x M]`:
+
+| Dimension | Name | Default size | Description |
+|-----------|------|-------------|-------------|
+| T | IoU thresholds | 10 | `[0.50, 0.55, ..., 0.95]` |
+| R | Recall thresholds | 101 | `[0.00, 0.01, ..., 1.00]` |
+| K | Categories | varies | Number of evaluated categories |
+| A | Area ranges | 4 | `[all, small, medium, large]` |
+| M | Max detections | 3 | `[1, 10, 100]` |
+
+A value of `-1` means no data — for example, no ground truth annotations for that category and area combination.
+
+For worked examples, see [Precision and recall arrays](../guide/results.md#precision-and-recall-arrays) and [Extracting per-category AP](../guide/results.md#extracting-per-category-ap).
+
 ---
 
 ## Methods
+
+!!! note "Call order"
+    `get_results()`, `print_results()`, `summary_lines()`, `report()`, `results()`, and
+    `save_results()` read the summary, so call them after `summarize()` (or `run()`).
+    `report()`, `results()`, and `save_results()` raise `RuntimeError` otherwise;
+    `get_results()` returns an empty dict.
+
+    `metric_keys()`, `metric_defs()`, `provenance()`, `is_benchmark_standard()`, and
+    `reference_deviations()` read only the configuration and work before `evaluate()`.
 
 ### `evaluate`
 
@@ -268,8 +299,6 @@ ev.metric_keys()
 # ['AP', 'AP50', 'AP75', 'APs', 'APm', 'APl', 'AR1', 'AR10', 'AR100', 'ARs', 'ARm', 'ARl']
 ```
 
-Does not require `evaluate()` or `run()` — only depends on the evaluation mode and IoU type.
-
 ---
 
 ### `metric_defs`
@@ -290,8 +319,7 @@ ev.metric_defs()[1]
 
 This exists so renderers read a metric's axes instead of parsing them back out of its
 name — `"AR10"` is ambiguous between a detection cap of 10 and an IoU of 0.10, and only
-the catalog knows which. hotcoco's own PDF report and dashboard consume it. Like
-`metric_keys()`, works before `run()`.
+the catalog knows which. hotcoco's own PDF report and dashboard consume it.
 
 ---
 
@@ -301,7 +329,7 @@ the catalog knows which. hotcoco's own PDF report and dashboard consume it. Like
 get_results(prefix: str | None = None, per_class: bool = False) -> dict[str, float]
 ```
 
-Return the summary metrics as a dict. Must be called after `summarize()` (or `run()`). Returns an empty dict if `summarize()` has not been called.
+Return the summary metrics as a dict.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -312,23 +340,15 @@ Standard bbox/segm keys: `AP`, `AP50`, `AP75`, `APs`, `APm`, `APl`, `AR1`, `AR10
 
 Keypoint keys: `AP`, `AP50`, `AP75`, `APm`, `APl`, `AR`, `AR50`, `AR75`, `ARm`, `ARl`.
 
-LVIS keys: `AP`, `AP50`, `AP75`, `APs`, `APm`, `APl`, `APr`, `APc`, `APf`, `AR@300`, `ARs@300`, `ARm@300`, `ARl@300`.
+LVIS keys: see [The 13 LVIS metrics](../guide/lvis-open-images.md#the-13-lvis-metrics).
 
 ```python
 ev.run()
-
-# Basic usage (unchanged)
-results = ev.get_results()
-print(f"AP: {results['AP']:.3f}, AP50: {results['AP50']:.3f}")
-
-# Prefixed keys — ready for any logger
-results = ev.get_results(prefix="val/bbox")
-# {"val/bbox/AP": 0.578, "val/bbox/AP50": 0.861, ...}
-
-# With per-class AP
-results = ev.get_results(prefix="val/bbox", per_class=True)
-# {"val/bbox/AP": 0.578, ..., "val/bbox/AP/person": 0.82, ...}
+ev.get_results()   # {"AP": 0.578, "AP50": 0.861, ...}
 ```
+
+For prefixed and per-class keys and how they feed an experiment tracker, see
+[Logging metrics](../guide/results.md#logging-metrics).
 
 ---
 
@@ -338,7 +358,7 @@ results = ev.get_results(prefix="val/bbox", per_class=True)
 print_results() -> None
 ```
 
-Print a formatted results table to stdout. For LVIS, matches the lvis-api `print_results()` style. Must be called after `summarize()` (or `run()`).
+Print a formatted results table to stdout. For LVIS, matches the lvis-api `print_results()` style.
 
 ---
 
@@ -348,7 +368,7 @@ Print a formatted results table to stdout. For LVIS, matches the lvis-api `print
 summary_lines() -> list[str]
 ```
 
-The same lines `summarize()` prints, returned instead of written to stdout — one string per metric, already formatted. Use it to route the summary into a logger, a report, or a test assertion. Must be called after `summarize()` (or `run()`).
+The same lines `summarize()` prints, returned instead of written to stdout — one string per metric, already formatted. Use it to route the summary into a logger, a report, or a test assertion.
 
 ---
 
@@ -392,7 +412,7 @@ Requires `evaluate()` to have run. Matching is done once and reused for every sl
 report() -> dict
 ```
 
-Return a full evaluation report. Must be called after `summarize()` (or `run()`). Raises `RuntimeError` otherwise.
+Return a full evaluation report.
 
 This is the shape every hotcoco metric family reports in, so code that renders a detection report renders a panoptic or tracking one unchanged.
 
@@ -401,11 +421,11 @@ This is the shape every hotcoco metric family reports in, so code that renders a
 | Key | Type | Description |
 |-----|------|-------------|
 | `"task"` | `str` | `"detection"`. |
-| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — see [Checking provenance](#checking-provenance). |
+| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — see [Provenance](#provenance-values). |
 | `"metrics"` | `dict[str, float]` | Summary metrics keyed by name. |
 | `"per_class"` | `dict[str, dict[str, float]]` | `{class_name: {metric: value}}`. |
 | `"per_group"` | `dict[str, dict[str, float]]` | LVIS frequency buckets in LVIS mode; empty otherwise. |
-| `"curves"` | `dict[str, list[float]]` | One precision-recall curve per IoU threshold, plus `"rec_thrs"`. |
+| `"curves"` | `dict[str, list[float]]` | One aggregate precision-recall curve per IoU threshold (`"pr@0.50"`, `"pr@0.55"`, ...), averaged over categories at `area="all"` and the largest `max_dets`, plus the shared `"rec_thrs"` x-axis. |
 | `"params"` | `dict` | The evaluation parameters used. |
 
 ```python
@@ -416,42 +436,17 @@ report["metrics"]["AP"]              # 0.377
 report["per_class"]["person"]["AP"]  # 0.521
 ```
 
-#### Checking provenance
-
-`provenance` records whether these numbers can be compared against a published leaderboard:
+#### Provenance values
 
 | Value | Meaning |
 |-------|---------|
-| `"parity_verified"` | Checked against the reference implementation. bbox, segm, and keypoints match pycocotools. |
-| `"extension"` | A real metric or configuration that is not leaderboard-comparable: oriented boxes (no reference protocol exists), Open Images (checked against the TensorFlow reference for group-of handling and AP, but missing the challenge's image-level-label rule), or any run with non-default `iou_thrs`, `rec_thrs`, `max_dets`, area ranges, `use_cats`, or `kpt_oks_sigmas`. Fine for comparing your own models; not a leaderboard number. |
+| `"parity_verified"` | Comparable to a published leaderboard |
+| `"extension"` | A real metric or configuration, but not a leaderboard number |
 
-```python
-if report["provenance"] != "parity_verified":
-    print(f"note: {report['provenance']} — not benchmark-standard")
-```
-
-For the same marker without building a report — and without evaluating at all — see
-[`provenance`](#provenance) and [`reference_deviations`](#reference_deviations).
-
-#### Plotting the curves
-
-`curves` holds the aggregate precision-recall curve for each IoU threshold, averaged over
-categories at `area="all"` and the largest `max_dets` — the slice a chart actually draws.
-All PR curves share the `"rec_thrs"` x-axis.
-
-```python
-import matplotlib.pyplot as plt
-
-curves = report["curves"]
-for iou in ("pr@0.50", "pr@0.75", "pr@0.95"):
-    plt.plot(curves["rec_thrs"], curves[iou], label=iou)
-plt.xlabel("recall")
-plt.ylabel("precision")
-plt.legend()
-```
-
-For the full per-category arrays use [`eval["precision"]`](#eval) instead — on COCO that
-is roughly a million floats, which is why the report carries only the aggregate.
+What each value covers and why is in
+[Check provenance before you publish a number](../guide/results.md#check-provenance-before-you-publish-a-number).
+For plotting `curves`, see
+[Plotting precision-recall curves](../guide/results.md#plotting-precision-recall-curves).
 
 ---
 
@@ -461,20 +456,8 @@ is roughly a million floats, which is why the report carries only the aggregate.
 provenance() -> str
 ```
 
-Return `"parity_verified"` or `"extension"` — the same value as `report()["provenance"]`
-and `results()["provenance"]`, but read from the configuration alone, so **this one works
-before `run()`**. Check it ahead of a long evaluation rather than discovering afterwards
-that the numbers cannot be published.
-
-```python
-ev = hotcoco.COCOeval(gt, dt, "bbox")
-ev.params.iouThrs = [0.5]
-ev.provenance()   # 'extension' — already, before evaluating
-```
-
-Never infer comparability from `iou_type` or the eval mode instead. Parity is a property
-of the whole configuration, so the run above is an extension despite being ordinary COCO
-bbox evaluation.
+Return the same value as `report()["provenance"]`, read from the configuration alone.
+See [Checking before you evaluate](../guide/results.md#checking-before-you-evaluate).
 
 ---
 
@@ -484,15 +467,10 @@ bbox evaluation.
 is_benchmark_standard() -> bool
 ```
 
-`True` exactly when `provenance()` is `"parity_verified"` — the predicate itself, so
-renderers don't re-derive it with a string compare. Default-deny: a provenance variant
-added in a future release reads as *needs a caveat* until a renderer is taught what it
-means. Works before `run()`.
-
-```python
-if not ev.is_benchmark_standard():
-    print("caveat:", ev.reference_deviations())
-```
+Return `True` exactly when `provenance()` is `"parity_verified"`. Any other value —
+including a variant added in a future release — reads as `False`, so a renderer that
+checks this predicate caveats unknown provenance rather than passing it through. See
+[Checking before you evaluate](../guide/results.md#checking-before-you-evaluate).
 
 ---
 
@@ -503,18 +481,8 @@ reference_deviations() -> list[str]
 ```
 
 Return one human-readable sentence per way this run departs from the reference
-configuration, empty exactly when `provenance()` is `"parity_verified"`. Also works
-before `run()`.
-
-```python
-for reason in ev.reference_deviations():
-    print(reason)
-# iou_thrs differ from default (0.50:0.05:0.95). AP50/AP75 lines might show -1.000.
-```
-
-This is the same predicate behind the warnings `summarize()` prints, so a report cannot
-claim parity while the warnings disagree. hotcoco's own renderers — the PDF report, the
-browse dashboard, and `coco eval --json` — read these rather than recomputing them.
+configuration, empty exactly when `provenance()` is `"parity_verified"`. See
+[Checking before you evaluate](../guide/results.md#checking-before-you-evaluate).
 
 ---
 
@@ -524,7 +492,7 @@ browse dashboard, and `coco eval --json` — read these rather than recomputing 
 results(per_class: bool = False) -> dict
 ```
 
-Return evaluation results as a serializable dict. Must be called after `summarize()` (or `run()`). Raises `RuntimeError` if `summarize()` has not been called.
+Return evaluation results as a serializable dict.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -535,20 +503,43 @@ Return evaluation results as a serializable dict. Must be called after `summariz
 | Key | Type | Description |
 |-----|------|-------------|
 | `"hotcoco_version"` | `str` | hotcoco version that produced these results. |
-| `"provenance"` | `str` | `"parity_verified"` or `"extension"` — same value as `report()["provenance"]`. |
+| `"provenance"` | `str` | Same value as `report()["provenance"]`. |
 | `"params"` | `dict` | Evaluation parameters: `iou_type`, `eval_mode`, `iou_thresholds`, `recall_thresholds`, `area_ranges`, `max_dets`, `use_cats`, `kpt_oks_sigmas`, and `reference_deviations` — enough for a saved run to explain its own provenance. |
 | `"metrics"` | `dict[str, float]` | Summary metrics keyed by name (same keys as `get_results()`). |
 | `"per_class"` | `dict[str, float]` \| absent | Per-category AP values keyed by category name. Only present if `per_class=True`. |
 
 ```python
 ev.run()
-r = ev.results()
-print(r["metrics"]["AP"])
-
-# With per-category breakdown
-r = ev.results(per_class=True)
-print(r["per_class"]["person"])
+ev.results(per_class=True)   # {"hotcoco_version": ..., "metrics": {...}, "per_class": {...}}
 ```
+
+Serialized, the dict looks like this:
+
+```json
+{
+  "hotcoco_version": "1.0.0",
+  "provenance": "parity_verified",
+  "params": {
+    "iou_type": "bbox",
+    "eval_mode": "coco",
+    "iou_thresholds": [0.5, 0.55, ...],
+    "recall_thresholds": [0.0, 0.01, ...],
+    "area_ranges": {"all": [0, 10000000000.0], "small": [0, 1024.0], ...},
+    "max_dets": [1, 10, 100],
+    "use_cats": true,
+    "kpt_oks_sigmas": [0.026, 0.025, ...],
+    "reference_deviations": []
+  },
+  "metrics": {
+    "AP": 0.378, "AP50": 0.584, "AP75": 0.412, ...
+  },
+  "per_class": {
+    "person": 0.58, "car": 0.41, ...
+  }
+}
+```
+
+For a worked example, see [Saving results to JSON](../guide/results.md#saving-results-to-json).
 
 ---
 
@@ -558,7 +549,7 @@ print(r["per_class"]["person"])
 save_results(path: str, per_class: bool = False) -> None
 ```
 
-Save evaluation results to a JSON file. Must be called after `summarize()` (or `run()`). Raises `RuntimeError` if `summarize()` has not been called, or `IOError` if the file cannot be written.
+Save evaluation results to a JSON file. Raises `IOError` if the file cannot be written.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -566,15 +557,11 @@ Save evaluation results to a JSON file. Must be called after `summarize()` (or `
 | `per_class` | `bool` | `False` | If `True`, include per-category AP values. |
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
 ev.run()
-ev.save_results("results.json")
-
-# With per-category AP
-ev.save_results("results_per_class.json", per_class=True)
+ev.save_results("results.json", per_class=True)
 ```
 
-The JSON structure matches the dict returned by `results()`.
+The file holds the dict returned by [`results()`](#results).
 
 ---
 
@@ -611,33 +598,12 @@ This method is **standalone** — no `evaluate()` call is needed first.
 | `"num_cats"` | `int` | Number of categories `K`. |
 | `"iou_thr"` | `float` | IoU threshold used. |
 
-**Matrix layout** (rows = GT, cols = predicted):
-
-- `matrix[i][j]` where `i ≠ K, j ≠ K` — GT category `i` matched to predicted category `j`. On-diagonal = TP; off-diagonal = class confusion.
-- `matrix[i][K]` — GT category `i` unmatched (false negative).
-- `matrix[K][j]` — Predicted category `j` unmatched (false positive).
-
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
 cm = ev.confusion_matrix(iou_thr=0.5, max_det=100)
-
-matrix = cm["matrix"]
-cat_ids = cm["cat_ids"]
-
-# True positives per category
-tp = matrix.diagonal()[:-1]
-
-# False negatives per category
-fn = matrix[:-1, -1]
-
-# False positives per category
-fp = matrix[-1, :-1]
-
-# Normalized view
-print(cm["normalized"])
+cm["matrix"]   # np.ndarray uint64, shape (K+1, K+1)
 ```
 
-See [Confusion Matrix](../guide/diagnostics.md#confusion-matrix) in the evaluation guide for a full walkthrough.
+For the cell layout and a full walkthrough, see [Confusion matrix](../guide/diagnostics.md#confusion-matrix) in the diagnostics guide.
 
 ---
 
@@ -672,17 +638,11 @@ Requires `evaluate()` to have been called first.
 | `"bg_thr"` | `float` | Background threshold used. |
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
-ev.evaluate()
 result = ev.tide_errors(pos_thr=0.5, bg_thr=0.1)
-
-print(f"ap_base: {result['ap_base']:.3f}")
-for k, v in sorted(result["delta_ap"].items(), key=lambda x: -x[1]):
-    if k not in ("FP", "FN"):
-        print(f"  {k}: ΔAP={v:.4f}  n={result['counts'].get(k, '—')}")
+result["delta_ap"]   # {"Cls": ..., "Loc": ..., "Both": ..., "Dupe": ..., "Bkg": ..., "Miss": ..., "FP": ..., "FN": ...}
 ```
 
-See [TIDE Error Analysis](../guide/diagnostics.md#tide-error-analysis) in the evaluation guide for a detailed walkthrough.
+For the error taxonomy and a full walkthrough, see [TIDE error analysis](../guide/diagnostics.md#tide-error-analysis) in the diagnostics guide.
 
 ---
 
@@ -719,18 +679,11 @@ Requires `evaluate()` to have been called first. Bins all non-ignored detections
 | `"num_detections"` | `int` | Total non-ignored detections analyzed. |
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
-ev.evaluate()
-
 cal = ev.calibration(n_bins=10, iou_threshold=0.5)
-print(f"ECE: {cal['ece']:.4f}, MCE: {cal['mce']:.4f}")
-
-# Per-category breakdown
-for name, ece in sorted(cal["per_category"].items(), key=lambda x: -x[1])[:5]:
-    print(f"  {name}: ECE={ece:.4f}")
+cal["ece"], cal["mce"]   # (0.0412, 0.1873)
 ```
 
-See [Confidence Calibration](../guide/diagnostics.md#confidence-calibration) in the evaluation guide for a full walkthrough.
+For interpretation and a full walkthrough, see [Confidence calibration](../guide/diagnostics.md#confidence-calibration) in the diagnostics guide.
 
 ---
 
@@ -761,19 +714,11 @@ Key names reflect `beta`, formatted with no trailing zeros: `"F0.5"`, `"F0.5_50"
 Returns an empty dict if `accumulate()` has not been called.
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
 ev.run()
-
-# F1 (default)
-scores = ev.f_scores()
-print(f"F1: {scores['F1']:.3f}, F1@50: {scores['F1_50']:.3f}")
-
-# Precision-weighted
-print(ev.f_scores(beta=0.5))   # {"F0.5": ..., "F0.5_50": ..., "F0.5_75": ...}
-
-# Recall-weighted
-print(ev.f_scores(beta=2.0))   # {"F2": ..., "F2_50": ..., "F2_75": ...}
+ev.f_scores()   # {"F1": 0.523, "F1_50": 0.712, "F1_75": 0.581}
 ```
+
+For a full walkthrough, see [F-scores](../guide/diagnostics.md#f-scores) in the diagnostics guide.
 
 ---
 
@@ -837,29 +782,21 @@ Each **label error** dict contains:
 | `"type"` | `str` | `"wrong_label"` or `"missing_annotation"`. |
 
 ```python
-ev = COCOeval(coco_gt, coco_dt, "bbox")
-ev.evaluate()
-
 diag = ev.image_diagnostics(iou_thr=0.5, score_thr=0.5)
-
-# Worst images by F1
-worst = sorted(diag["img_summary"].items(), key=lambda x: x[1]["f1"])[:5]
-
-# Label errors
-for le in diag["label_errors"]:
-    print(f"{le['type']}: {le['dt_category']}→{le.get('gt_category', 'N/A')}")
+diag["img_summary"][42]   # {"tp": 3, "fp": 1, "fn": 0, "f1": 0.857, "ap": 0.75, "error_profile": "fp_heavy"}
 ```
 
-See [Per-image diagnostics](../guide/diagnostics.md#per-image-diagnostics-and-label-error-detection) in the evaluation guide.
+For a full walkthrough, see [Per-image diagnostics and label error detection](../guide/diagnostics.md#per-image-diagnostics-and-label-error-detection) in the diagnostics guide.
 
 ---
 
 ## LVIS evaluation
 
-LVIS uses federated AP: each category is scored only over the images where it was
-exhaustively annotated. These three names are drop-in replacements for the
-`lvis-api` package, so Detectron2 and MMDetection pipelines run unchanged. See the
-[LVIS guide](../guide/lvis-open-images.md#lvis-evaluation) for the protocol.
+These three names are drop-in replacements for the `lvis-api` package, so Detectron2
+and MMDetection pipelines run unchanged. For the federated protocol, see
+[LVIS evaluation](../guide/lvis-open-images.md#lvis-evaluation); for redirecting an
+existing `from lvis import ...` pipeline, see
+[LVIS-based pipelines](../guide/frameworks.md#lvis-based-pipelines).
 
 ### `LVISeval`
 
@@ -870,25 +807,18 @@ hotcoco.LVISeval(gt: COCO, dt: COCO, iou_type: str = "segm") -> COCOeval
 Returns a `COCOeval` configured for federated evaluation — equivalent to
 `COCOeval(gt, dt, iou_type, lvis_style=True)`. Supports `run()`,
 `print_results()`, and `get_results()`, which is what those pipelines call.
-Note the default `iou_type` is `"segm"`, matching `lvis-api`.
+The default `iou_type` is `"segm"`, matching `lvis-api`.
 
 `LVISEval` (capital E) is an alias: that is the spelling `lvis-api` exports and
 the one `from lvis import LVISEval` expects.
 
 ```python
-from hotcoco import LVIS, LVISeval, LVISResults
-
-lvis_gt = LVIS("lvis_v1_val.json")
-lvis_dt = LVISResults(lvis_gt, "predictions.json", max_dets=300)
-
 ev = LVISeval(lvis_gt, lvis_dt, "segm")
 ev.run()
-ev.print_results()
+ev.get_results()   # {"AP": ..., "APr": ..., "APc": ..., "APf": ..., "AR@300": ..., ...}
 ```
 
-Evaluation reports 13 metrics — the 12 COCO metrics with `AR@300` in place of the
-detection-count variants, plus `APr` / `APc` / `APf` for rare, common, and
-frequent categories. See [the 13 LVIS metrics](../guide/lvis-open-images.md#the-13-lvis-metrics).
+The metric set is listed in [The 13 LVIS metrics](../guide/lvis-open-images.md#the-13-lvis-metrics).
 
 ### `LVIS`
 
@@ -945,20 +875,8 @@ Pairwise model comparison. Both evaluators must have had `evaluate()` called and
 | `num_images` | `int` | Number of shared images. |
 
 ```python
-import hotcoco
-
-gt = hotcoco.COCO("annotations.json")
-ev_a = hotcoco.COCOeval(gt, gt.load_res("baseline.json"), "bbox")
-ev_a.evaluate()
-ev_b = hotcoco.COCOeval(gt, gt.load_res("improved.json"), "bbox")
-ev_b.evaluate()
-
-# Without bootstrap
-result = hotcoco.compare(ev_a, ev_b)
-print(result["deltas"]["AP"])  # for example, +0.033
-
-# With bootstrap CIs
 result = hotcoco.compare(ev_a, ev_b, n_bootstrap=1000)
-ci = result["ci"]["AP"]
-print(f"[{ci['lower']:+.3f}, {ci['upper']:+.3f}]")  # for example, [+0.01, +0.05]
+result["deltas"]["AP"], result["ci"]["AP"]   # (0.033, {"lower": 0.01, "upper": 0.05, ...})
 ```
+
+For bootstrap interpretation and a full walkthrough, see [Model comparison](../guide/diagnostics.md#model-comparison) in the diagnostics guide.

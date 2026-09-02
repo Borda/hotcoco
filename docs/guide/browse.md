@@ -23,8 +23,7 @@ coco = COCO("instances_val2017.json", image_dir="/data/coco/val2017/")
 coco.browse()
 ```
 
-That's it. A local server starts and a browser tab opens showing a scrollable grid
-of annotated thumbnails with a lightbox for full-resolution detail.
+That's it. A local server starts and a browser tab opens.
 
 <figure class="screenshot" markdown>
 ![The hotcoco dataset browser: a category filter sidebar beside a grid of thumbnails with colored annotation overlays](../assets/browse-ui.webp)
@@ -33,13 +32,8 @@ color per category, so you can scan a split for labeling problems without openin
 single image.</figcaption>
 </figure>
 
-From the command line:
-
-```bash
-coco explore \
-    --gt instances_val2017.json \
-    --images /data/coco/val2017/
-```
+The `coco explore` subcommand does the same from a shell — see
+[CLI options](#cli-options).
 
 ---
 
@@ -105,14 +99,12 @@ coco explore \
 
 | Feature | Description |
 |---------|-------------|
-| GT labels | Ground truth annotations with solid bounding boxes |
-| DT labels | Detection predictions with dashed bounding boxes |
 | Score display | Confidence score shown on each detection label |
 | Sources toggle | Show/hide ground truth and detections independently |
-| Min confidence slider | Filter detections below a score threshold (0–1) |
 
-GT and DT use the same per-category color palette so you can compare spatially.
-When no DT is loaded the browser behaves exactly as before (no slider, no source toggles).
+How ground truth and detections are told apart is in
+[Annotation rendering](#annotation-rendering). When no DT is loaded the browser
+behaves exactly as before (no slider, no source toggles).
 
 !!! tip
     Detections often lack segmentation masks. When `segm` is selected but a detection
@@ -143,13 +135,8 @@ Or pass it directly to `browse()` (overrides `image_dir` on the object):
 coco.browse(image_dir="/different/path/")
 ```
 
-`image_dir` is propagated automatically through `filter`, `split`, `sample`,
-and `load_res`, so a filtered subset keeps the same path:
-
-```python
-people = coco.filter(cat_ids=[1])
-people.browse()  # image_dir carried over from coco
-```
+A subset made with `filter`, `split`, or `sample` keeps the parent's path — see
+[`image_dir`](../api/coco.md#image_dir).
 
 ---
 
@@ -164,7 +151,8 @@ people.browse()  # image_dir carried over from coco
 
 All annotations are rendered client-side on an HTML Canvas overlay, so they stay
 crisp at any zoom level. Colors are assigned per category deterministically — the
-same category always gets the same color across all images.
+same category always gets the same color across all images, and GT and DT share
+the palette so the two can be compared spatially.
 
 If an image file is missing from `image_dir`, a gray placeholder is shown instead
 of raising an error.
@@ -182,23 +170,11 @@ viewport shrinks.
 ## CLI options
 
 ```bash
-coco explore \
-    --gt <annotations.json> \
-    --images <images_dir/> \
-    [--dt <results.json>] \
-    [--iou-type bbox|segm|keypoints] \
-    [--iou-thr 0.5] \
-    [--no-eval] \
-    [--slices slices.json] \
-    [--batch-size 12] \
-    [--port 7860]
+coco explore --gt <annotations.json> --images <images_dir/> [--dt <results.json>]
 ```
 
-`--iou-type` picks the evaluation type used for TP/FP/FN coloring, `--iou-thr`
-sets the starting position of the UI's IoU slider (snapped to 0.50–0.95 in steps
-of 0.05 — same as `coco.browse(iou_thr=...)`), `--no-eval` shows detections
-without coloring, and `--slices` loads named image subsets for the dashboard.
-See the [CLI reference](../cli.md#coco-explore) for the full flag table.
+Every `browse()` argument has a flag; the full table is under
+[`coco explore`](../cli.md#coco-explore).
 
 The browser and dashboard are fully self-contained — fonts and chart libraries
 are bundled with the package, so both work offline.
@@ -248,11 +224,8 @@ The dashboard shows:
 - **Per-image F1** — histogram colored by error profile (perfect, FP-heavy, FN-heavy, mixed)
 - **Label errors** — suspected annotation mistakes; click a row to view the image
 
-The sidebar always states the run's **provenance**. When it is not
-`parity_verified` — oriented boxes, Open Images, or any non-default parameter — a
-banner above the KPI tiles says so and lists why, so numbers screenshotted out of
-the dashboard do not read as leaderboard numbers. See
+The sidebar always states the run's **provenance**, and a banner above the KPI
+tiles flags a run that is not `parity_verified` — see
 [Check provenance before you publish a number](results.md#check-provenance-before-you-publish-a-number).
 
-All charts use the same dark theme as the gallery. The layout is fully
-responsive — from narrow Jupyter panes (~400px) to wide monitors (1600px+).
+All charts use the same dark theme as the gallery.

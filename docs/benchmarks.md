@@ -25,7 +25,7 @@
 
 **Hardware:** Apple M1 MacBook Air — 8 cores (4 performance + 4 efficiency), 8 GB RAM
 **Dataset:** COCO val2017 — 5,000 images
-**Detections:** 36,781 synthetic (seed=42; AP scores are not meaningful)
+**Detections:** 36,781 synthetic — see [Methodology](#methodology)
 **Timing:** Wall clock time — per-cell median of 3 runs, at both 1× and 10×. The two
 scales were captured separately and the machine was busier during the 10× capture, so
 absolute times are comparable only within a table; the speedup ratios are not affected.
@@ -61,8 +61,7 @@ Scaling detections by 10x (~368,000) to test behavior under higher load:
 Absolute times stay under 2s at 368,000 detections. hotcoco's relative advantage is
 narrower here than in the 1× table — 8–33× rather than 19–36× — because per-call
 overhead, where it gains most, is a smaller share of the total once there is this
-much work to do. Compare speedups within a table, not times across the two: each
-table is a separate capture.
+much work to do.
 
 ### Where the time goes
 
@@ -92,8 +91,6 @@ evaluation never reads. It represents datasets that never had masks (custom bbox
 datasets, YOLO conversions, Objects365), where the load column is the one you'll
 actually see.
 
-Reproduce with `uv run python scripts/bench.py --phases`.
-
 ### Objects365 scale benchmark
 
 **Hardware:** Windows 11, AMD Ryzen 5 5600X — 6 cores / 12 threads, 16 GB RAM + swap
@@ -117,7 +114,7 @@ Peak RAM is the peak working set (physical memory). Committed includes swap — 
 **Ground truth:** COCO val2017 — 5,000 images.
 **Detections:** the published `instances_val2017_fake*_results.json` files from
 [ppwwyyxx/cocoapi](https://github.com/ppwwyyxx/cocoapi), the same inputs pycocotools uses in its own
-tests. Both are fetched by `just download-coco` — `data/` is not checked into the repository.
+tests.
 
 **Every metric agrees to within 3.7e-14** — floating-point noise, the last few
 bits a `f64` can represent. The diffs in the following tables are raw measured differences, not rounded.
@@ -139,8 +136,7 @@ bits a `f64` can represent. The diffs in the following tables are raw measured d
 | ARm    | 0.80637778 | 0.80637778 | 3.33e-16 |
 | ARl    | 0.95956720 | 0.95956720 | 5.55e-16 |
 
-Every bbox metric agrees to within 3.7e-14 — the limit of double precision. The
-threshold grids are constructed to match `numpy.linspace` bit-for-bit, which
+The threshold grids are constructed to match `numpy.linspace` bit-for-bit, which
 removed the last systematic source of divergence here.
 
 ### Segmentation
@@ -179,9 +175,51 @@ fused multiply-add; hotcoco reproduces that arithmetic explicitly.
 | ARm    | 0.62190658 | 0.62190658 | 0.00e+00 |
 | ARl    | 0.96335935 | 0.96335935 | 0.00e+00 |
 
-Keypoint metrics are exact. Keypoint evaluation reports `AR`, `AR50`, and `AR75` —
-there is no small area range and no maxDets sweep, so the `AR1`/`AR10`/`AR100` of
-bbox and segm do not apply.
+Keypoint metrics are exact. Keypoint evaluation reports 10 metrics — see
+[Keypoint evaluation](guide/evaluation.md#keypoint-evaluation).
+
+### TIDE
+
+**Reference:** [tidecv](https://github.com/dbolya/tide), on COCO val2017 at `pos_thr=0.5`.
+Expect the five false-positive types to agree closely and `Miss` to read higher here:
+
+| Error | hotcoco ΔAP | tidecv ΔAP | hotcoco count | tidecv count |
+|---|---|---|---|---|
+| Cls | 0.0002 | 0.0000 | 13 | 13 |
+| Loc | 0.1115 | 0.1135 | 3,121 | 3,738 |
+| Both | 0.0007 | 0.0001 | 726 | 766 |
+| Dupe | 0.0001 | 0.0000 | 27 | 37 |
+| Bkg | 0.0109 | 0.0105 | 6,039 | 6,414 |
+| Miss | 0.0242 | 0.0075 | 1,102 | 529 |
+
+The ranking — which error type is costing you the most AP — is the same, and that is
+what the metric is for. The difference comes from crowd handling: hotcoco builds TIDE
+on the same COCO-convention matching as its AP (so `tide_errors()` and `ev.stats`
+always agree about which detections exist), while tidecv removes crowd regions from
+matching entirely — its false-positive counts run higher and its `Miss` runs lower as
+a result.
+
+### Open Images
+
+**Reference:** the [TensorFlow Object Detection API](https://github.com/tensorflow/models/tree/master/research/object_detection) —
+the implementation the official protocol page points to.
+
+Open Images evaluation is compared over 70 cases covering group-of absorption, IoA
+containment at and around the 0.5 boundary, undetected group-of boxes, overlapping
+group-of boxes, and randomized multi-class scenes. Both mAP and per-class AP are
+compared, and **every case agrees to within one ulp** (worst difference 1.11e-16). It
+runs in CI on every commit.
+
+Two things that comparison does **not** cover, and why `provenance` still reports
+`"extension"` for Open Images runs:
+
+- **Non-exhaustive image-level labels.** The challenge ignores detections of a class
+  not verified on an image, and counts detections of a negatively-labeled class as
+  false positives. hotcoco does not implement this — it needs per-image label data
+  that COCO-format JSON cannot carry. A real challenge submission would score
+  differently.
+- **Hierarchy expansion** is applied to annotations before evaluation rather than
+  inside it, so it sits outside the compared surface.
 
 ### Verify it yourself
 
@@ -218,12 +256,12 @@ Anything above ~1e-12 on your data is worth
 [opening an issue](https://github.com/derekallman/hotcoco/issues) — that is the
 threshold the project's own parity gate uses.
 
-The same shape works for `hotcoco.mask` against `pycocotools.mask`; the repo's
-`scripts/parity_mask.py` does exactly that, operation by operation.
+The same shape works for `hotcoco.mask` against `pycocotools.mask`, operation by
+operation.
 
-Beyond val2017, a hypothesis-based fuzzer (`scripts/fuzz_parity.py`) checks
-~10,000 generated datasets — including degenerate zero-area boxes and other
-edge cases hand-written tests miss — against pycocotools at a 1e-10 tolerance.
+Beyond val2017, a hypothesis-based fuzzer checks ~10,000 generated datasets —
+including degenerate zero-area boxes and other edge cases hand-written tests miss —
+against pycocotools at a 1e-10 tolerance.
 
 ## Methodology
 
@@ -234,7 +272,6 @@ edge cases hand-written tests miss — against pycocotools at a 1e-10 tolerance.
   more. Run the suite on your own hardware for a figure that describes it.
 - **Detections are synthetic** — generated from GT annotations with a fixed seed (`seed=42`), so AP scores are meaningless but detection count and format are representative of real model output. Fixed seed means results are identical across runs.
 - **Only detections are scaled** for the 10x benchmark — ground truth annotations are unchanged.
-- Benchmark scripts are in `scripts/` at the repo root.
 
 ## Reproducing the benchmarks
 
@@ -258,14 +295,17 @@ data/
 └── kpt_val2017_results.json
 ```
 
-Images are never needed — only the JSON annotation and result files. With that in
-place:
+With that in place:
 
 ```bash
 just bench                                  # speed benchmark (1x)
 uv run python scripts/bench.py --phases     # load/eval phase breakdown
 uv run python scripts/bench.py --scale 10   # 10x stress test
 just parity                                 # metric parity vs pycocotools
+just parity-mask                            # hotcoco.mask vs pycocotools.mask, operation by operation
+just parity-tide                            # TIDE vs tidecv
+just parity-oid                             # Open Images vs the TF Object Detection API
+just fuzz                                   # hypothesis fuzzer, ~10,000 generated datasets
 ```
 
 The Objects365 benchmark needs a separate download:

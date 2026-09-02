@@ -254,6 +254,18 @@ as one whole-dataset call. That is what lets you parallelize and reduce.
 Class indices outside `range(num_classes)` are dropped rather than raising, so a
 stray label can't take down an evaluation run.
 
+### `is_computed` and `is_missing`
+
+```python
+is_computed(v: float) -> bool
+is_missing(v: float) -> bool
+```
+
+`-1.0` in any metric means "not computed for this configuration" — an area range
+with no ground truth, or a category absent from the split — never a low score.
+`is_missing(v)` is true for that sentinel and `is_computed(v)` is its negation. Use
+them when averaging per-class values so a sentinel does not drag the mean down.
+
 ---
 
 ## Rust-only

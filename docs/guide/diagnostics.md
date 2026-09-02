@@ -2,6 +2,11 @@
 
 AP tells you how good a model is; this page is about finding out *why* it isn't better. Confusion matrices show which categories get mixed up, TIDE decomposes errors by type, calibration checks whether confidence scores mean anything, and per-image diagnostics surface the images — and the annotations — worth looking at.
 
+!!! note "Call order"
+    Everything on this page except `confusion_matrix()` needs `evaluate()` first, and
+    `f_scores()` also needs `accumulate()`. `confusion_matrix()` runs its own matching
+    pass and works on a freshly constructed `COCOeval`.
+
 ## Confusion matrix
 
 The standard AP pipeline only ever matches detections against ground truth of the **same** category. That means it can't tell you *which* categories your model confuses. `confusion_matrix()` fixes this with a separate cross-category matching pass.
@@ -11,11 +16,9 @@ ev = COCOeval(coco_gt, coco_dt, "bbox")
 cm = ev.confusion_matrix(iou_thr=0.5, max_det=100)
 ```
 
-No `evaluate()` call is needed first — `confusion_matrix()` is fully standalone.
-
 ### Reading the matrix
 
-`cm["matrix"]` is a `(K+1) × (K+1)` numpy uint64 array where `K` is the number of categories (unsigned — cast with `.astype(np.int64)` before subtracting counts). **Rows are ground truth, columns are predicted.** The extra row and column at index `K` represent "background" — unmatched ground truth (missed detections / false negatives) and unmatched detections (false positives) respectively. The full layout and cell semantics are in the [`confusion_matrix` API reference](../api/cocoeval.md#confusion_matrix).
+`cm["matrix"]` is a `(K+1) × (K+1)` numpy uint64 array where `K` is the number of categories (unsigned — cast with `.astype(np.int64)` before subtracting counts). **Rows are ground truth, columns are predicted.** The extra row and column at index `K` represent "background" — unmatched ground truth (missed detections / false negatives) and unmatched detections (false positives) respectively. So `matrix[i][j]` for `i, j < K` counts GT category `i` predicted as category `j` — on-diagonal is a true positive, off-diagonal a class confusion — while `matrix[i][K]` counts false negatives of category `i` and `matrix[K][j]` counts false positives of category `j`. The full return shape is in the [`confusion_matrix` API reference](../api/cocoeval.md#confusion_matrix).
 
 ```python
 cm = ev.confusion_matrix(iou_thr=0.5)
@@ -68,8 +71,6 @@ Stricter thresholds and score floors are available — for example `ev.confusion
 
 Once AP tells you *how good* your model is, TIDE ([Bolya et al., ECCV 2020](https://arxiv.org/abs/2008.08115), [code](https://github.com/dbolya/tide)) tells you *why* it falls short. `tide_errors()` decomposes every false positive and false negative into one of six mutually exclusive error types and reports the ΔAP — how much AP would improve if each error type were eliminated.
 
-`evaluate()` must be called before `tide_errors()`.
-
 ```python
 ev = COCOeval(coco_gt, coco_dt, "bbox")
 ev.evaluate()
@@ -116,40 +117,15 @@ for rank, (name, delta) in enumerate(deltas, 1):
     print(f"  {rank}. {name:4s}  ΔAP={delta:.4f}  n={count}")
 ```
 
-### From the CLI
-
-Pass `--tide` to `coco eval` to print the TIDE table after the standard metrics:
-
-```bash
-coco eval --gt instances_val2017.json --dt bbox_results.json --tide
-
-# Custom thresholds
-coco eval --gt instances_val2017.json --dt bbox_results.json \
-    --tide --tide-pos-thr 0.75 --tide-bg-thr 0.2
-```
-
 ### Coming from tidecv
 
-If you have used [tidecv](https://github.com/dbolya/tide), the reference implementation, expect the five false-positive types to agree closely and `Miss` to read higher here. On COCO val2017 at `pos_thr=0.5`:
+If you have used [tidecv](https://github.com/dbolya/tide), the reference implementation, expect the five false-positive types to agree closely and `Miss` to read higher here. The side-by-side numbers on COCO val2017 are in [Benchmarks](../benchmarks.md#tide). The ranking — which error type is costing you the most AP — is the same, and that is what the metric is for.
 
-| Error | hotcoco ΔAP | tidecv ΔAP | hotcoco count | tidecv count |
-|---|---|---|---|---|
-| Cls | 0.0002 | 0.0000 | 13 | 13 |
-| Loc | 0.1115 | 0.1135 | 3,121 | 3,738 |
-| Both | 0.0007 | 0.0001 | 726 | 766 |
-| Dupe | 0.0001 | 0.0000 | 27 | 37 |
-| Bkg | 0.0109 | 0.0105 | 6,039 | 6,414 |
-| Miss | 0.0242 | 0.0075 | 1,102 | 529 |
-
-The ranking — which error type is costing you the most AP — is the same, and that is what the metric is for.
-
-The difference comes from crowd handling: hotcoco builds TIDE on the same COCO-convention matching as its AP (so `tide_errors()` and `ev.stats` always agree about which detections exist), while tidecv removes crowd regions from matching entirely — its false-positive counts run higher and its `Miss` runs lower as a result.
+The difference is crowd handling, explained under [TIDE parity](../benchmarks.md#tide).
 
 ## Confidence calibration
 
 A model that outputs confidence 0.9 should be correct about 90% of the time. `calibration()` measures how well your model's confidence scores align with actual detection accuracy by binning detections by confidence and comparing predicted confidence to the fraction of true positives in each bin.
-
-Requires `evaluate()` to have been called first.
 
 ```python
 ev = COCOeval(coco_gt, coco_dt, "bbox")
@@ -204,18 +180,6 @@ with plot.style():
     fig, ax = plot.reliability_diagram(cal)
     # Or pass the COCOeval directly:
     fig, ax = plot.reliability_diagram(ev, n_bins=15, iou_threshold=0.5)
-```
-
-### From the CLI
-
-Pass `--calibration` to `coco eval`:
-
-```bash
-coco eval --gt annotations.json --dt detections.json --calibration
-
-# Custom bins and IoU threshold
-coco eval --gt annotations.json --dt detections.json \
-    --calibration --cal-bins 15 --cal-iou-thr 0.75
 ```
 
 See [`calibration`](../api/cocoeval.md#calibration) in the API reference for full parameter details.
@@ -300,25 +264,11 @@ for cat in result["per_category"][:5]:  # top 5 regressions
     print(f"{cat['cat_name']:<20} {cat['delta']:+.3f}")
 ```
 
-### From the CLI
-
-```bash
-coco compare --gt ann.json --dt-a baseline.json --dt-b improved.json
-coco compare --gt ann.json --dt-a a.json --dt-b b.json --bootstrap 1000
-coco compare --gt ann.json --dt-a a.json --dt-b b.json --json  # CI/CD
-```
-
 ### Plotting
 
-```python
-from hotcoco import plot
+`plot.comparison_bar()` and `plot.category_deltas()` draw the result — see [Model comparison](plotting.md#model-comparison) in the plotting guide.
 
-result = hotcoco.compare(ev_a, ev_b, n_bootstrap=1000)
-plot.comparison_bar(result, save_path="comparison.png")
-plot.category_deltas(result, top_k=10, save_path="deltas.png")
-```
-
-See [`compare`](../api/cocoeval.md#compare) and [`comparison_bar`](../api/plot.md) in the API reference.
+See [`compare`](../api/cocoeval.md#compare) in the API reference for the full return shape.
 
 ## Per-image diagnostics and label error detection
 
@@ -361,11 +311,16 @@ Only detections with `score >= score_thr` are considered, so lower the threshold
 
 The result also includes the per-annotation TP/FP/FN status and match maps that power the browse viewer's eval coloring — see the [`image_diagnostics` API reference](../api/cocoeval.md#image_diagnostics) for the full return shape.
 
-### From the CLI
+## From the CLI
 
-```bash
-coco eval --gt annotations.json --dt detections.json --diagnostics
+Each diagnostic has a command-line form:
 
-# Custom thresholds
-coco eval --gt ann.json --dt det.json --diagnostics --diag-iou-thr 0.75 --diag-score-thr 0.3
-```
+| Diagnostic | Command |
+|---|---|
+| TIDE | `coco eval --tide` (`--tide-pos-thr`, `--tide-bg-thr`) |
+| Calibration | `coco eval --calibration` (`--cal-bins`, `--cal-iou-thr`) |
+| Per-image diagnostics | `coco eval --diagnostics` (`--diag-iou-thr`, `--diag-score-thr`) |
+| Model comparison | `coco compare --dt-a --dt-b` (`--bootstrap`, `--json`) |
+
+Flags and defaults are in [`coco eval`](../cli.md#coco-eval) and [`coco compare`](../cli.md#coco-compare).
+
