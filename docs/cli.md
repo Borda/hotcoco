@@ -13,6 +13,8 @@ hotcoco ships two CLI tools:
 pip install hotcoco
 ```
 
+`coco --version` prints the installed version. Every subcommand takes `--help`.
+
 ### JSON output mode
 
 Every subcommand except `coco explore` accepts a `--json` flag that writes a single JSON object to stdout

@@ -16,7 +16,7 @@ build:
 # Run all tests: Rust unit tests + Python parity regression tests
 test: build
     cargo test
-    uv run pytest scripts/test_parity.py scripts/test_stubs.py scripts/test_theme.py -v -x --tb=short
+    uv run pytest scripts/test_parity.py scripts/test_stubs.py scripts/test_theme.py scripts/test_cli.py -v -x --tb=short
 
 # Run hypothesis-based parity fuzzer (slow — for bug hunting, not CI)
 fuzz: build

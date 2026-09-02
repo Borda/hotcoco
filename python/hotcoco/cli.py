@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.metadata
 import json as json_mod
 import os
 import sys
@@ -895,6 +896,8 @@ def main():
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # The installed distribution's version, not a constant to keep in sync.
+    parser.add_argument("--version", action="version", version=f"%(prog)s {importlib.metadata.version('hotcoco')}")
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     # Shared parent parser that adds --json to every subcommand

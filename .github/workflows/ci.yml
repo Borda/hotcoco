@@ -213,6 +213,11 @@ jobs:
           source .venv/bin/activate
           pytest scripts/test_stubs.py -q
 
+      - name: CLI surface
+        run: |
+          source .venv/bin/activate
+          pytest scripts/test_cli.py -q
+
       - name: Plot theme contract
         run: |
           source .venv/bin/activate
