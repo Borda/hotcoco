@@ -1,7 +1,10 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rayon::prelude::*;
 use serde::Serialize;
+
+use crate::metrics::counts::{ApScratch, average_precision_ranked_into};
 
 use super::COCOeval;
 use super::matching::EvalImg;
@@ -155,9 +158,21 @@ impl CatData {
         self.ignored = order.iter().map(|&i| self.ignored[i]).collect();
         self.fp_types = order.iter().map(|&i| self.fp_types[i]).collect();
     }
+
+    /// Absorb another split's records for the same category, in order. Called
+    /// only from [`Classified::merge`], which guarantees `self` is the earlier
+    /// split — see that function's ordering note.
+    fn extend(&mut self, mut other: CatData) {
+        self.scores.append(&mut other.scores);
+        self.matched.append(&mut other.matched);
+        self.ignored.append(&mut other.ignored);
+        self.fp_types.append(&mut other.fp_types);
+        self.num_gt += other.num_gt;
+    }
 }
 
 /// Everything the false-positive classification pass produces.
+#[derive(Default)]
 struct Classified {
     /// Score-ranked, keyed by category id.
     cat_data: HashMap<u64, CatData>,
@@ -173,7 +188,41 @@ struct Classified {
     covered_gts: HashSet<u64>,
 }
 
+impl Classified {
+    /// Combine two splits of the parallel fold. Every field is order-independent
+    /// on its own — `fp_counts` is elementwise integer addition and
+    /// `covered_gts` is a set union — **except** the per-category vectors inside
+    /// `cat_data`, which `CatData::extend` appends in `self`-then-`other` order.
+    /// That is safe only because rayon's `fold`/`reduce` always calls this with
+    /// `self` covering the earlier contiguous range of `cells` and `other` the
+    /// later one (the same left-then-right structure a sequential walk would
+    /// produce), which is exactly what keeps `rank_by_score_desc`'s stable sort
+    /// tie-breaking bit-identical to the sequential pass.
+    fn merge(mut self, other: Self) -> Self {
+        for (cat_id, data) in other.cat_data {
+            // A vacant slot moves `data`'s `Vec`s in directly; only a category
+            // that already has records from an earlier split pays for a copy
+            // (`CatData::extend`'s `append`). `or_insert_with(CatData::new)`
+            // would pay that copy on *every* first sighting of a category —
+            // appending onto an empty `Vec` still allocates and memcpys, since
+            // the empty `Vec` and `data`'s `Vec` are different allocations.
+            match self.cat_data.entry(cat_id) {
+                Entry::Vacant(v) => {
+                    v.insert(data);
+                }
+                Entry::Occupied(o) => o.into_mut().extend(data),
+            }
+        }
+        for (slot, n) in self.fp_counts.iter_mut().zip(other.fp_counts) {
+            *slot += n;
+        }
+        self.covered_gts.extend(other.covered_gts);
+        self
+    }
+}
+
 /// Undetected-ground-truth tallies, split two ways.
+#[derive(Default)]
 struct MissCounts {
     /// Miss errors across every category — the reported `"Miss"` count.
     total: u64,
@@ -186,7 +235,35 @@ struct MissCounts {
     fn_per_cat: HashMap<u64, usize>,
 }
 
+impl MissCounts {
+    /// Combine two splits of the parallel fold. Every field is plain integer
+    /// addition keyed by category id, so unlike [`Classified::merge`] this
+    /// merge has no order dependency at all — which side is `self` vs `other`
+    /// cannot change the result.
+    fn merge(mut self, other: Self) -> Self {
+        self.total += other.total;
+        for (cat_id, n) in other.per_cat {
+            *self.per_cat.entry(cat_id).or_insert(0) += n;
+        }
+        for (cat_id, n) in other.fn_per_cat {
+            *self.fn_per_cat.entry(cat_id).or_insert(0) += n;
+        }
+        self
+    }
+}
+
 /// One category's ΔAP contributions, in report order.
+/// Per-category buffers the error fixes in pass 4 build their modified copy
+/// of a category's detections into, reused across the fixes instead of
+/// allocated per call. Kept apart from [`ApScratch`] so a ranked-AP call can
+/// read these while borrowing that one mutably.
+#[derive(Debug, Default)]
+struct FixScratch {
+    scores: Vec<f64>,
+    matched: Vec<bool>,
+    ignored: Vec<bool>,
+}
+
 struct CatDeltas {
     baseline: f64,
     /// Indexed like [`FP_TYPES`].
@@ -329,6 +406,23 @@ impl COCOeval {
     ///
     /// Also records which ground truths a `Loc` or `Cls` fix would recover; pass 3
     /// subtracts those from Miss.
+    ///
+    /// Fanned out with `fold`/`reduce`: each split walks a contiguous run of
+    /// `cells` sequentially into its own `Classified`, and `Classified::merge`
+    /// combines splits left-to-right.
+    ///
+    /// This looks like `confusion_matrix`'s fold/reduce accumulation but is not
+    /// the same shape underneath, and copying it verbatim for another heavy
+    /// payload would be a mistake: `confusion_matrix` merges by elementwise
+    /// addition on a fixed k² matrix, so every split's accumulator is the same
+    /// small constant size no matter how much work built it, and the merge
+    /// order genuinely does not matter. `Classified::merge` instead moves
+    /// per-detection `Vec`s that grow with the input, and the merge order *does*
+    /// matter for one field. `fp_counts` and `covered_gts` are plainly
+    /// order-independent (integer addition, set union); the per-category
+    /// vectors in `cat_data` are only order-independent because rayon's
+    /// split/merge tree preserves `cells` order — see `Classified::merge`'s doc
+    /// for why that matters for `rank_by_score_desc`'s tie-breaking.
     fn classify_detections(
         &self,
         cells: &[&EvalImg],
@@ -337,107 +431,121 @@ impl COCOeval {
         pos_thr: f64,
         bg_thr: f64,
     ) -> Classified {
-        let mut cat_data: HashMap<u64, CatData> = HashMap::new();
-        let mut fp_counts = [0u64; FP_TYPES.len()];
-        let mut covered_gts: HashSet<u64> = HashSet::new();
+        let mut classified = cells
+            .par_iter()
+            .fold(Classified::default, |mut acc, eval_img| {
+                let img_id = eval_img.image_id;
+                let cat_id = eval_img.category_id;
 
-        for eval_img in cells {
-            let img_id = eval_img.image_id;
-            let cat_id = eval_img.category_id;
+                // Annotation id → its row/column in the cell's IoU matrix, which is
+                // indexed by *original* (JSON-order) position within the cell.
+                //
+                // A linear scan, not a `HashMap`: `d` and `g` are single digits in
+                // almost every cell, so building two hash tables per cell — hashing
+                // every id, allocating twice — cost more than the handful of integer
+                // compares it saved. Annotation ids are unique, so `position` and a
+                // map lookup return the same answer.
+                let dt_orig_ids = self.coco_dt.get_ann_ids_for_img_cat(img_id, cat_id);
+                let gt_orig_ids = self.coco_gt.get_ann_ids_for_img_cat(img_id, cat_id);
+                let orig_pos = |ids: &[u64], id: u64| ids.iter().position(|&x| x == id);
+                // Sorted GT position → column, resolved once per cell. The scan in
+                // `same_class_scan` is (detections × GTs), so resolving it there would
+                // repeat the lookup once per pair.
+                let gt_sorted_to_orig: Vec<Option<usize>> = eval_img
+                    .gt_ids
+                    .iter()
+                    .map(|&id| orig_pos(gt_orig_ids, id))
+                    .collect();
 
-            // Annotation id → its row/column in the cell's IoU matrix, which is
-            // indexed by *original* (JSON-order) position within the cell.
-            //
-            // A linear scan, not a `HashMap`: `d` and `g` are single digits in
-            // almost every cell, so building two hash tables per cell — hashing
-            // every id, allocating twice — cost more than the handful of integer
-            // compares it saved. Annotation ids are unique, so `position` and a
-            // map lookup return the same answer.
-            let dt_orig_ids = self.coco_dt.get_ann_ids_for_img_cat(img_id, cat_id);
-            let gt_orig_ids = self.coco_gt.get_ann_ids_for_img_cat(img_id, cat_id);
-            let orig_pos = |ids: &[u64], id: u64| ids.iter().position(|&x| x == id);
-            // Sorted GT position → column, resolved once per cell. The scan in
-            // `same_class_scan` is (detections × GTs), so resolving it there would
-            // repeat the lookup once per pair.
-            let gt_sorted_to_orig: Vec<Option<usize>> = eval_img
-                .gt_ids
-                .iter()
-                .map(|&id| orig_pos(gt_orig_ids, id))
-                .collect();
+                let same_iou_mat = self.cell_ious(img_id, cat_id);
+                let cross_map = cross_iou_map.get(&img_id);
 
-            let same_iou_mat = self.cell_ious(img_id, cat_id);
-            let cross_map = cross_iou_map.get(&img_id);
+                // Split borrows: `entry` pins `cat_data` for the whole loop while
+                // the classification closure mutates the sibling fields, keeping the
+                // entry lookup once per cell rather than once per detection.
+                let entry = acc.cat_data.entry(cat_id).or_insert_with(CatData::new);
+                entry.num_gt += eval_img.num_gt_in_denominator();
+                let covered_gts = &mut acc.covered_gts;
+                let fp_counts = &mut acc.fp_counts;
 
-            let entry = cat_data.entry(cat_id).or_insert_with(CatData::new);
-            entry.num_gt += eval_img.num_gt_in_denominator();
+                for (di, &dt_ann_id) in eval_img.dt_ids.iter().enumerate() {
+                    let is_matched = eval_img.dt_matched[(t_idx, di)];
+                    let is_ignored = eval_img.dt_ignore[(t_idx, di)];
 
-            for (di, &dt_ann_id) in eval_img.dt_ids.iter().enumerate() {
-                let is_matched = eval_img.dt_matched[(t_idx, di)];
-                let is_ignored = eval_img.dt_ignore[(t_idx, di)];
+                    let fp_type = (!is_matched && !is_ignored).then(|| {
+                        let (max_cross_iou, argmax_cross_gt) = cross_map
+                            .and_then(|m| m.get(&dt_ann_id))
+                            .copied()
+                            .unwrap_or((0.0, None));
 
-                let fp_type = (!is_matched && !is_ignored).then(|| {
-                    let (max_cross_iou, argmax_cross_gt) = cross_map
-                        .and_then(|m| m.get(&dt_ann_id))
-                        .copied()
-                        .unwrap_or((0.0, None));
+                        // One row borrow per detection. A detection or row that is out
+                        // of range reads as all-zero, as the bounds tests it replaces
+                        // did.
+                        let row = same_iou_mat
+                            .zip(orig_pos(dt_orig_ids, dt_ann_id))
+                            .and_then(|(mat, di_orig)| mat.get(di_orig))
+                            .map_or(&[][..], Vec::as_slice);
+                        let same =
+                            same_class_scan(row, &gt_sorted_to_orig, eval_img, t_idx, pos_thr);
 
-                    // One row borrow per detection. A detection or row that is out
-                    // of range reads as all-zero, as the bounds tests it replaces
-                    // did.
-                    let row = same_iou_mat
-                        .zip(orig_pos(dt_orig_ids, dt_ann_id))
-                        .and_then(|(mat, di_orig)| mat.get(di_orig))
-                        .map_or(&[][..], Vec::as_slice);
-                    let same = same_class_scan(row, &gt_sorted_to_orig, eval_img, t_idx, pos_thr);
+                        // The tidecv priority order lives in `classify_fp` — see its
+                        // docs for the table. Everything above this line is evidence
+                        // gathering; the decision itself is the parity contract.
+                        let err = classify_fp(
+                            &FpEvidence {
+                                max_same_iou: same.max_iou,
+                                max_cross_iou,
+                                best_same_gt_matched: same.best_gt_matched,
+                            },
+                            pos_thr,
+                            bg_thr,
+                        );
 
-                    // The tidecv priority order lives in `classify_fp` — see its
-                    // docs for the table. Everything above this line is evidence
-                    // gathering; the decision itself is the parity contract.
-                    let err = classify_fp(
-                        &FpEvidence {
-                            max_same_iou: same.max_iou,
-                            max_cross_iou,
-                            best_same_gt_matched: same.best_gt_matched,
-                        },
-                        pos_thr,
-                        bg_thr,
-                    );
+                        // Only `Loc` and `Cls` can be fixed into a TP for their target
+                        // GT, so only they cover it. `Bkg`/`Both`/`Dupe` fixes suppress
+                        // the detection instead, leaving the GT still missed.
+                        let target = match err {
+                            ErrType::Loc => same.argmax_gt_ann_id,
+                            ErrType::Cls => argmax_cross_gt,
+                            ErrType::Both | ErrType::Dupe | ErrType::Bkg => None,
+                        };
+                        if let Some(gt_ann_id) = target {
+                            covered_gts.insert(gt_ann_id);
+                        }
 
-                    // Only `Loc` and `Cls` can be fixed into a TP for their target
-                    // GT, so only they cover it. `Bkg`/`Both`/`Dupe` fixes suppress
-                    // the detection instead, leaving the GT still missed.
-                    let target = match err {
-                        ErrType::Loc => same.argmax_gt_ann_id,
-                        ErrType::Cls => argmax_cross_gt,
-                        ErrType::Both | ErrType::Dupe | ErrType::Bkg => None,
-                    };
-                    if let Some(gt_ann_id) = target {
-                        covered_gts.insert(gt_ann_id);
-                    }
+                        fp_counts[err as usize] += 1;
+                        err
+                    });
 
-                    fp_counts[err as usize] += 1;
-                    err
-                });
+                    entry.scores.push(eval_img.dt_scores[di]);
+                    entry.matched.push(is_matched);
+                    entry.ignored.push(is_ignored);
+                    entry.fp_types.push(fp_type);
+                }
 
-                entry.scores.push(eval_img.dt_scores[di]);
-                entry.matched.push(is_matched);
-                entry.ignored.push(is_ignored);
-                entry.fp_types.push(fp_type);
-            }
-        }
+                acc
+            })
+            // `reduce_with` (not `reduce(Classified::default, ..)`): a `reduce`
+            // with an identity seeds *every* leaf of the split/merge tree with
+            // an empty `Classified`, so every leaf's `Classified::merge` pays
+            // for a no-op merge against that empty seed — one extra memcpy per
+            // leaf for data that was never going to change. `reduce_with` folds
+            // pairwise instead and has no identity to seed, so a run with a
+            // single rayon split (or `cells.is_empty()`) hits neither the
+            // identity cost nor a "no splits happened" branch. Still
+            // order-preserving left-to-right, so `Classified::merge`'s ordering
+            // argument still holds.
+            .reduce_with(Classified::merge)
+            .unwrap_or_default();
 
         // Rank once per category, now that every cell has contributed; the eight
         // APs per category in `category_deltas` then read the presorted entry
         // point instead of re-sorting the same detections eight times.
-        for data in cat_data.values_mut() {
+        for data in classified.cat_data.values_mut() {
             data.rank_by_score_desc();
         }
 
-        Classified {
-            cat_data,
-            fp_counts,
-            covered_gts,
-        }
+        classified
     }
 
     /// Pass 4 — score each category eight ways and difference against its
@@ -464,34 +572,50 @@ impl COCOeval {
                     _ => return None,
                 };
 
-                let ranked_ap = |matched: &[bool], ignored: &[bool], num_gt: usize| -> f64 {
-                    crate::metrics::counts::average_precision_ranked(
-                        matched,
-                        Some(ignored),
-                        num_gt,
-                        rec_thrs,
-                    )
-                };
+                // One AP scratch per category, reused across the ~8 ranked-AP calls
+                // below (baseline, one per `FP_TYPES` entry, FP oracle, FN oracle)
+                // instead of each allocating its own TP/FP and PR-curve buffers.
+                // `fix` holds the modified copies of `data` that `fix_fp`, the FP
+                // oracle, and the Miss fix build.
+                let mut ap_scratch = ApScratch::default();
+                let mut fix = FixScratch::default();
 
-                let baseline = ranked_ap(&data.matched, &data.ignored, data.num_gt);
+                let baseline = average_precision_ranked_into(
+                    &data.matched,
+                    Some(&data.ignored),
+                    data.num_gt,
+                    rec_thrs,
+                    &mut ap_scratch,
+                );
 
                 // Fix one FP error type. Cls and Loc flip FP → TP (the detection
                 // would have been correct if the error were fixed). Bkg, Both and
                 // Dupe suppress the detection instead, matching tidecv's
                 // `fix()→None` behavior where these errors produce no corrected TP.
-                let fix_fp = |fix_type: ErrType| -> f64 {
-                    let mut fixed_matched = data.matched.clone();
-                    let mut fixed_ignored = data.ignored.clone();
+                //
+                // `mut` and captures `ap_scratch` and `fix` by unique reference:
+                // each call below reuses the same buffers rather than allocating.
+                let mut fix_fp = |fix_type: ErrType| -> f64 {
+                    fix.matched.clear();
+                    fix.matched.extend_from_slice(&data.matched);
+                    fix.ignored.clear();
+                    fix.ignored.extend_from_slice(&data.ignored);
                     for (i, fp_type) in data.fp_types.iter().enumerate() {
                         if *fp_type != Some(fix_type) {
                             continue;
                         }
                         match fix_type {
-                            ErrType::Cls | ErrType::Loc => fixed_matched[i] = true,
-                            ErrType::Bkg | ErrType::Both | ErrType::Dupe => fixed_ignored[i] = true,
+                            ErrType::Cls | ErrType::Loc => fix.matched[i] = true,
+                            ErrType::Bkg | ErrType::Both | ErrType::Dupe => fix.ignored[i] = true,
                         }
                     }
-                    ranked_ap(&fixed_matched, &fixed_ignored, data.num_gt)
+                    average_precision_ranked_into(
+                        &fix.matched,
+                        Some(&fix.ignored),
+                        data.num_gt,
+                        rec_thrs,
+                        &mut ap_scratch,
+                    )
                 };
 
                 let mut fp_types = [0.0f64; FP_TYPES.len()];
@@ -504,13 +628,20 @@ impl COCOeval {
                 // existence; nothing is converted into a TP, unlike the per-type
                 // fixes above, so this is *not* the union of the five.
                 let fp = {
-                    let fixed_ignored: Vec<bool> = data
-                        .ignored
-                        .iter()
-                        .zip(&data.fp_types)
-                        .map(|(&ig, fp_type)| ig || fp_type.is_some())
-                        .collect();
-                    ranked_ap(&data.matched, &fixed_ignored, data.num_gt) - baseline
+                    fix.ignored.clear();
+                    fix.ignored.extend(
+                        data.ignored
+                            .iter()
+                            .zip(&data.fp_types)
+                            .map(|(&ig, fp_type)| ig || fp_type.is_some()),
+                    );
+                    average_precision_ranked_into(
+                        &data.matched,
+                        Some(&fix.ignored),
+                        data.num_gt,
+                        rec_thrs,
+                        &mut ap_scratch,
+                    ) - baseline
                 };
 
                 // FN: tidecv's FalseNegativeError oracle — perfect recall without
@@ -522,10 +653,12 @@ impl COCOeval {
                     fn_count <= data.num_gt,
                     "FN count exceeds the GT denominator it was counted from"
                 );
-                let fn_oracle = ranked_ap(
+                let fn_oracle = average_precision_ranked_into(
                     &data.matched,
-                    &data.ignored,
+                    Some(&data.ignored),
                     data.num_gt.saturating_sub(fn_count),
+                    rec_thrs,
+                    &mut ap_scratch,
                 ) - baseline;
 
                 // Fix Miss: inject fake TPs for unmatched GTs.
@@ -534,22 +667,24 @@ impl COCOeval {
                 // 2.0, which sits above any real confidence in practice but is not
                 // *guaranteed* to — nothing rejects a score above 2.0 — and the old
                 // behavior was to sort the concatenation. One sort per category
-                // rather than eight is already the win.
+                // rather than eight is already the win. `compute_ap_from_matched`
+                // sorts and builds its own scratch internally, so it does not take
+                // `ap_scratch`.
                 let miss_count = misses.per_cat.get(&cat_id).copied().unwrap_or(0);
                 let miss = if miss_count > 0 {
-                    let mut fixed_scores = Vec::with_capacity(data.scores.len() + miss_count);
-                    let mut fixed_matched = Vec::with_capacity(data.matched.len() + miss_count);
-                    let mut fixed_ignored = Vec::with_capacity(data.ignored.len() + miss_count);
-                    fixed_scores.resize(miss_count, 2.0);
-                    fixed_matched.resize(miss_count, true);
-                    fixed_ignored.resize(miss_count, false);
-                    fixed_scores.extend_from_slice(&data.scores);
-                    fixed_matched.extend_from_slice(&data.matched);
-                    fixed_ignored.extend_from_slice(&data.ignored);
+                    fix.scores.clear();
+                    fix.matched.clear();
+                    fix.ignored.clear();
+                    fix.scores.resize(miss_count, 2.0);
+                    fix.matched.resize(miss_count, true);
+                    fix.ignored.resize(miss_count, false);
+                    fix.scores.extend_from_slice(&data.scores);
+                    fix.matched.extend_from_slice(&data.matched);
+                    fix.ignored.extend_from_slice(&data.ignored);
                     Self::compute_ap_from_matched(
-                        &fixed_scores,
-                        &fixed_matched,
-                        &fixed_ignored,
+                        &fix.scores,
+                        &fix.matched,
+                        &fix.ignored,
                         data.num_gt,
                         rec_thrs,
                     ) - baseline
@@ -607,34 +742,46 @@ fn same_class_scan(
 /// `Loc`/`Cls` fix. The cross-category half of that coverage is why this cannot
 /// be folded into [`COCOeval::classify_detections`]: a dog detection can cover a
 /// cat ground truth, so no single category's pass has the whole answer.
+///
+/// Fanned out with `fold`/`reduce`, same shape as [`COCOeval::classify_detections`]
+/// and `confusion_matrix`. Every field `MissCounts::merge` combines is additive
+/// (a total, and two per-category maps of counts), so — unlike the classification
+/// pass — this merge is order-independent outright; no tie-break anywhere here
+/// depends on which order the cells were visited in.
 fn count_misses(cells: &[&EvalImg], covered_gts: &HashSet<u64>, t_idx: usize) -> MissCounts {
-    let mut counts = MissCounts {
-        total: 0,
-        per_cat: HashMap::new(),
-        fn_per_cat: HashMap::new(),
-    };
-
-    for eval_img in cells {
-        let (mut n_miss, mut n_fn) = (0usize, 0usize);
-        for (gi, &gt_id) in eval_img.gt_ids.iter().enumerate() {
-            // `counts_as_miss`, not `!gt_ignore`: `num_gt` in the classification
-            // pass already counts an Open Images group-of box, so excluding it
-            // here would make Miss disagree with the denominator it is a fraction
-            // of.
-            if eval_img.gt_matched[(t_idx, gi)] || !eval_img.counts_as_miss(gi) {
-                continue;
+    cells
+        .par_iter()
+        .fold(MissCounts::default, |mut counts, eval_img| {
+            let (mut n_miss, mut n_fn) = (0usize, 0usize);
+            for (gi, &gt_id) in eval_img.gt_ids.iter().enumerate() {
+                // `counts_as_miss`, not `!gt_ignore`: `num_gt` in the classification
+                // pass already counts an Open Images group-of box, so excluding it
+                // here would make Miss disagree with the denominator it is a fraction
+                // of.
+                if eval_img.gt_matched[(t_idx, gi)] || !eval_img.counts_as_miss(gi) {
+                    continue;
+                }
+                n_fn += 1;
+                if !covered_gts.contains(&gt_id) {
+                    n_miss += 1;
+                }
             }
-            n_fn += 1;
-            if !covered_gts.contains(&gt_id) {
-                n_miss += 1;
+            counts.total += n_miss as u64;
+            // Callers read both maps via `.get(&cat_id).copied().unwrap_or(0)`,
+            // so a category this cell contributed nothing to is identical
+            // whether it holds an explicit `0` entry or no entry at all — skip
+            // the insertion for the common case (most cells miss nothing) and
+            // save the `HashMap` a slot it will never be asked for.
+            if n_miss > 0 {
+                *counts.per_cat.entry(eval_img.category_id).or_insert(0) += n_miss;
             }
-        }
-        counts.total += n_miss as u64;
-        *counts.per_cat.entry(eval_img.category_id).or_insert(0) += n_miss;
-        *counts.fn_per_cat.entry(eval_img.category_id).or_insert(0) += n_fn;
-    }
-
-    counts
+            if n_fn > 0 {
+                *counts.fn_per_cat.entry(eval_img.category_id).or_insert(0) += n_fn;
+            }
+            counts
+        })
+        .reduce_with(MissCounts::merge)
+        .unwrap_or_default()
 }
 
 /// Pass 5 — average the per-category deltas and name every key once.

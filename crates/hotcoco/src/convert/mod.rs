@@ -162,6 +162,18 @@ pub(crate) fn anns_by_image(dataset: &Dataset) -> HashMap<u64, Vec<&Annotation>>
     map
 }
 
+/// Attach the reader's byte offset to a parse error — XML carries no line
+/// numbers a streaming reader can cheaply report, but a byte position still
+/// pins the failing element.
+pub(crate) fn at_byte(err: ConvertError, pos: u64) -> ConvertError {
+    match err {
+        ConvertError::ParseError(msg) => {
+            ConvertError::ParseError(format!("near byte {pos}: {msg}"))
+        }
+        other => other,
+    }
+}
+
 /// Extract the filename stem (without extension) from a file path string.
 pub(crate) fn file_stem(file_name: &str) -> &str {
     Path::new(file_name)
@@ -203,6 +215,12 @@ pub(crate) fn check_unique_stems(dataset: &Dataset) -> Result<(), ConvertError> 
     Ok(())
 }
 
+/// Image file extensions tried when a bare stem has no direct hit.
+//
+// The single owner of this list: `hotcoco-pyo3`'s `read_image_dims` reaches it
+// as `hotcoco_core::convert::IMAGE_EXTENSIONS` rather than keeping its own copy.
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "tif", "tiff"];
+
 /// Look up image dimensions by stem; try common extensions as fallback.
 ///
 /// Returns `None` when the stem is absent or maps to a zero dimension — both
@@ -213,7 +231,7 @@ pub(crate) fn lookup_image_dims(
     stem: &str,
 ) -> Option<(u32, u32)> {
     let found = image_dims.get(stem).or_else(|| {
-        ["jpg", "jpeg", "png", "bmp", "tif", "tiff"]
+        IMAGE_EXTENSIONS
             .iter()
             .find_map(|ext| image_dims.get(&format!("{stem}.{ext}")))
     });

@@ -331,12 +331,18 @@ pub fn oid_to_coco(
         })
         .collect();
 
+    // Resolved once per unique image here, and reused below for every
+    // annotation on that image — `image_scale`'s miss path allocates a
+    // `format!`-ed extension string per call, so it must not run per row.
+    let mut scale_by_img: HashMap<u64, (f64, f64)> = HashMap::with_capacity(image_ids.len());
     let images: Vec<Image> = image_ids
         .iter()
         .map(|id| {
-            let (_, _, w, h) = image_scale(image_dims, id);
+            let (sx, sy, w, h) = image_scale(image_dims, id);
+            let img_id = img_index[id];
+            scale_by_img.insert(img_id, (sx, sy));
             Image {
-                id: img_index[id],
+                id: img_id,
                 // The CSV records only the image ID; per the module policy the
                 // ID becomes `file_name` verbatim, with no invented extension.
                 file_name: (*id).to_string(),
@@ -349,7 +355,8 @@ pub fn oid_to_coco(
 
     let mut annotations = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
-        let (sx, sy, _, _) = image_scale(image_dims, &row.image_id);
+        let image_id = img_index[row.image_id.as_str()];
+        let (sx, sy) = scale_by_img[&image_id];
         let x = row.xmin * sx;
         let y = row.ymin * sy;
         let w = (row.xmax - row.xmin) * sx;
@@ -357,7 +364,7 @@ pub fn oid_to_coco(
 
         annotations.push(Annotation {
             id: (i + 1) as u64,
-            image_id: img_index[row.image_id.as_str()],
+            image_id,
             category_id: cat_index[row.label.as_str()],
             bbox: Some([x, y, w, h]),
             area: Some(w * h),
@@ -402,11 +409,7 @@ pub fn oid_results_to_anns(
         .iter()
         .map(|img| (file_stem(&img.file_name), img))
         .collect();
-    let cat_index: HashMap<&str, u64> = gt
-        .categories
-        .iter()
-        .map(|c| (c.name.as_str(), c.id))
-        .collect();
+    let cat_index = crate::types::cat_name_to_id(&gt.categories);
 
     let mut annotations = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
@@ -477,11 +480,7 @@ pub fn coco_to_oid(dataset: &Dataset, output_csv: &Path) -> Result<OidStats, Con
         }
     }
 
-    let cat_map: HashMap<u64, &str> = dataset
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
+    let cat_map = crate::types::cat_id_to_name(dataset);
     let grouped = anns_by_image(dataset);
     let scored = dataset.annotations.iter().any(|a| a.score.is_some());
 

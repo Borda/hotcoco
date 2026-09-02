@@ -285,13 +285,13 @@ pub fn greedy_match_masked(
     assert_eq!(
         iou_flat.len(),
         d * g,
-        "greedy_match: iou_flat must be d*g row-major ({d}x{g} = {}, got {})",
+        "greedy_match_masked: iou_flat must be d*g row-major ({d}x{g} = {}, got {})",
         d * g,
         iou_flat.len()
     );
     assert!(
         num_gt_not_ignored <= g,
-        "greedy_match: num_gt_not_ignored ({num_gt_not_ignored}) exceeds g ({g})"
+        "greedy_match_masked: num_gt_not_ignored ({num_gt_not_ignored}) exceeds g ({g})"
     );
     for (name, mask) in [
         ("rematchable", masks.rematchable),
@@ -301,7 +301,7 @@ pub fn greedy_match_masked(
             assert_eq!(
                 m.len(),
                 g,
-                "greedy_match: {name} mask must have one entry per GT \
+                "greedy_match_masked: {name} mask must have one entry per GT \
                  (got {}, expected g = {g})",
                 m.len()
             );
@@ -366,38 +366,6 @@ pub fn greedy_match_masked(
     }
 
     GreedyMatches { dt_gt, gt_matched }
-}
-
-/// [`greedy_match_masked`] with the two policy masks as positional parameters.
-///
-/// Same algorithm, same results, same panics — it delegates. Prefer
-/// [`greedy_match_masked`]: the two adjacent `Option<&[bool]>` here are
-/// transposable, which is what [`GtMasks`] exists to prevent. Retained only
-/// because removing it is a breaking change; nothing in the crate calls it.
-///
-/// # Panics
-///
-/// As [`greedy_match_masked`].
-pub fn greedy_match(
-    iou_flat: &[f64],
-    d: usize,
-    g: usize,
-    num_gt_not_ignored: usize,
-    gt_rematchable: Option<&[bool]>,
-    gt_phase2_eligible: Option<&[bool]>,
-    iou_thrs: &[f64],
-) -> GreedyMatches {
-    greedy_match_masked(
-        iou_flat,
-        d,
-        g,
-        num_gt_not_ignored,
-        GtMasks {
-            rematchable: gt_rematchable,
-            phase2_eligible: gt_phase2_eligible,
-        },
-        iou_thrs,
-    )
 }
 
 #[cfg(test)]
@@ -567,7 +535,17 @@ mod tests {
             let mut thrs: Vec<f64> = (0..2).map(|_| rng.random_range(0.0..=1.0)).collect();
             thrs.sort_by(f64::total_cmp);
 
-            let m = greedy_match(&iou, d, g, num_ni, Some(&rematchable), Some(&phase2), &thrs);
+            let m = greedy_match_masked(
+                &iou,
+                d,
+                g,
+                num_ni,
+                GtMasks {
+                    rematchable: Some(&rematchable),
+                    phase2_eligible: Some(&phase2),
+                },
+                &thrs,
+            );
             let tp_at = |ti: usize| {
                 m.dt_gt
                     .row(ti)
@@ -591,7 +569,7 @@ mod tests {
 
     // No crowd, all GTs eligible for phase 2 — the `None`/`None` uniform case.
     fn simple(iou_flat: &[f64], d: usize, g: usize, num_ni: usize, thrs: &[f64]) -> GreedyMatches {
-        greedy_match(iou_flat, d, g, num_ni, None, None, thrs)
+        greedy_match_masked(iou_flat, d, g, num_ni, GtMasks::default(), thrs)
     }
 
     /// The `None` encodings must be *exactly* the uniform masks, not merely close
@@ -612,14 +590,16 @@ mod tests {
         let (d, g, num_ni) = (3, 3, 2);
         let thrs = [0.5, 0.85];
 
-        let implicit = greedy_match(&iou, d, g, num_ni, None, None, &thrs);
-        let explicit = greedy_match(
+        let implicit = greedy_match_masked(&iou, d, g, num_ni, GtMasks::default(), &thrs);
+        let explicit = greedy_match_masked(
             &iou,
             d,
             g,
             num_ni,
-            Some(&vec![false; g]),
-            Some(&vec![true; g]),
+            GtMasks {
+                rematchable: Some(&vec![false; g]),
+                phase2_eligible: Some(&vec![true; g]),
+            },
             &thrs,
         );
 
@@ -669,14 +649,34 @@ mod tests {
     #[test]
     fn crowd_gt_rematched_by_multiple_dts() {
         // 2 DTs, 1 ignored crowd GT (rematchable). Both DTs match it.
-        let m = greedy_match(&[0.9, 0.8], 2, 1, 0, Some(&[true]), None, &[0.5]);
+        let m = greedy_match_masked(
+            &[0.9, 0.8],
+            2,
+            1,
+            0,
+            GtMasks {
+                rematchable: Some(&[true]),
+                phase2_eligible: None,
+            },
+            &[0.5],
+        );
         assert_eq!(m.dt_gt[(0, 0)], Some(0));
         assert_eq!(m.dt_gt[(0, 1)], Some(0));
     }
 
     #[test]
     fn non_rematchable_gt_taken_only_once() {
-        let m = greedy_match(&[0.9, 0.8], 2, 1, 0, Some(&[false]), None, &[0.5]);
+        let m = greedy_match_masked(
+            &[0.9, 0.8],
+            2,
+            1,
+            0,
+            GtMasks {
+                rematchable: Some(&[false]),
+                phase2_eligible: None,
+            },
+            &[0.5],
+        );
         assert_eq!(m.dt_gt[(0, 0)], Some(0));
         assert_eq!(m.dt_gt[(0, 1)], None);
     }
@@ -684,7 +684,17 @@ mod tests {
     #[test]
     fn phase2_ineligible_gt_is_skipped() {
         // gi0 non-ignored below threshold; gi1 ignored at 0.9 but phase2-ineligible.
-        let m = greedy_match(&[0.4, 0.9], 1, 2, 1, None, Some(&[true, false]), &[0.5]);
+        let m = greedy_match_masked(
+            &[0.4, 0.9],
+            1,
+            2,
+            1,
+            GtMasks {
+                rematchable: None,
+                phase2_eligible: Some(&[true, false]),
+            },
+            &[0.5],
+        );
         assert_eq!(m.dt_gt[(0, 0)], None);
     }
 
@@ -695,44 +705,17 @@ mod tests {
         assert_eq!(m.dt_gt[(0, 0)], Some(1));
     }
 
-    /// The positional wrapper and the struct form are the same matcher.
-    #[test]
-    fn positional_wrapper_equals_struct_form() {
-        let iou = [0.9, 0.6, 0.4, 0.8];
-        let (d, g, num_ni) = (2, 2, 1);
-        let rematchable = [false, true];
-        let phase2 = [true, true];
-        let thrs = [0.5, 0.75];
-
-        let a = greedy_match(&iou, d, g, num_ni, Some(&rematchable), Some(&phase2), &thrs);
-        let b = greedy_match_masked(
-            &iou,
-            d,
-            g,
-            num_ni,
-            GtMasks {
-                rematchable: Some(&rematchable),
-                phase2_eligible: Some(&phase2),
-            },
-            &thrs,
-        );
-        for ti in 0..thrs.len() {
-            assert_eq!(a.dt_gt.row(ti), b.dt_gt.row(ti));
-            assert_eq!(a.gt_matched.row(ti), b.gt_matched.row(ti));
-        }
-    }
-
     #[test]
     #[should_panic(expected = "iou_flat must be d*g")]
     fn wrong_iou_matrix_length_panics() {
         // 2x2 declared, 3 values supplied — one misaligned row of plausible IoUs.
-        greedy_match(&[0.9, 0.8, 0.7], 2, 2, 2, None, None, &[0.5]);
+        greedy_match_masked(&[0.9, 0.8, 0.7], 2, 2, 2, GtMasks::default(), &[0.5]);
     }
 
     #[test]
     #[should_panic(expected = "num_gt_not_ignored")]
     fn num_not_ignored_beyond_g_panics() {
-        greedy_match(&[0.9], 1, 1, 2, None, None, &[0.5]);
+        greedy_match_masked(&[0.9], 1, 1, 2, GtMasks::default(), &[0.5]);
     }
 
     /// A short mask used to silently degrade to the uniform default from its end
@@ -740,19 +723,31 @@ mod tests {
     #[test]
     #[should_panic(expected = "rematchable mask")]
     fn short_rematchable_mask_panics() {
-        greedy_match(&[0.9, 0.8], 1, 2, 2, Some(&[true]), None, &[0.5]);
+        greedy_match_masked(
+            &[0.9, 0.8],
+            1,
+            2,
+            2,
+            GtMasks {
+                rematchable: Some(&[true]),
+                phase2_eligible: None,
+            },
+            &[0.5],
+        );
     }
 
     #[test]
     #[should_panic(expected = "phase2_eligible mask")]
     fn overlong_phase2_mask_panics() {
-        greedy_match(
+        greedy_match_masked(
             &[0.9, 0.8],
             1,
             2,
             1,
-            None,
-            Some(&[true, true, false]),
+            GtMasks {
+                rematchable: None,
+                phase2_eligible: Some(&[true, true, false]),
+            },
             &[0.5],
         );
     }

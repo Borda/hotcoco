@@ -3,7 +3,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3, PyUnty
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::convert::{py_to_rle, rle_to_coco_py};
+use crate::convert::{bool_vec, f64_array, f64_matrix, py_to_rle, rle_to_coco_py};
 use crate::to_pyerr;
 
 /// Transpose between row-major (numpy) and column-major (hotcoco) mask layouts.
@@ -236,9 +236,7 @@ pub fn to_bbox(py: Python<'_>, rle: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         for r in &rles {
             data.extend_from_slice(&rmask::to_bbox(r));
         }
-        let flat = PyArray1::from_vec(py, data);
-        let arr2d = flat.reshape([n, 4])?;
-        Ok(arr2d.into_any().unbind())
+        f64_array(py, data, [n, 4])
     }
 }
 
@@ -276,14 +274,16 @@ fn check_iscrowd_len(iscrowd_len: usize, gt_len: usize) -> PyResult<()> {
 /// The crate already accepts either spelling when deserializing annotations (see
 /// `types::deserialize_iscrowd`); this is the same convention at the Python edge.
 fn extract_iscrowd(obj: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    // `bool_vec` covers bools (list or numpy bool array) with the same fast
+    // path COCOeval's own bool arguments get. It doesn't know int 0/1, so fall
+    // back to per-element extraction only for that case.
+    if let Ok(v) = bool_vec(obj, "iscrowd") {
+        return Ok(v);
+    }
     let mut out = Vec::new();
     for item in obj.try_iter()? {
         let item = item?;
-        // `bool` first: Python's `bool` is a subclass of `int`, and numpy's
-        // `bool_` extracts here but not always as an integer.
-        if let Ok(b) = item.extract::<bool>() {
-            out.push(b);
-        } else if let Ok(i) = item.extract::<i64>() {
+        if let Ok(i) = item.extract::<i64>() {
             out.push(i != 0);
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(format!(
@@ -316,13 +316,7 @@ pub fn iou(
     let result = py.detach(|| rmask::iou(&dt_rles, &gt_rles, &iscrowd));
     let d = dt_rles.len();
     let g = gt_rles.len();
-    let mut flat = Vec::with_capacity(d * g);
-    for row in &result {
-        flat.extend_from_slice(row);
-    }
-    let arr = PyArray1::from_vec(py, flat);
-    let arr2d = arr.reshape([d, g])?;
-    Ok(arr2d.into_any().unbind())
+    f64_matrix(py, &result, [d, g])
 }
 
 #[pyfunction]
@@ -338,13 +332,7 @@ pub fn bbox_iou(
     let result = rmask::bbox_iou(&dt, &gt, &iscrowd);
     let d = dt.len();
     let g = gt.len();
-    let mut flat = Vec::with_capacity(d * g);
-    for row in &result {
-        flat.extend_from_slice(row);
-    }
-    let arr = PyArray1::from_vec(py, flat);
-    let arr2d = arr.reshape([d, g])?;
-    Ok(arr2d.into_any().unbind())
+    f64_matrix(py, &result, [d, g])
 }
 
 // ---------------------------------------------------------------------------

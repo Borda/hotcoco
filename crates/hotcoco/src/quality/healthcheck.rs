@@ -361,11 +361,7 @@ fn build_summary(dataset: &Dataset, warnings: &mut Vec<Finding>) -> DatasetSumma
         .count();
 
     // Per-category annotation counts
-    let cat_name_map: HashMap<u64, &str> = dataset
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
+    let cat_name_map = crate::types::cat_id_to_name(dataset);
 
     let mut cat_counts: HashMap<u64, usize> = HashMap::new();
     for cat in &dataset.categories {

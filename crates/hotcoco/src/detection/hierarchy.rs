@@ -11,6 +11,32 @@ use serde::Deserialize;
 
 use crate::Category;
 
+/// Resolve a name to its category id, minting a virtual one on first miss.
+///
+/// Shared by [`Hierarchy::from_categories`] (over supercategory names) and
+/// [`Hierarchy::from_oid_json`] (over OID labels) — both need "real id if
+/// known, else a stable id reused across repeat references, else a fresh one
+/// counting down from `u64::MAX - 1`." The caller does its own real-id lookup
+/// (its map's key type varies — `&str` vs `String`) and passes the result in,
+/// so this function needs no generic over the map's key.
+fn resolve_id(
+    name: &str,
+    real_id: Option<u64>,
+    virtual_ids: &mut HashMap<String, u64>,
+    next_virtual_id: &mut u64,
+) -> u64 {
+    if let Some(id) = real_id {
+        id
+    } else if let Some(&id) = virtual_ids.get(name) {
+        id
+    } else {
+        let id = *next_virtual_id;
+        virtual_ids.insert(name.to_string(), id);
+        *next_virtual_id = next_virtual_id.wrapping_sub(1);
+        id
+    }
+}
+
 /// A category hierarchy (tree or forest) used for Open Images evaluation.
 ///
 /// Each category can have at most one parent. The hierarchy supports ancestor
@@ -83,8 +109,7 @@ impl Hierarchy {
     /// by name. If no matching category exists, creates a virtual node (using IDs
     /// counting down from `u64::MAX - 1`) to represent the supercategory.
     pub fn from_categories(categories: &[Category]) -> Self {
-        let name_to_id: HashMap<&str, u64> =
-            categories.iter().map(|c| (c.name.as_str(), c.id)).collect();
+        let name_to_id = crate::types::cat_name_to_id(categories);
 
         let mut parent_map: HashMap<u64, u64> = HashMap::new();
         let mut virtual_id = u64::MAX - 1;
@@ -96,16 +121,8 @@ impl Hierarchy {
                     // Skip self-referencing supercategories
                     continue;
                 }
-                let parent_id = if let Some(&id) = name_to_id.get(supercat.as_str()) {
-                    id
-                } else if let Some(&id) = virtual_names.get(supercat) {
-                    id
-                } else {
-                    let id = virtual_id;
-                    virtual_names.insert(supercat.clone(), id);
-                    virtual_id = virtual_id.wrapping_sub(1);
-                    id
-                };
+                let real_id = name_to_id.get(supercat.as_str()).copied();
+                let parent_id = resolve_id(supercat, real_id, &mut virtual_names, &mut virtual_id);
                 parent_map.insert(cat.id, parent_id);
             }
         }
@@ -131,24 +148,6 @@ impl Hierarchy {
         let mut virtual_id = u64::MAX - 1;
         let mut virtual_labels: HashMap<String, u64> = HashMap::new();
 
-        fn resolve_id(
-            label: &str,
-            label_to_id: &HashMap<String, u64>,
-            virtual_labels: &mut HashMap<String, u64>,
-            virtual_id: &mut u64,
-        ) -> u64 {
-            if let Some(&id) = label_to_id.get(label) {
-                id
-            } else if let Some(&id) = virtual_labels.get(label) {
-                id
-            } else {
-                let id = *virtual_id;
-                virtual_labels.insert(label.to_string(), id);
-                *virtual_id = virtual_id.wrapping_sub(1);
-                id
-            }
-        }
-
         fn walk(
             node: &OidNode,
             parent_map: &mut HashMap<u64, u64>,
@@ -156,10 +155,12 @@ impl Hierarchy {
             virtual_labels: &mut HashMap<String, u64>,
             virtual_id: &mut u64,
         ) {
-            let parent_id = resolve_id(&node.label_name, label_to_id, virtual_labels, virtual_id);
+            let parent_real = label_to_id.get(&node.label_name).copied();
+            let parent_id = resolve_id(&node.label_name, parent_real, virtual_labels, virtual_id);
             for child in &node.subcategory {
+                let child_real = label_to_id.get(&child.label_name).copied();
                 let child_id =
-                    resolve_id(&child.label_name, label_to_id, virtual_labels, virtual_id);
+                    resolve_id(&child.label_name, child_real, virtual_labels, virtual_id);
                 parent_map.insert(child_id, parent_id);
                 walk(child, parent_map, label_to_id, virtual_labels, virtual_id);
             }

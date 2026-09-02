@@ -10,6 +10,21 @@ use pyo3::prelude::*;
 
 use hotcoco_core::primitives::assign;
 
+use crate::convert::f64_matrix_arg;
+
+/// Reject a cost matrix holding a NaN — an unsolvable matrix is an error
+/// rather than an arbitrary assignment. `lsap`-specific: whether NaN is
+/// meaningful is a property of the assignment problem, not of extracting a
+/// 2-D array, so this stays local rather than living in `f64_matrix_arg`.
+fn check_no_nan(flat: &[f64]) -> PyResult<()> {
+    if flat.iter().any(|v| v.is_nan()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "cost contains NaN; the assignment is undefined",
+        ));
+    }
+    Ok(())
+}
+
 #[pyfunction]
 #[pyo3(
     signature = (cost, maximize=false),
@@ -24,8 +39,11 @@ tracking associates detections to tracks this way, and it is what HOTA and MOTA
 are defined against.
 
 Args:
-    cost: 2D sequence of costs, ``cost[i][j]`` for row ``i`` and column ``j``.
-        Rows need not equal columns; the smaller side bounds the assignment.
+    cost: 2-D ``numpy.ndarray`` of costs, or a nested sequence (list of
+        lists), ``cost[i][j]`` for row ``i`` and column ``j``. Rows need not
+        equal columns; the smaller side bounds the assignment. A ``float64``
+        array is the fast path — it is read in one pass, any strides; other
+        dtypes and nested sequences are converted element by element.
     maximize: Maximize total value instead of minimizing total cost. Pass
         ``True`` when the matrix holds similarities (IoU) rather than costs.
 
@@ -44,27 +62,9 @@ Example:
     >>> list(zip(rows.tolist(), cols.tolist()))   # total cost 1 + 2 + 2 = 5
     [(0, 1), (1, 0), (2, 2)]
 "]
-fn lsap(py: Python<'_>, cost: Vec<Vec<f64>>, maximize: bool) -> PyResult<Py<PyAny>> {
-    let nr = cost.len();
-    let nc = cost.first().map_or(0, Vec::len);
-
-    let mut flat = Vec::with_capacity(nr * nc);
-    for (i, row) in cost.iter().enumerate() {
-        if row.len() != nc {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "cost must be rectangular; row 0 has {nc} columns but row {i} has {}",
-                row.len()
-            )));
-        }
-        for &v in row {
-            if v.is_nan() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "cost contains NaN; the assignment is undefined",
-                ));
-            }
-        }
-        flat.extend_from_slice(row);
-    }
+fn lsap(py: Python<'_>, cost: &Bound<'_, PyAny>, maximize: bool) -> PyResult<Py<PyAny>> {
+    let (flat, nr, nc) = f64_matrix_arg(cost, "cost")?;
+    check_no_nan(&flat)?;
 
     let (rows, cols) = assign::lsap(&flat, nr, nc, maximize);
     // `usize` implements `numpy::Element`, so these go straight out — remapping to

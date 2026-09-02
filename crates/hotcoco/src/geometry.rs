@@ -55,8 +55,8 @@ fn signed_polygon_area(vertices: &[(f64, f64)]) -> f64 {
     area * 0.5
 }
 
-/// Absolute area of a polygon.
-fn polygon_area(vertices: &[(f64, f64)]) -> f64 {
+/// Absolute area of a polygon, via the shoelace formula.
+pub(crate) fn polygon_area(vertices: &[(f64, f64)]) -> f64 {
     signed_polygon_area(vertices).abs()
 }
 
@@ -153,12 +153,22 @@ fn line_intersection(
 ///
 /// Returns `[x, y, w, h]` where `(x, y)` is the top-left corner.
 pub fn obb_to_aabb(obb: &[f64; 5]) -> [f64; 4] {
-    let corners = obb_to_corners(obb);
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for (x, y) in corners {
+    polygon_bbox(&obb_to_corners(obb))
+}
+
+/// Compute the axis-aligned bounding box of a point set as `[x, y, w, h]`,
+/// where `(x, y)` is the top-left corner.
+///
+/// Returns `[0.0, 0.0, 0.0, 0.0]` for an empty slice.
+pub(crate) fn polygon_bbox(points: &[(f64, f64)]) -> [f64; 4] {
+    if points.is_empty() {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+    let mut min_x = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut min_y = f64::MAX;
+    let mut max_y = f64::MIN;
+    for &(x, y) in points {
         min_x = min_x.min(x);
         max_x = max_x.max(x);
         min_y = min_y.min(y);

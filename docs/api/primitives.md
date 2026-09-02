@@ -45,13 +45,13 @@ Optimal one-to-one assignment on a rectangular cost matrix.
 
     ```python
     lsap(
-        cost: Sequence[Sequence[float]], maximize: bool = False
+        cost: numpy.ndarray | Sequence[Sequence[float]], maximize: bool = False
     ) -> tuple[numpy.ndarray, numpy.ndarray]
     ```
 
     | Parameter | Type | Description |
     |-----------|------|-------------|
-    | `cost` | `Sequence[Sequence[float]]` | 2D costs; `cost[i][j]` for row `i`, column `j` |
+    | `cost` | `numpy.ndarray \| Sequence[Sequence[float]]` | 2-D costs; `cost[i][j]` for row `i`, column `j`. A `float64` array is read in one pass; anything else is converted element by element |
     | `maximize` | `bool` | Maximize value instead of minimizing cost. Pass `True` for similarities |
 
 === "Rust"

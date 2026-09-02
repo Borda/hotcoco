@@ -5,25 +5,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from hotcoco._style import fmt_metric
+
 from .core import _f1_peak, _import_mpl, _report_curves, _resolve_font_family
 from .data import PlotData
 from .theme import CHROME, SERIES_COLORS
-
-# ---------------------------------------------------------------------------
-# Metric display helpers
-# ---------------------------------------------------------------------------
-
-
-def _fmt_metric(value, *, digits: int = 3) -> str:
-    """Format one metric value; ``-1.0`` (and any negative) renders as ``n/a``.
-
-    ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a
-    low score — the same rule ``cli._fmt_metric`` applies, so the PDF and the
-    CLI render the same run the same way.
-    """
-    if value is None or value < 0:
-        return "n/a"
-    return f"{value:.{digits}f}"
 
 
 def _metric_math(key: str) -> str:
@@ -243,7 +229,7 @@ def _draw_table_caption(ax, label: str) -> None:
 def _draw_metrics_table(ax, rows, metrics) -> None:
     ax.set_axis_off()
     ax.set_facecolor("none")
-    cell_text = [[_metric_math(name_key), desc, _fmt_metric(metrics.get(mkey))] for name_key, desc, mkey in rows]
+    cell_text = [[_metric_math(name_key), desc, fmt_metric(metrics.get(mkey))] for name_key, desc, mkey in rows]
     tbl = ax.table(cellText=cell_text, colWidths=[0.19, 0.59, 0.22], bbox=[0, 0, 1, 1], cellLoc="left", edges="open")
     tbl.auto_set_font_size(False)
     n = len(rows)
@@ -319,12 +305,12 @@ def _draw_report_pr_curve(ax, recall_pts, pr50, pr75, pr_mean, metrics, f1_peak_
     ax.set_ylabel("Precision", fontsize=6, color=_RC["muted"], labelpad=3)
 
     if is_oid:
-        handles = [_L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{_fmt_metric(metrics.get('AP'))}  AP50")]
+        handles = [_L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{fmt_metric(metrics.get('AP'))}  AP50")]
     else:
         handles = [
-            _L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{_fmt_metric(metrics.get('AP50'))}  AP50"),
-            _L2D([0], [0], color=_RC["pr_75"], lw=1.2, label=f"{_fmt_metric(metrics.get('AP75'))}  AP75"),
-            _L2D([0], [0], color=_RC["pr_mean"], lw=0.9, ls="--", label=f"{_fmt_metric(metrics.get('AP'))}  AP"),
+            _L2D([0], [0], color=_RC["pr_50"], lw=1.5, label=f"{fmt_metric(metrics.get('AP50'))}  AP50"),
+            _L2D([0], [0], color=_RC["pr_75"], lw=1.2, label=f"{fmt_metric(metrics.get('AP75'))}  AP75"),
+            _L2D([0], [0], color=_RC["pr_mean"], lw=0.9, ls="--", label=f"{fmt_metric(metrics.get('AP'))}  AP"),
         ]
     leg = ax.legend(
         handles=handles,
@@ -515,14 +501,14 @@ def _draw_metrics_block(
 
     f1_peak = f1_peak_pt[1] if f1_peak_pt is not None else 0.0
     if is_oid:
-        kpi_data = [(_fmt_metric(metrics.get("AP")), "AP", _RC["pr_50"]), (f"{f1_peak:.3f}", "F1", _RC["text"])]
+        kpi_data = [(fmt_metric(metrics.get("AP")), "AP", _RC["pr_50"]), (f"{f1_peak:.3f}", "F1", _RC["text"])]
     else:
         kpi_data = [
-            (_fmt_metric(metrics.get("AP")), "AP", _RC["pr_mean"]),
-            (_fmt_metric(metrics.get("AP50")), "AP50", _RC["pr_50"]),
+            (fmt_metric(metrics.get("AP")), "AP", _RC["pr_mean"]),
+            (fmt_metric(metrics.get("AP50")), "AP50", _RC["pr_50"]),
         ]
         if ar_kpi_key:
-            kpi_data.append((_fmt_metric(metrics.get(ar_kpi_key)), ar_kpi_key, _RC["pr_75"]))
+            kpi_data.append((fmt_metric(metrics.get(ar_kpi_key)), ar_kpi_key, _RC["pr_75"]))
         kpi_data.append((f"{f1_peak:.3f}", "F1", _RC["text"]))
     gs_kpi = gs_met[2].subgridspec(len(kpi_data), 1, hspace=0.15)
     for i, (val, lbl, vc) in enumerate(kpi_data):

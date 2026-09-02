@@ -213,14 +213,7 @@ def render_thumbnail(
     anns = coco.load_anns(ann_ids)
     for ann in anns:
         color = cat_colors.get(ann["category_id"], (255, 0, 0)) if cat_colors else (255, 0, 0)
-        obb = ann.get("obb")
-        if obb:
-            corners = [(x * sx, y * sy) for x, y in _obb_to_corners(obb)]
-            draw.polygon(corners, outline=color, width=line_width)
-        elif ann.get("bbox"):
-            x, y, w, h = ann["bbox"]
-            x0, y0, x1, y1 = x * sx, y * sy, (x + w) * sx, (y + h) * sy
-            draw.rectangle([x0, y0, x1, y1], outline=color, width=line_width)
+        _draw_ann_outline(draw, ann, sx, sy, color, dashed=False, width=line_width)
 
     # DT annotations — dashed outlines (OBB as rotated polygon, else AABB)
     if dt_coco is not None:
@@ -231,16 +224,32 @@ def render_thumbnail(
             if score < score_thr:
                 continue
             color = _lighten_color(cat_colors.get(ann["category_id"], (255, 0, 0))) if cat_colors else (200, 200, 255)
-            obb = ann.get("obb")
-            if obb:
-                corners = [(x * sx, y * sy) for x, y in _obb_to_corners(obb)]
-                _draw_dashed_polygon(draw, corners, color, width=line_width, dash_len=6)
-            elif ann.get("bbox"):
-                x, y, w, h = ann["bbox"]
-                x0, y0, x1, y1 = x * sx, y * sy, (x + w) * sx, (y + h) * sy
-                _draw_dashed_rect(draw, x0, y0, x1, y1, color, width=line_width, dash_len=6)
+            _draw_ann_outline(draw, ann, sx, sy, color, dashed=True, width=line_width, dash_len=6)
 
     return img
+
+
+def _draw_ann_outline(draw, ann, sx, sy, color, dashed, width=2, dash_len=6):
+    """Draw one annotation's outline, scaled by ``(sx, sy)``.
+
+    OBB annotations draw as a rotated polygon; everything else falls back to
+    the axis-aligned bbox. ``dashed`` selects the stroke style — solid for
+    ground truth, dashed for detections.
+    """
+    obb = ann.get("obb")
+    if obb:
+        corners = [(x * sx, y * sy) for x, y in _obb_to_corners(obb)]
+        if dashed:
+            _draw_dashed_polygon(draw, corners, color, width=width, dash_len=dash_len)
+        else:
+            draw.polygon(corners, outline=color, width=width)
+    elif ann.get("bbox"):
+        x, y, w, h = ann["bbox"]
+        x0, y0, x1, y1 = x * sx, y * sy, (x + w) * sx, (y + h) * sy
+        if dashed:
+            _draw_dashed_rect(draw, x0, y0, x1, y1, color, width=width, dash_len=dash_len)
+        else:
+            draw.rectangle([x0, y0, x1, y1], outline=color, width=width)
 
 
 def _draw_dashed_rect(draw, x0, y0, x1, y1, color, width=2, dash_len=6):

@@ -12,7 +12,7 @@ import numpy as np
 import numpy.typing as npt
 
 def lsap(
-    cost: Sequence[Sequence[float]], maximize: bool = False
+    cost: npt.NDArray[np.float64] | Sequence[Sequence[float]], maximize: bool = False
 ) -> tuple[npt.NDArray[np.uint64], npt.NDArray[np.uint64]]: ...
 def bbox_iou(
     dt: Sequence[Sequence[float]], gt: Sequence[Sequence[float]], iscrowd: Sequence[bool]

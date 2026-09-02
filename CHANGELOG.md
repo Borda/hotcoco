@@ -5,10 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - 2026-08-17
+## [Unreleased]
 
 ### Added
 
+- **`primitives.lsap` reads numpy arrays natively.** A `float64` ndarray — any
+  strides, so C-order, Fortran-order, a transposed or sliced view — is read in a
+  single pass instead of one boxed extraction per element; other dtypes and
+  nested sequences take the element-wise path as before, with the same results
+  and the same `ValueError` on NaN. The stub and the API page now spell the
+  parameter `numpy.ndarray | Sequence[Sequence[float]]`.
+- **`convert::IMAGE_EXTENSIONS`** (Rust) — the one list of image file
+  extensions the converters and the Python `read_image_dims` fallback try when
+  a bare stem has no direct hit.
 - **`STYLE.md`** — the documentation style authority. hotcoco now follows the
   [Google developer documentation style guide](https://developers.google.com/style);
   `STYLE.md` records the rules that come up most (sentence-case headings, no
@@ -197,7 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   boundary fixtures, including bootstrap confidence intervals.
 
   Bootstrap CIs (`metrics::bootstrap::bootstrap_ci`) and greedy matching
-  (`primitives::greedy::greedy_match`) are Rust-only for now — see
+  (`primitives::greedy::greedy_match_masked`) are Rust-only for now — see
   [the API reference](https://derekallman.github.io/hotcoco/api/metrics/) for why.
 
 - `hotcoco.detection` — the first metric-family namespace, exposing `COCOeval`,
@@ -278,6 +287,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`COCOeval.eval` is the same dict object on every access**, as in
+  pycocotools, rather than a fresh copy per read. In-place edits persist across
+  reads; `summarize()`, `stats`, and `results()` read the evaluator's own
+  arrays and do not see them. `eval['params']` is the `params` object
+  `accumulate()` ran with, held by reference the way pycocotools holds
+  `self.params`, so `ev.eval['params'] is ev.params`. The dict is rebuilt by
+  `evaluate()`, `accumulate()`, and `run()`.
+- **TIDE's classification and miss-count passes run in parallel**, and the
+  per-category delta pass reuses one set of AP scratch buffers across the
+  eight ranked-AP evaluations each category needs instead of allocating per
+  call: 2.30 s → 1.44 s on Objects365, results bit-identical, with a test
+  pinning that the rayon thread count does not change the numbers.
 - **The top-level copy defines hotcoco as a perception evaluation toolkit, in plain
   words.** README, the docs home page, and `help(hotcoco)` now open on what the
   toolkit is and does — "hotcoco is a perception evaluation toolkit, written in Rust
@@ -708,9 +729,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `primitives::greedy::greedy_match_masked`**, whose `GtMasks` names the two
   per-GT policy masks. Both sites previously used the positional `greedy_match`,
   where the adjacent `Option<&[bool]>` arguments transpose silently — so the type
-  that exists to prevent that mix-up had no callers. `greedy_match` remains public
-  and delegates; it is a wrapper, so the switch is allocation- and
-  result-identical, verified by val2017 parity.
+  that exists to prevent that mix-up had no callers. The switch is allocation-
+  and result-identical, verified by val2017 parity; the positional wrapper is
+  gone (see Removed).
 
 ### Fixed
 
@@ -1055,8 +1076,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the detection `evaluate()` path (including the Open Images group-of pass) clamps;
   TIDE does not, because its parity contract is *tidecv* rather than pycocotools;
   and the confusion matrix, per-image diagnostics, and calibration do not, because
-  they are hotcoco-native analysis over a user-chosen threshold. `greedy_match`
-  itself still adds no epsilon of its own — the clamp remains caller-applied.
+  they are hotcoco-native analysis over a user-chosen threshold.
+  `greedy_match_masked` itself adds no epsilon of its own — the clamp remains
+  caller-applied.
 
 - **Per-class AP and F-scores could read the wrong maxDets slice.** With unsorted
   `max_dets` (e.g. `[100, 10, 1]`), `report()["per_class"]`, `compare()`'s
@@ -1123,6 +1145,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **`primitives::greedy::greedy_match`** (Rust), the positional wrapper around
+  `greedy_match_masked`. Its two adjacent `Option<&[bool]>` arguments transpose
+  silently, which is why `GtMasks` exists; once both callers moved to the masked
+  form the wrapper had no callers and no reason to stay. Nothing in the Python
+  API changes.
 - **`hotcoco.eval_index`** — a deprecated shim with zero callers, removed before
   1.0 froze it.
 

@@ -32,7 +32,7 @@ fn read_image_dims(py: Python<'_>, dir: &str) -> PyResult<HashMap<String, (u32, 
         pyo3::exceptions::PyIOError::new_err(format!("cannot read images_dir: {e}"))
     })?;
 
-    let img_exts = ["jpg", "jpeg", "png", "bmp", "tif", "tiff"];
+    let img_exts = hotcoco_core::convert::IMAGE_EXTENSIONS;
     let mut image_dims: HashMap<String, (u32, u32)> = HashMap::new();
 
     for entry in read_dir.flatten() {
@@ -1580,6 +1580,17 @@ struct PyCOCOeval {
     /// used in its own demo) must configure the run, not mutate a temporary.
     /// `with_params` copies this object's state into `inner` before evaluation.
     params: Py<PyParams>,
+    /// Cache for the `.eval` dict built by `get_eval` — pycocotools exposes
+    /// `.eval` as an O(1) plain-attribute read, so rebuilding it (cloning the
+    /// precision/recall/scores arrays, ~7.8MB each on val2017) on every access
+    /// would be needlessly expensive. Invalidated by `evaluate()`,
+    /// `accumulate()`, and `run()` — the only methods that change what
+    /// `self.inner.accumulated()` returns.
+    eval_cache: Option<Py<PyAny>>,
+    /// The `params` object in force when `accumulate()` last ran — what
+    /// `eval['params']` holds, by reference, the way pycocotools stores
+    /// `self.params` into `self.eval`.
+    eval_params: Option<Py<PyParams>>,
 }
 
 impl PyCOCOeval {
@@ -1693,11 +1704,17 @@ impl PyCOCOeval {
                 },
             )
         })?;
-        Ok(PyCOCOeval { inner, params })
+        Ok(PyCOCOeval {
+            inner,
+            params,
+            eval_cache: None,
+            eval_params: None,
+        })
     }
 
     fn evaluate(&mut self, py: Python<'_>) {
         self.with_params(py, |ev| py.detach(|| ev.evaluate()));
+        self.eval_cache = None;
     }
 
     fn accumulate(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -1709,6 +1726,8 @@ impl PyCOCOeval {
             )?;
         }
         self.with_params(py, |ev| py.detach(|| ev.accumulate()));
+        self.eval_cache = None;
+        self.eval_params = Some(self.params.clone_ref(py));
         Ok(())
     }
 
@@ -1768,6 +1787,8 @@ Equivalent to calling the three methods in sequence. Primarily used with
 LVIS pipelines (Detectron2, MMDetection) that expect a single ``run()`` call."]
     fn run(&mut self, py: Python<'_>) {
         self.with_params(py, |ev| py.detach(|| ev.run()));
+        self.eval_cache = None;
+        self.eval_params = Some(self.params.clone_ref(py));
     }
 
     #[getter]
@@ -2141,6 +2162,10 @@ Examples
                 inner: params.inner.clone(),
             },
         )?;
+        // Deliberately does not invalidate `eval_cache`: `eval['params']` holds
+        // the object `accumulate()` ran with (`eval_params`), as pycocotools
+        // does, so a reassigned `params` only takes effect on the next
+        // evaluate()/accumulate().
         Ok(())
     }
 
@@ -2166,9 +2191,33 @@ Examples
         self.eval_imgs(py)
     }
 
+    /// The accumulated results — pycocotools semantics: a plain dict attribute,
+    /// so the same object comes back on every access and in-place edits
+    /// persist across reads. ``summarize()``, ``stats``, and ``results()``
+    /// read the evaluator's own arrays, not this dict, so an edit here does
+    /// not change the reported metrics. ``eval['params']`` is the ``params``
+    /// object ``accumulate()`` ran with, held by reference as pycocotools
+    /// holds ``self.params``. Rebuilt (and any prior in-place edits discarded)
+    /// by ``evaluate()``, ``accumulate()``, and ``run()``.
     #[getter(eval)]
-    fn get_eval(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        accumulated_eval_to_py(py, self.inner.accumulated(), &self.inner.params)
+    fn get_eval(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(cached) = &self.eval_cache {
+            return Ok(cached.clone_ref(py));
+        }
+        let params = match &self.eval_params {
+            Some(p) => p.clone_ref(py),
+            // `accumulate()` and `run()` always set `eval_params`; this only
+            // covers a future mutation path that forgets to.
+            None => Py::new(
+                py,
+                PyParams {
+                    inner: self.inner.params.clone(),
+                },
+            )?,
+        };
+        let built = accumulated_eval_to_py(py, self.inner.accumulated(), params)?;
+        self.eval_cache = Some(built.clone_ref(py));
+        Ok(built)
     }
 
     #[doc = "Compute a per-category confusion matrix across all images.
@@ -2620,7 +2669,7 @@ fn eval_img_to_py(py: Python<'_>, e: &hotcoco_core::EvalImg) -> PyResult<Py<PyAn
 fn accumulated_eval_to_py(
     py: Python<'_>,
     eval: Option<&hotcoco_core::AccumulatedEval>,
-    params: &hotcoco_core::Params,
+    params: Py<PyParams>,
 ) -> PyResult<Py<PyAny>> {
     match eval {
         None => Ok(py.None()),
@@ -2630,15 +2679,10 @@ fn accumulated_eval_to_py(
             // Key order mirrors pycocotools' COCOeval.eval dict for drop-in fidelity:
             // params, counts, date, precision, recall, scores.
 
-            // `params`: the Params object actually used, matching pycocotools which
-            // stores `self.params` here (not a serialized copy).
-            let py_params = Py::new(
-                py,
-                PyParams {
-                    inner: params.clone(),
-                },
-            )?;
-            dict.set_item("params", py_params)?;
+            // `params`: the Params object the evaluator ran with, by reference —
+            // pycocotools stores `self.params` here, not a copy, so
+            // `ev.eval['params'] is ev.params` and attribute edits show through.
+            dict.set_item("params", params)?;
 
             let counts = vec![e.shape.t, e.shape.r, e.shape.k, e.shape.a, e.shape.m];
             dict.set_item("counts", counts)?;

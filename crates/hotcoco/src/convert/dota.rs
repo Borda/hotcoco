@@ -43,11 +43,7 @@ pub fn coco_to_dota(dataset: &Dataset, output_dir: &Path) -> Result<DotaStats, C
     super::check_unique_stems(dataset)?;
     fs::create_dir_all(output_dir)?;
 
-    let cat_map: HashMap<u64, &str> = dataset
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
+    let cat_map = crate::types::cat_id_to_name(dataset);
 
     let grouped = anns_by_image(dataset);
     let mut stats = DotaStats::default();

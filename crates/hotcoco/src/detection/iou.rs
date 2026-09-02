@@ -128,6 +128,49 @@ fn scatter_full(
     full
 }
 
+/// Shared scaffold behind `compute_{bbox,segm,obb}_iou_static`.
+///
+/// Each of those three does the same four things: pull a detection's geometry
+/// by id (dropping the ones with none, remembering which rows survived),
+/// pull a ground truth's annotation *and* geometry by id (same drop-and-remember,
+/// plus [`uses_ioa`] since that's a property of the annotation, not the
+/// geometry), hand the two dense geometry lists to a `sim::*_iou` kernel, and
+/// [`scatter_full`] the kernel's valid-only output back to `d × g`. Only the
+/// geometry type and the extraction closures differ per family, so those are
+/// the type parameters and the arguments; the marshaling itself lives here once.
+fn iou_scaffold<D, G>(
+    coco_gt: &COCO,
+    dt_ids: &[u64],
+    gt_ids: &[u64],
+    eval_mode: EvalMode,
+    dt_geom: impl Fn(u64) -> Option<D>,
+    gt_geom: impl Fn(&crate::types::Annotation, u64) -> Option<G>,
+    kernel: impl FnOnce(&[D], &[G], &[bool]) -> Vec<Vec<f64>>,
+) -> Vec<Vec<f64>> {
+    let (dt_rows, dt_geoms): (Vec<usize>, Vec<D>) = dt_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &id)| Some((idx, dt_geom(id)?)))
+        .unzip();
+    let mut gt_cols = Vec::with_capacity(gt_ids.len());
+    let mut gt_geoms = Vec::with_capacity(gt_ids.len());
+    let mut iscrowd = Vec::with_capacity(gt_ids.len());
+    for (idx, &id) in gt_ids.iter().enumerate() {
+        let Some(ann) = coco_gt.get_ann(id) else {
+            continue;
+        };
+        let Some(geom) = gt_geom(ann, id) else {
+            continue;
+        };
+        gt_cols.push(idx);
+        gt_geoms.push(geom);
+        iscrowd.push(uses_ioa(ann, eval_mode));
+    }
+
+    let valid = kernel(&dt_geoms, &gt_geoms, &iscrowd);
+    scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
+}
+
 impl COCOeval {
     /// Compute the IoU/OKS matrix for a given image and category.
     ///
@@ -199,30 +242,15 @@ impl COCOeval {
         eval_mode: EvalMode,
         segm_rles: Option<&SegmRles>,
     ) -> Vec<Vec<f64>> {
-        let (dt_rows, dt_rles): (Vec<usize>, Vec<Rle>) = dt_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, &id)| {
-                Some((idx, SegmRles::dt_rle_or_convert(segm_rles, coco_dt, id)?))
-            })
-            .unzip();
-        let mut gt_cols = Vec::with_capacity(gt_ids.len());
-        let mut gt_rles = Vec::with_capacity(gt_ids.len());
-        let mut iscrowd = Vec::with_capacity(gt_ids.len());
-        for (idx, &id) in gt_ids.iter().enumerate() {
-            let Some(ann) = coco_gt.get_ann(id) else {
-                continue;
-            };
-            let Some(rle) = SegmRles::gt_rle_or_convert(segm_rles, coco_gt, id) else {
-                continue;
-            };
-            gt_cols.push(idx);
-            gt_rles.push(rle);
-            iscrowd.push(uses_ioa(ann, eval_mode));
-        }
-
-        let valid = sim::mask_iou(&dt_rles, &gt_rles, &iscrowd);
-        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
+        iou_scaffold(
+            coco_gt,
+            dt_ids,
+            gt_ids,
+            eval_mode,
+            |id| SegmRles::dt_rle_or_convert(segm_rles, coco_dt, id),
+            |_ann, id| SegmRles::gt_rle_or_convert(segm_rles, coco_gt, id),
+            sim::mask_iou,
+        )
     }
 
     /// Compute bounding box IoU by extracting bbox arrays and calling `sim::bbox_iou`.
@@ -233,28 +261,15 @@ impl COCOeval {
         gt_ids: &[u64],
         eval_mode: EvalMode,
     ) -> Vec<Vec<f64>> {
-        let (dt_rows, dt_bbs): (Vec<usize>, Vec<[f64; 4]>) = dt_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, &id)| Some((idx, coco_dt.get_ann(id)?.bbox?)))
-            .unzip();
-        let mut gt_cols = Vec::with_capacity(gt_ids.len());
-        let mut gt_bbs = Vec::with_capacity(gt_ids.len());
-        let mut iscrowd = Vec::with_capacity(gt_ids.len());
-        for (idx, &id) in gt_ids.iter().enumerate() {
-            let Some(ann) = coco_gt.get_ann(id) else {
-                continue;
-            };
-            let Some(bb) = ann.bbox else {
-                continue;
-            };
-            gt_cols.push(idx);
-            gt_bbs.push(bb);
-            iscrowd.push(uses_ioa(ann, eval_mode));
-        }
-
-        let valid = sim::bbox_iou(&dt_bbs, &gt_bbs, &iscrowd);
-        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
+        iou_scaffold(
+            coco_gt,
+            dt_ids,
+            gt_ids,
+            eval_mode,
+            |id| coco_dt.get_ann(id)?.bbox,
+            |ann, _id| ann.bbox,
+            sim::bbox_iou,
+        )
     }
 
     /// Compute OKS (Object Keypoint Similarity) between detection and GT keypoints.
@@ -312,27 +327,14 @@ impl COCOeval {
         gt_ids: &[u64],
         eval_mode: EvalMode,
     ) -> Vec<Vec<f64>> {
-        let (dt_rows, dt_obbs): (Vec<usize>, Vec<[f64; 5]>) = dt_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, &id)| Some((idx, coco_dt.get_ann(id)?.obb?)))
-            .unzip();
-        let mut gt_cols = Vec::with_capacity(gt_ids.len());
-        let mut gt_obbs = Vec::with_capacity(gt_ids.len());
-        let mut iscrowd = Vec::with_capacity(gt_ids.len());
-        for (idx, &id) in gt_ids.iter().enumerate() {
-            let Some(ann) = coco_gt.get_ann(id) else {
-                continue;
-            };
-            let Some(obb) = ann.obb else {
-                continue;
-            };
-            gt_cols.push(idx);
-            gt_obbs.push(obb);
-            iscrowd.push(uses_ioa(ann, eval_mode));
-        }
-
-        let valid = sim::obb_iou(&dt_obbs, &gt_obbs, &iscrowd);
-        scatter_full(valid, &dt_rows, &gt_cols, dt_ids.len(), gt_ids.len())
+        iou_scaffold(
+            coco_gt,
+            dt_ids,
+            gt_ids,
+            eval_mode,
+            |id| coco_dt.get_ann(id)?.obb,
+            |ann, _id| ann.obb,
+            sim::obb_iou,
+        )
     }
 }

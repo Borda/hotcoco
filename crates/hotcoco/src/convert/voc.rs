@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::path::Path;
@@ -53,11 +53,7 @@ pub fn coco_to_voc(dataset: &Dataset, output_dir: &Path) -> Result<VocStats, Con
     let ann_dir = output_dir.join("Annotations");
     fs::create_dir_all(&ann_dir)?;
 
-    let cat_name: HashMap<u64, &str> = dataset
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
+    let cat_name = crate::types::cat_id_to_name(dataset);
 
     let anns_by_image = super::anns_by_image(dataset);
 
@@ -256,8 +252,7 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
         })
         .collect();
 
-    let name_to_id: HashMap<&str, u64> =
-        categories.iter().map(|c| (c.name.as_str(), c.id)).collect();
+    let name_to_id = crate::types::cat_name_to_id(&categories);
 
     let mut images: Vec<Image> = Vec::new();
     let mut annotations: Vec<Annotation> = Vec::new();
@@ -311,7 +306,7 @@ pub fn voc_to_coco(voc_dir: &Path) -> Result<Dataset, ConvertError> {
 
 // ── Internal types ───────────────────────────────────────────────────────────
 
-use super::write_text_element;
+use super::{at_byte, write_text_element};
 
 struct ParsedVocImage {
     filename: String,
@@ -477,18 +472,6 @@ fn parse_voc_xml<R: std::io::BufRead>(reader: R) -> Result<ParsedVocImage, Conve
         height: fields.height,
         objects,
     })
-}
-
-/// Attach the reader's byte offset to a parse error — XML carries no line
-/// numbers a streaming reader can cheaply report, but a byte position still
-/// pins the failing element.
-fn at_byte(err: ConvertError, pos: u64) -> ConvertError {
-    match err {
-        ConvertError::ParseError(msg) => {
-            ConvertError::ParseError(format!("near byte {pos}: {msg}"))
-        }
-        other => other,
-    }
 }
 
 /// Route one text node to the field its position names.

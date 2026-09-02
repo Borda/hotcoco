@@ -17,6 +17,8 @@ Usage:
     coco convert --from oid --to coco --input <csv> --output <file> [--class-descriptions <csv>]
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import json as json_mod
@@ -25,7 +27,7 @@ import sys
 import textwrap
 from typing import NoReturn
 
-from hotcoco._style import Spinner, Timer, dim, error, green, red, section, status, warning, yellow
+from hotcoco._style import Spinner, Timer, dim, error, fmt_metric, green, red, section, status, warning, yellow
 
 
 def _table(columns, rows, footer=None):
@@ -55,18 +57,6 @@ def _table(columns, rows, footer=None):
         print("  " + "  ".join("─" * w for w in widths))
         for row in footer:
             print(fmt_row(row))
-
-
-def _fmt_metric(value, *, digits: int = 3) -> str:
-    """Format one metric cell.
-
-    ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a low
-    score — printing it as ``-1.000`` invites reading it as a number. Every table
-    that prints a metric goes through here so they render it the same way.
-    """
-    if value is None or value < 0:
-        return "n/a"
-    return f"{value:.{digits}f}"
 
 
 def _print_findings(findings, *, tag: str, color, show_ids: bool = True, stream=None) -> None:
@@ -203,10 +193,33 @@ def _load_res(coco, path, *, quiet: bool = False, reraise: bool = False):
         sys.exit(1)
 
 
+def _counts(coco) -> dict:
+    """Return ``{"images": n, "annotations": n}`` for a loaded COCO dataset."""
+    return {"images": len(coco.dataset["images"]), "annotations": len(coco.dataset["annotations"])}
+
+
+def _report_before_after(args, *, verb: str, before: dict, after: dict, elapsed: float | None = None):
+    """Report a transform's image/annotation counts, before and after.
+
+    Returns the JSON dict when ``args.json``; otherwise prints the styled
+    status line plus the before/after counts and returns ``None``. ``before``
+    and ``after`` are ``{"images": n, "annotations": n}`` dicts. ``elapsed``
+    is passed straight to :func:`status`, so omitting it omits the timing.
+    Reads the source path from ``args.annotation_file``.
+    """
+    if args.json:
+        return {"before": before, "after": after, "output": args.output}
+
+    status(
+        verb, f"{dim(os.path.basename(args.annotation_file))} → {dim(os.path.basename(args.output))}", elapsed=elapsed
+    )
+    print(f"  before: {before['images']:,} images, {before['annotations']:,} annotations")
+    print(f"  after:  {after['images']:,} images, {after['annotations']:,} annotations")
+
+
 def cmd_filter(args):
     coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
-    n_imgs_before = len(coco.dataset["images"])
-    n_anns_before = len(coco.dataset["annotations"])
+    before = _counts(coco)
 
     cat_ids = [int(x) for x in args.cat_ids.split(",")] if args.cat_ids else None
     img_ids = [int(x) for x in args.img_ids.split(",")] if args.img_ids else None
@@ -223,23 +236,7 @@ def cmd_filter(args):
         result = coco.filter(cat_ids=cat_ids, img_ids=img_ids, area_rng=area_rng, drop_empty_images=drop_empty)
     result.save(args.output)
 
-    n_imgs_after = len(result.dataset["images"])
-    n_anns_after = len(result.dataset["annotations"])
-
-    if args.json:
-        return {
-            "before": {"images": n_imgs_before, "annotations": n_anns_before},
-            "after": {"images": n_imgs_after, "annotations": n_anns_after},
-            "output": args.output,
-        }
-
-    status(
-        "Filtered",
-        f"{dim(os.path.basename(args.annotation_file))} → {dim(os.path.basename(args.output))}",
-        elapsed=t.elapsed,
-    )
-    print(f"  before: {n_imgs_before:,} images, {n_anns_before:,} annotations")
-    print(f"  after:  {n_imgs_after:,} images, {n_anns_after:,} annotations")
+    return _report_before_after(args, verb="Filtered", before=before, after=_counts(result), elapsed=t.elapsed)
 
 
 def cmd_merge(args):
@@ -264,10 +261,7 @@ def cmd_merge(args):
 
     if args.json:
         return {
-            "inputs": [
-                {"file": f, "images": len(c.dataset["images"]), "annotations": len(c.dataset["annotations"])}
-                for f, c in zip(args.files, cocos)
-            ],
+            "inputs": [{"file": f, **_counts(c)} for f, c in zip(args.files, cocos)],
             "output": {"file": args.output, "images": n_imgs_out, "annotations": n_anns_out},
         }
 
@@ -367,7 +361,7 @@ def cmd_eval(args):
                 cells = [name, f"{sr['num_images']:,}"]
                 for km in key_metrics:
                     val = sr.get(km, -1.0)
-                    cell = _fmt_metric(val)
+                    cell = fmt_metric(val)
                     if val >= 0:
                         delta = sr.get("delta", {}).get(km, 0.0)
                         sign = "+" if delta >= 0 else ""
@@ -378,7 +372,7 @@ def cmd_eval(args):
             ov = slices_result["_overall"]
             ov_cells = ["_overall", f"{ov['num_images']:,}"]
             for km in key_metrics:
-                ov_cells.append(_fmt_metric(ov.get(km, -1.0)))
+                ov_cells.append(fmt_metric(ov.get(km, -1.0)))
             rows.append(ov_cells)
 
             _table(cols, rows)
@@ -781,25 +775,12 @@ def cmd_sample(args):
         sys.exit(1)
 
     coco = _load_coco(args.annotation_file, quiet=args.json, reraise=args.json)
-    n_imgs_before = len(coco.dataset["images"])
-    n_anns_before = len(coco.dataset["annotations"])
+    before = _counts(coco)
 
     result = coco.sample(n=n, frac=frac, seed=args.seed)
     result.save(args.output)
 
-    n_imgs_after = len(result.dataset["images"])
-    n_anns_after = len(result.dataset["annotations"])
-
-    if args.json:
-        return {
-            "before": {"images": n_imgs_before, "annotations": n_anns_before},
-            "after": {"images": n_imgs_after, "annotations": n_anns_after},
-            "output": args.output,
-        }
-
-    status("Sampled", f"{dim(os.path.basename(args.annotation_file))} → {dim(os.path.basename(args.output))}")
-    print(f"  before: {n_imgs_before:,} images, {n_anns_before:,} annotations")
-    print(f"  after:  {n_imgs_after:,} images, {n_anns_after:,} annotations")
+    return _report_before_after(args, verb="Sampled", before=before, after=_counts(result))
 
 
 def cmd_compare(args):
@@ -853,7 +834,7 @@ def cmd_compare(args):
         val_b = result["metrics_b"].get(key, -1.0)
         delta = result["deltas"].get(key, 0.0)
         sign = "+" if delta >= 0 else ""
-        cells = [key, _fmt_metric(val_a), _fmt_metric(val_b), f"{sign}{delta:.3f}"]
+        cells = [key, fmt_metric(val_a), fmt_metric(val_b), f"{sign}{delta:.3f}"]
         if has_ci:
             ci = result["ci"].get(key)
             if ci:
@@ -881,14 +862,14 @@ def cmd_compare(args):
             cat_cols = [("Category", "<"), (name_a, ">"), (name_b, ">"), ("Delta", ">")]
             cat_rows = []
             for c in regressions:
-                ap_a, ap_b = _fmt_metric(c["ap_a"]), _fmt_metric(c["ap_b"])
+                ap_a, ap_b = fmt_metric(c["ap_a"]), fmt_metric(c["ap_b"])
                 cat_rows.append([c["cat_name"], ap_a, ap_b, f"{c['delta']:+.3f}  {red('↓')}"])
 
             if regressions and improvements:
                 cat_rows.append(["···", "", "", ""])
 
             for c in reversed(improvements):
-                ap_a, ap_b = _fmt_metric(c["ap_a"]), _fmt_metric(c["ap_b"])
+                ap_a, ap_b = fmt_metric(c["ap_a"]), fmt_metric(c["ap_b"])
                 cat_rows.append([c["cat_name"], ap_a, ap_b, f"{c['delta']:+.3f}  {green('↑')}"])
 
             _table(cat_cols, cat_rows)

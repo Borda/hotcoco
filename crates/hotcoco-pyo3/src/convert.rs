@@ -1,5 +1,5 @@
 use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Image, Rle, Segmentation};
-use numpy::{PyArray1, PyArrayMethods};
+use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
@@ -529,6 +529,24 @@ pub fn f64_array<D: numpy::ndarray::IntoDimension>(
     Ok(arr.reshape(dims)?.into_any().unbind())
 }
 
+/// A `Vec<Vec<f64>>` of uniform-length rows, flattened and reshaped to `dims`
+/// in one step.
+///
+/// The single owner of the flatten for `iou`/`bbox_iou`-shaped kernels,
+/// which produce a `D`-row, `G`-column `Vec<Vec<f64>>`. Call this rather
+/// than flattening at the call site before [`f64_array`].
+pub fn f64_matrix<D: numpy::ndarray::IntoDimension>(
+    py: Python<'_>,
+    rows: &[Vec<f64>],
+    dims: D,
+) -> PyResult<Py<PyAny>> {
+    let mut flat = Vec::with_capacity(rows.iter().map(Vec::len).sum());
+    for row in rows {
+        flat.extend_from_slice(row);
+    }
+    f64_array(py, flat, dims)
+}
+
 /// A key-value map as a Python dict.
 ///
 /// Eight sites hand-rolled the same three lines — `PyDict::new`, a `for` over a
@@ -588,6 +606,47 @@ pub fn bool_vec(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<bool>> {
             "{name} must be a sequence of bools or a 1-D numpy bool array"
         ))
     })
+}
+
+/// A 2-D float argument — the 2-D member of the [`f64_vec`]/[`bool_vec`]
+/// family: numpy `float64` in one copy, a nested sequence (list of lists,
+/// tuple of tuples, ...) otherwise, with a named `TypeError` on either
+/// failing. Returns a row-major `(flat, nr, nc)` triple, matching
+/// `assign::lsap`'s contract even for a Fortran-order or otherwise strided
+/// numpy input, since `.as_array().iter()` always yields row-major order.
+///
+/// A nested sequence gets an additional rectangularity check: mismatched row
+/// lengths raise `ValueError`, not `TypeError` — the type is right, the shape
+/// isn't. Callers that also need to reject NaN (as `lsap` does) check that
+/// locally; whether NaN is meaningful is caller-specific, not a property of
+/// extracting a 2-D array.
+pub fn f64_matrix_arg(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<(Vec<f64>, usize, usize)> {
+    if let Ok(arr) = obj.extract::<numpy::PyReadonlyArray2<f64>>() {
+        let shape = arr.shape();
+        let (nr, nc) = (shape[0], shape[1]);
+        let flat: Vec<f64> = arr.as_array().iter().copied().collect();
+        return Ok((flat, nr, nc));
+    }
+
+    let rows: Vec<Vec<f64>> = obj.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "{name} must be a 2-D sequence of floats or a 2-D numpy array"
+        ))
+    })?;
+    let nr = rows.len();
+    let nc = rows.first().map_or(0, Vec::len);
+
+    let mut flat = Vec::with_capacity(nr * nc);
+    for (i, row) in rows.iter().enumerate() {
+        if row.len() != nc {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{name} must be rectangular; row 0 has {nc} columns but row {i} has {}",
+                row.len()
+            )));
+        }
+        flat.extend_from_slice(row);
+    }
+    Ok((flat, nr, nc))
 }
 
 /// An id-list argument read the way pycocotools' `_isArrayLike` reads it: a

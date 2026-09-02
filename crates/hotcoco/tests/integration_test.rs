@@ -5428,6 +5428,109 @@ fn evaluation_is_independent_of_thread_count() {
     }
 }
 
+/// `tide_errors` must be independent of the rayon thread count, bitwise, even
+/// with tied detection scores spanning multiple images and categories.
+///
+/// This guards the ordering invariant `tide.rs`'s `Classified::merge` and
+/// `classify_detections` doc comments describe: rayon's fold/reduce always
+/// merges a `self` covering the earlier contiguous range of `cells` with an
+/// `other` covering the later range, which is what keeps
+/// `CatData::rank_by_score_desc`'s stable sort tie-breaking equal to a
+/// sequential pass no matter how many threads did the work. Every detection
+/// below shares its score with another detection in the same category (0.5
+/// within category 1, 0.7 within category 2), and the tied detections
+/// disagree on match outcome (TP vs. the background FP at image 3 / image 4)
+/// — so a tie-break that silently reordered under a different thread count
+/// would move a TP relative to an FP and change the resulting AP outright,
+/// not just perturb its last bit by chance. Category 1 also carries an
+/// uncovered ground truth (image 7 has none of the tied detections, so it is
+/// a genuine Miss), which exercises the `ApScratch` buffers the Miss fix
+/// reuses.
+#[test]
+fn tide_errors_is_deterministic_across_thread_counts_with_tied_scores() {
+    fn build_gt() -> COCO {
+        COCO::from_dataset(dataset(
+            (1..=7).map(img).collect(),
+            vec![cat(1, "cat1"), cat(2, "cat2")],
+            vec![
+                ann(1, [0.0, 0.0, 50.0, 50.0]).in_img(1).in_cat(1),
+                ann(2, [0.0, 0.0, 50.0, 50.0]).in_img(3).in_cat(1),
+                ann(3, [0.0, 0.0, 50.0, 50.0]).in_img(5).in_cat(1),
+                // No detection lands in image 7 at all — a genuine Miss.
+                ann(4, [0.0, 0.0, 50.0, 50.0]).in_img(7).in_cat(1),
+                ann(5, [0.0, 0.0, 50.0, 50.0]).in_img(2).in_cat(2),
+                ann(6, [0.0, 0.0, 50.0, 50.0]).in_img(4).in_cat(2),
+                ann(7, [0.0, 0.0, 50.0, 50.0]).in_img(6).in_cat(2),
+            ],
+        ))
+    }
+
+    fn build_dt() -> COCO {
+        COCO::from_dataset(dataset(
+            (1..=7).map(img).collect(),
+            vec![cat(1, "cat1"), cat(2, "cat2")],
+            vec![
+                // Category 1, all tied at score 0.5: TP, FP (background), TP.
+                det(101, [0.0, 0.0, 50.0, 50.0], 0.5).in_img(1).in_cat(1),
+                det(102, [200.0, 200.0, 10.0, 10.0], 0.5)
+                    .in_img(3)
+                    .in_cat(1),
+                det(103, [0.0, 0.0, 50.0, 50.0], 0.5).in_img(5).in_cat(1),
+                // Category 2, all tied at score 0.7: TP, FP (background), TP.
+                det(104, [0.0, 0.0, 50.0, 50.0], 0.7).in_img(2).in_cat(2),
+                det(105, [300.0, 300.0, 10.0, 10.0], 0.7)
+                    .in_img(4)
+                    .in_cat(2),
+                det(106, [0.0, 0.0, 50.0, 50.0], 0.7).in_img(6).in_cat(2),
+            ],
+        ))
+    }
+
+    fn tide_on(threads: usize) -> hotcoco::TideErrors {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool");
+        pool.install(|| {
+            let mut ev = COCOeval::new(build_gt(), build_dt(), IouType::Bbox);
+            ev.evaluate();
+            ev.tide_errors(0.5, 0.1).expect("tide_errors failed")
+        })
+    }
+
+    let baseline = tide_on(1);
+    for threads in [2usize, 4] {
+        let many = tide_on(threads);
+
+        assert_eq!(
+            baseline.ap_base.to_bits(),
+            many.ap_base.to_bits(),
+            "ap_base differs between 1 thread ({}) and {threads} threads ({})",
+            baseline.ap_base,
+            many.ap_base
+        );
+
+        assert_eq!(
+            baseline.delta_ap.keys().collect::<Vec<_>>(),
+            many.delta_ap.keys().collect::<Vec<_>>(),
+            "delta_ap keys differ between 1 thread and {threads} threads"
+        );
+        for (key, &a) in &baseline.delta_ap {
+            let b = many.delta_ap[key];
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "delta_ap[{key}] differs between 1 thread ({a}) and {threads} threads ({b})"
+            );
+        }
+
+        assert_eq!(
+            baseline.counts, many.counts,
+            "counts differ between 1 thread and {threads} threads"
+        );
+    }
+}
+
 /// A NaN detection score is rejected rather than silently corrupting the ranking.
 ///
 /// Every ranking path sorts with `partial_cmp(..).unwrap_or(Equal)`, a comparator

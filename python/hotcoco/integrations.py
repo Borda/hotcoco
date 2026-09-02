@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 
+import numpy as _np
+
 from . import mask as mask_utils
 from .hotcoco import COCO, COCOeval, Params
 
@@ -253,8 +255,6 @@ def _prepare_for_coco(predictions, iou_type):
             for i in range(masks.shape[0]):
                 mask = masks[i, 0]  # (H, W)
                 binary = (mask > 0.5).astype("uint8")
-                import numpy as _np
-
                 rle = mask_utils.encode(_np.asfortranarray(binary))
                 # counts is bytes — decode for JSON serialization
                 rle_seg = {

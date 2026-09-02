@@ -150,6 +150,10 @@ impl COCOeval {
     }
 
     /// Accumulated precision/recall curves (set after `accumulate()`).
+    //
+    // The pyo3 binding caches the dict built from this value and invalidates
+    // it in `evaluate()`/`accumulate()`/`run()`. A new mutation path that
+    // replaces `self.eval` must also invalidate that cache.
     pub fn accumulated(&self) -> Option<&AccumulatedEval> {
         self.eval.as_ref()
     }

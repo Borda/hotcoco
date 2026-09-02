@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Top-level COCO dataset structure.
@@ -245,6 +247,28 @@ pub struct Category {
     /// (pycocotools keeps unknown keys because it stores raw dicts).
     #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Map `category_id -> name`.
+///
+/// The single owner of this reduction — `convert`'s exporters that write
+/// categories by name, `detection::hierarchy`, and `quality::healthcheck` all
+/// call this rather than re-collecting `dataset.categories` themselves.
+pub(crate) fn cat_id_to_name(dataset: &Dataset) -> HashMap<u64, &str> {
+    dataset
+        .categories
+        .iter()
+        .map(|c| (c.id, c.name.as_str()))
+        .collect()
+}
+
+/// Map `name -> category_id`.
+///
+/// Takes a category slice rather than a [`Dataset`] — some callers resolve
+/// names against categories they are still assembling, before a `Dataset`
+/// exists to hold them.
+pub(crate) fn cat_name_to_id(categories: &[Category]) -> HashMap<&str, u64> {
+    categories.iter().map(|c| (c.name.as_str(), c.id)).collect()
 }
 
 /// Image license information.

@@ -40,6 +40,19 @@ def dim(text: str) -> str:
     return f"{_DIM}{text}{_RESET}" if _use_color else text
 
 
+def fmt_metric(value, *, digits: int = 3) -> str:
+    """Format one metric value; ``-1.0`` (and any negative) renders as ``n/a``.
+
+    ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a
+    low score — printing it as ``-1.000`` invites reading it as a number. The
+    CLI's tables and the PDF report both go through this so they render the
+    same run the same way.
+    """
+    if value is None or value < 0:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
 def status(verb: str, message: str, *, elapsed: float | None = None) -> None:
     """Print a styled status line to stderr.
 

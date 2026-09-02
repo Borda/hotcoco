@@ -32,9 +32,10 @@ def _metric_fmt(v, fmt: str = "%.3f") -> str:
     """Jinja filter for metric values.
 
     ``-1.0`` is COCO's "not computed for this configuration" sentinel, not a
-    low score — render it ``n/a`` the way ``cli._fmt_metric`` does. Only the
-    exact sentinel is caught: this filter also formats signed deltas, where
-    other negative values are meaningful.
+    low score — render it ``n/a`` the way ``_style.fmt_metric`` does. Only the
+    exact sentinel is caught here: this filter also formats signed deltas,
+    where other negative values are meaningful, so it can't share that
+    implementation.
     """
     if v is None or v == -1.0:
         return "n/a"
@@ -442,18 +443,24 @@ def create_app(
     return app
 
 
-def _find_free_port(port: int, tries: int = 11) -> int:
-    """Return the first port in ``[port, port + tries)`` that can be bound."""
+def _port_is_free(port: int) -> bool:
+    """Return whether ``port`` can be bound on 127.0.0.1 right now."""
     import socket
 
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", port))
+        sock.close()
+    except OSError:
+        return False
+    return True
+
+
+def _find_free_port(port: int, tries: int = 11) -> int:
+    """Return the first port in ``[port, port + tries)`` that can be bound."""
     for attempt_port in range(port, port + tries):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(("127.0.0.1", attempt_port))
-            sock.close()
-        except OSError:
-            continue
-        return attempt_port
+        if _port_is_free(attempt_port):
+            return attempt_port
     raise OSError(f"Could not find an available port in range {port}-{port + tries - 1}")
 
 
@@ -492,18 +499,13 @@ def start_server_background(app: FastAPI, port: int = 7860) -> int:
 
     Tries port through port+10 on OSError (address in use).
     """
-    import socket
     import time
 
     import uvicorn
 
     for attempt_port in range(port, port + 11):
         # Pre-check if port is available (avoids silent thread failures)
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(("127.0.0.1", attempt_port))
-            sock.close()
-        except OSError:
+        if not _port_is_free(attempt_port):
             continue
 
         config = uvicorn.Config(app, host="127.0.0.1", port=attempt_port, log_level="warning")

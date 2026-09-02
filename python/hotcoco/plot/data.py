@@ -135,7 +135,8 @@ class PlotData:
             If ``run()`` has not been called, the eval mode is unrecognized,
             or the precision array does not have the expected 5D shape.
         """
-        if coco_eval.eval is None:
+        eval_dict = coco_eval.eval
+        if eval_dict is None:
             raise ValueError("Call coco_eval.run() before plotting.")
 
         r = coco_eval.results(per_class=per_class)
@@ -145,7 +146,7 @@ class PlotData:
         if params_dict["eval_mode"] not in valid_modes:
             raise ValueError(f"Unknown eval_mode: {params_dict['eval_mode']!r}")
 
-        precision = np.asarray(coco_eval.eval["precision"])
+        precision = np.asarray(eval_dict["precision"])
         if precision.ndim != 5:
             raise ValueError(f"Expected 5-dimensional precision array, got shape {precision.shape}")
 

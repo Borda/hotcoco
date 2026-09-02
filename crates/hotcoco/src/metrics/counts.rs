@@ -189,27 +189,73 @@ pub fn cumulative_tp_fp(
     }
 }
 
-/// Mean interpolated precision over `rec_thrs` — the tail every AP path shares.
-fn mean_precision(tp_cum: &[f64], fp_cum: &[f64], num_gt: usize, rec_thrs: &[f64]) -> f64 {
-    let (_, curve) = precision_recall_curve(tp_cum, fp_cum, num_gt, rec_thrs);
-    curve.iter().map(|p| p.precision).sum::<f64>() / rec_thrs.len() as f64
+/// Mean interpolated precision over `rec_thrs` — the tail every AP path
+/// shares — writing into caller-owned buffers, via [`precision_recall_curve_into`].
+/// Only the two intermediate `Vec`s (the [`PrCurveScratch`] pair and the tuple
+/// output buffer) and the `Vec<PrPoint>` that [`precision_recall_curve`]
+/// collects are skipped, in favor of reusing what `pr_curve`/`curve_out`
+/// already hold.
+fn mean_precision_into(
+    tp_cum: &[f64],
+    fp_cum: &[f64],
+    num_gt: usize,
+    rec_thrs: &[f64],
+    pr_curve: &mut PrCurveScratch,
+    curve_out: &mut Vec<(usize, f64, usize)>,
+) -> f64 {
+    precision_recall_curve_into(tp_cum, fp_cum, num_gt, rec_thrs, pr_curve, curve_out);
+    curve_out
+        .iter()
+        .map(|&(_, precision, _)| precision)
+        .sum::<f64>()
+        / rec_thrs.len() as f64
 }
 
-/// AP of one explicit ranking — the shared body of [`average_precision`] and
-/// [`average_precision_ranked`]. `order` visits indices into `matched`/`ignored`
-/// score-descending.
-fn average_precision_of_order(
+/// Reusable working buffers for the ranked-AP `_into` variants
+/// ([`average_precision_ranked_into`] and the internal
+/// `average_precision_of_order_into` path it shares).
+///
+/// Bundles [`PrCurveScratch`] with the two cumulative TP/FP buffers and the
+/// PR-curve tuple-output buffer that sit between it and the caller — the full
+/// set `average_precision_of_order_into` otherwise allocates fresh every call.
+/// TIDE's `category_deltas` calls the ranked AP ~8 times per category from
+/// inside a rayon fan-out over categories; holding one `ApScratch` per work
+/// item turns those ~8 × 4 per-call allocations into 4 for the whole category.
+#[derive(Debug, Default)]
+pub(crate) struct ApScratch {
+    pr_curve: PrCurveScratch,
+    tp_cum: Vec<f64>,
+    fp_cum: Vec<f64>,
+    curve_out: Vec<(usize, f64, usize)>,
+}
+
+/// AP of one explicit ranking, writing into caller-owned `scratch` — the
+/// shared body of [`average_precision`] and [`average_precision_ranked_into`].
+/// `order` visits indices into `matched`/`ignored` score-descending. See
+/// [`ApScratch`] for what is reused.
+fn average_precision_of_order_into(
     order: impl IntoIterator<Item = usize>,
-    nd: usize,
     matched: &[bool],
     ignored: Option<&[bool]>,
     num_gt: usize,
     rec_thrs: &[f64],
+    scratch: &mut ApScratch,
 ) -> f64 {
-    let mut tp_cum = Vec::with_capacity(nd);
-    let mut fp_cum = Vec::with_capacity(nd);
-    cumulative_tp_fp(order, matched, ignored, &mut tp_cum, &mut fp_cum);
-    mean_precision(&tp_cum, &fp_cum, num_gt, rec_thrs)
+    cumulative_tp_fp(
+        order,
+        matched,
+        ignored,
+        &mut scratch.tp_cum,
+        &mut scratch.fp_cum,
+    );
+    mean_precision_into(
+        &scratch.tp_cum,
+        &scratch.fp_cum,
+        num_gt,
+        rec_thrs,
+        &mut scratch.pr_curve,
+        &mut scratch.curve_out,
+    )
 }
 
 /// Average precision over `rec_thrs`, from per-detection match flags.
@@ -269,16 +315,18 @@ pub fn average_precision(
     // Descending, NaN-total: reversed total_cmp. Stable, so ties keep input order.
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
 
-    average_precision_of_order(order, nd, matched, ignored, num_gt, rec_thrs)
+    let mut scratch = ApScratch::default();
+    average_precision_of_order_into(order, matched, ignored, num_gt, rec_thrs, &mut scratch)
 }
 
 /// [`average_precision`] for detections **already** in score-descending order.
 ///
 /// Same metric, same value — it skips the sort, which is the only thing
 /// `scores` was used for. A caller ranking one array of detections several ways
-/// (TIDE runs eight AP evaluations per category over the same ranking) sorts once
-/// and calls this; sorting stably twice and sorting stably once produce the same
-/// permutation, so the two entry points are bit-identical on sorted input.
+/// (TIDE runs eight AP evaluations per category over the same ranking, via
+/// `average_precision_ranked_into`) sorts once and calls this family; sorting
+/// stably twice and sorting stably once produce the same permutation, so the two
+/// entry points are bit-identical on sorted input.
 ///
 /// `matched[i]` and `ignored[i]` describe the detection at rank `i`. Passing an
 /// unsorted ranking is not an error — it computes the AP of *that* ranking, which
@@ -296,12 +344,35 @@ pub fn average_precision_ranked(
     num_gt: usize,
     rec_thrs: &[f64],
 ) -> f64 {
+    let mut scratch = ApScratch::default();
+    average_precision_ranked_into(matched, ignored, num_gt, rec_thrs, &mut scratch)
+}
+
+/// [`average_precision_ranked`] writing into a caller-owned [`ApScratch`].
+///
+/// Same metric, same value, same panic contract — the only difference is that the
+/// TP/FP cumulative buffers and the PR-curve working buffers are reused from
+/// `scratch` instead of allocated per call. This is the form a caller ranking one
+/// array of detections several ways wants: TIDE's `category_deltas` calls this
+/// (not [`average_precision_ranked`]) eight times per category, so one `ApScratch`
+/// per category turns what was up to 32 per-category allocations (four `Vec`s ×
+/// eight calls) into four for the whole category.
+///
+/// # Panics
+///
+/// If `ignored` is supplied with a different length than `matched`.
+pub(crate) fn average_precision_ranked_into(
+    matched: &[bool],
+    ignored: Option<&[bool]>,
+    num_gt: usize,
+    rec_thrs: &[f64],
+    scratch: &mut ApScratch,
+) -> f64 {
     if let Some(ig) = ignored {
         assert_eq!(
             matched.len(),
             ig.len(),
-            "average_precision_ranked: matched and ignored must be parallel arrays \
-             (got {} vs {})",
+            "matched and ignored must be parallel arrays (got {} vs {})",
             matched.len(),
             ig.len()
         );
@@ -313,7 +384,7 @@ pub fn average_precision_ranked(
     }
 
     // Identity permutation: the caller's order *is* the ranking.
-    average_precision_of_order(0..nd, nd, matched, ignored, num_gt, rec_thrs)
+    average_precision_of_order_into(0..nd, matched, ignored, num_gt, rec_thrs, scratch)
 }
 
 /// Average precision by the VOC 2010 "all-points" rule — the exact area under the

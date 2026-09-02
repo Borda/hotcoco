@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, BufWriter};
 
@@ -66,11 +66,7 @@ pub fn coco_to_cvat(
     dataset: &Dataset,
     output_path: &std::path::Path,
 ) -> Result<CvatStats, ConvertError> {
-    let cat_name: HashMap<u64, &str> = dataset
-        .categories
-        .iter()
-        .map(|c| (c.id, c.name.as_str()))
-        .collect();
+    let cat_name = crate::types::cat_id_to_name(dataset);
 
     let anns_by_image = super::anns_by_image(dataset);
 
@@ -200,18 +196,17 @@ pub fn cvat_to_coco(
     let file = fs::File::open(cvat_path)?;
     let parsed = parse_cvat_xml(BufReader::new(file)).map_err(|e| e.with_path(cvat_path))?;
 
-    let shape_count = |want_box: bool| {
-        parsed
-            .images
-            .iter()
-            .flat_map(|img| &img.shapes)
-            .filter(|s| matches!(s.kind, ShapeKind::Box { .. }) == want_box)
-            .count()
-    };
+    let (boxes, polygons) = parsed.images.iter().flat_map(|img| &img.shapes).fold(
+        (0usize, 0usize),
+        |(boxes, polygons), s| match s.kind {
+            ShapeKind::Box { .. } => (boxes + 1, polygons),
+            ShapeKind::Polygon { .. } => (boxes, polygons + 1),
+        },
+    );
     let stats = CvatImportStats {
         images: parsed.images.len(),
-        boxes: shape_count(true),
-        polygons: shape_count(false),
+        boxes,
+        polygons,
         skipped_degenerate: parsed.skipped_degenerate,
         skipped_unsupported: parsed.skipped_unsupported,
     };
@@ -415,8 +410,7 @@ fn build_dataset(parsed_images: Vec<ParsedCvatImage>, category_names: Vec<String
         })
         .collect();
 
-    let name_to_id: HashMap<&str, u64> =
-        categories.iter().map(|c| (c.name.as_str(), c.id)).collect();
+    let name_to_id = crate::types::cat_name_to_id(&categories);
 
     let mut images: Vec<Image> = Vec::new();
     let mut annotations: Vec<Annotation> = Vec::new();
@@ -466,8 +460,8 @@ fn shape_to_annotation(id: u64, image_id: u64, category_id: u64, kind: &ShapeKin
             ([*xtl, *ytl, w, h], w * h, None)
         }
         ShapeKind::Polygon { points } => (
-            polygon_bbox(points),
-            polygon_area(points),
+            crate::geometry::polygon_bbox(points),
+            crate::geometry::polygon_area(points),
             Some(Segmentation::Polygon(vec![
                 points.iter().flat_map(|&(x, y)| [x, y]).collect(),
             ])),
@@ -513,19 +507,7 @@ enum ShapeKind {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-use super::write_text_element;
-
-/// Attach the reader's byte offset to a parse error — XML carries no line
-/// numbers a streaming reader can cheaply report, but a byte position still
-/// pins the failing element.
-fn at_byte(err: ConvertError, pos: u64) -> ConvertError {
-    match err {
-        ConvertError::ParseError(msg) => {
-            ConvertError::ParseError(format!("near byte {pos}: {msg}"))
-        }
-        other => other,
-    }
-}
+use super::{at_byte, write_text_element};
 
 /// The error for a shape encountered outside any `<image>` — the signature of a
 /// CVAT for *video* export, whose shapes live under `<track>` elements.
@@ -686,37 +668,4 @@ fn parse_cvat_points(s: &str) -> Result<Vec<(f64, f64)>, ConvertError> {
             Ok((x, y))
         })
         .collect()
-}
-
-/// Compute polygon area using the shoelace formula.
-fn polygon_area(points: &[(f64, f64)]) -> f64 {
-    let n = points.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut area = 0.0;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        area += points[i].0 * points[j].1;
-        area -= points[j].0 * points[i].1;
-    }
-    area.abs() / 2.0
-}
-
-/// Compute the bounding rectangle of a polygon as `[x, y, w, h]`.
-fn polygon_bbox(points: &[(f64, f64)]) -> [f64; 4] {
-    if points.is_empty() {
-        return [0.0, 0.0, 0.0, 0.0];
-    }
-    let mut xmin = f64::MAX;
-    let mut ymin = f64::MAX;
-    let mut xmax = f64::MIN;
-    let mut ymax = f64::MIN;
-    for &(x, y) in points {
-        xmin = xmin.min(x);
-        ymin = ymin.min(y);
-        xmax = xmax.max(x);
-        ymax = ymax.max(y);
-    }
-    [xmin, ymin, xmax - xmin, ymax - ymin]
 }
