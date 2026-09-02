@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.0.0] - 2026-09-02
+
+### Added
+
 - **`primitives.lsap` reads numpy arrays natively.** A `float64` ndarray — any
   strides, so C-order, Fortran-order, a transposed or sliced view — is read in a
   single pass instead of one boxed extraction per element; other dtypes and
