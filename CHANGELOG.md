@@ -758,6 +758,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Polygon rasterization matched pycocotools on arm64 only.** `mask::fr_poly`
+  fused the edge interpolation `s*t+ys` into one multiply-add on every platform,
+  on the premise that every shipped pycocotools wheel does. Only the arm64 wheels
+  do; the x86-64 wheels on PyPI target baseline x86-64, which has no FMA
+  instruction, so there the reference rounds twice and about 2 in 400 random
+  polygons differ by a boundary pixel. The rasterizer now picks the arithmetic by
+  target architecture, so `hotcoco.mask` agrees with the pycocotools installed on
+  the same machine on both. Found by the 1.0.0 verify gate on Linux after the
+  mask parity had passed on an arm64 Mac, where the fused form is the right one.
+- **`scripts/test_parity.py` did not import on Python 3.9.** A `float | None`
+  default in a helper signature is evaluated at definition time without
+  `from __future__ import annotations`; the file now has it, like every other
+  script CI runs.
 - **CI tested a package nobody installs.** The Python job built its wheel from
   inside `crates/hotcoco-pyo3`, which yields a bare extension module with no
   `hotcoco.plot`, `cli`, or `integrations`, so every test of the Python layer

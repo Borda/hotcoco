@@ -158,7 +158,10 @@ removed the last systematic source of divergence here.
 
 Exact. The residual segmentation once carried (AP ~1e-5) came from polygon
 rasterization, where the reference's C compiler contracts `s*t+ys` into a single
-fused multiply-add; hotcoco reproduces that arithmetic explicitly.
+fused multiply-add on arm64 but not on x86-64, whose PyPI wheels target a baseline
+without the instruction. hotcoco mirrors that choice per architecture, so the
+comparison is exact on either kind of machine. Masks can differ by a boundary pixel
+between the two architectures — as pycocotools' own do.
 
 ### Keypoints
 

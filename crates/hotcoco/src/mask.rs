@@ -331,11 +331,32 @@ pub(crate) fn intersection_area(a: &Rle, b: &Rle) -> u64 {
     count
 }
 
+/// `base + s * t`, rounded the way the pycocotools wheel for this architecture
+/// rounds it: one fused multiply-add on arm64, two roundings everywhere else.
+/// See the comment in [`fr_poly`] for why the choice is per-target.
+#[inline]
+fn interp(s: f64, t: f64, base: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        s.mul_add(t, base)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        s * t + base
+    }
+}
+
 /// Convert a polygon (flat list of `[x0, y0, x1, y1, ...]`) to RLE.
 ///
 /// Faithful port of `rleFrPoly` from maskApi.c.
 /// Uses upsampling by 5x, Bresenham-like edge walking, y-boundary detection,
 /// and differential RLE encoding — exactly matching the C implementation.
+///
+/// Boundary pixels round the way the pycocotools wheel for the same
+/// architecture rounds them: the edge interpolation is one fused multiply-add on
+/// arm64 and two roundings on x86-64, because that is what the C compiler emits
+/// for each. A mask can therefore differ by a boundary pixel between an arm64
+/// and an x86-64 machine — exactly as pycocotools' own output does.
 ///
 /// Errors when `h * w` exceeds `u32::MAX`. Coordinates far outside the image
 /// (beyond one image-extent past its edges) are clamped — they cannot place
@@ -451,27 +472,31 @@ fn fr_poly_impl(scratch: &mut PolyScratch, xy: &[f64], h: u32, w: u32, hw: u32) 
         } else {
             (xe - xs) as f64 / dy as f64
         };
-        // `mul_add`, not `a + s * t`, to reproduce the reference's arithmetic.
-        // maskApi.c writes `(int)(ys+s*t+.5)`, and clang/gcc default to
-        // `-ffp-contract=fast`, so every shipped pycocotools wheel fuses `s*t+ys`
-        // into a single FMA — one rounding where the unfused form has two. Rust
-        // never contracts implicitly, so the plain (more accurate) expression can
-        // round a boundary pixel the other way (~2 of 400 random polygons). This
-        // path builds every segm GT mask, so `mul_add` is what makes segmentation
-        // parity exact rather than close.
+        // `interp`, not a bare `base + s * t`, reproduces the reference's
+        // arithmetic *per architecture*. maskApi.c writes `(int)(ys+s*t+.5)`;
+        // whether the compiler fuses `s*t+ys` into one FMA (one rounding) or
+        // leaves it as two roundings depends on the target: arm64 has an FMA
+        // instruction and clang/gcc contract by default there, while the x86_64
+        // wheels on PyPI are built for baseline x86-64, which has none. Rust never
+        // contracts implicitly, so a single fixed choice matches one platform's
+        // pycocotools and disagrees with the other's on boundary pixels (~2 of 400
+        // random polygons — the first v1.0.0 tag failed CI on Linux for exactly
+        // this after passing on an arm64 Mac). This path builds every segm GT
+        // mask, so mirroring the platform is what keeps segmentation parity exact
+        // wherever hotcoco and pycocotools are compared on the same machine.
         if dx >= dy {
             // Step along x, interpolate y
             for d in 0..=dx {
                 let t = if flip { dx - d } else { d };
                 u.push(t + xs);
-                v.push((s.mul_add(t as f64, ys as f64) + 0.5) as i32);
+                v.push((interp(s, t as f64, ys as f64) + 0.5) as i32);
             }
         } else {
             // Step along y, interpolate x
             for d in 0..=dy {
                 let t = if flip { dy - d } else { d };
                 v.push(t + ys);
-                u.push((s.mul_add(t as f64, xs as f64) + 0.5) as i32);
+                u.push((interp(s, t as f64, xs as f64) + 0.5) as i32);
             }
         }
     }

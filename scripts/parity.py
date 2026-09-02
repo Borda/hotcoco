@@ -8,7 +8,8 @@ noise passes.
 
 They used to be 1e-4 (bbox) and 2e-4 (segm), sized around real divergences that
 have since been removed: the threshold grids now match `numpy.linspace`
-bit-for-bit, and polygon rasterization reproduces the reference's FMA contraction.
+bit-for-bit, and polygon rasterization reproduces the reference's per-architecture
+rounding (FMA on arm64, two roundings on x86-64).
 Measured worst case across all 34 metrics is now 3.7e-14, so a 1e-4 gate would
 have accepted a number wrong in the fourth decimal place. A gate has to be sized
 to what the code actually does, or it stops being a gate.
