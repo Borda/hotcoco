@@ -59,7 +59,7 @@ jobs:
       - name: Tests
         run: cargo test -p hotcoco -p hotcoco-cli
 
-      # The 1.0 reorganisation moves nearly every type between modules while
+      # The 1.0 reorganization moves nearly every type between modules while
       # promising the crate-root paths keep resolving. Reading lib.rs is not
       # enough to verify that — during the `quality/` move, the crate-root
       # re-exports all still resolved while `hotcoco::types::SummaryStats` had

@@ -76,7 +76,12 @@ The hook runs:
 1. `cargo fmt --all -- --check` — formatting
 2. `cargo clippy --workspace --all-targets -- -D warnings` — lint (warnings are errors)
 3. `cargo test` — all tests
-4. `ruff format --check` and `ruff check` on `python/` and `scripts/` — when Python files are staged
+4. `pre-commit run` over the staged files — whitespace, line endings, YAML/TOML/JSON syntax, `ruff`, and `typos`, configured in `.pre-commit-config.yaml`
+5. `ruff format --check` and `ruff check` on `python/` and `scripts/` — when Python files are staged
+
+Step 4 needs `pre-commit` on `PATH`; the hook falls back to `uvx pre-commit` and fails if neither is available. Install it with `uv tool install pre-commit`. Don't run `pre-commit install` — `core.hooksPath` points at `.github/hooks`, and pre-commit refuses to install over it. To check the whole tree at once, run `pre-commit run --all-files`.
+
+Some of those hooks rewrite the file they fix (trailing whitespace, missing final newline). They exit nonzero when they do, so the commit is rejected rather than silently amended — re-stage the file and commit again.
 
 If formatting fails, run `cargo fmt --all` (Rust) or `uv run ruff format python/ scripts/` (Python) and re-commit. Fix all clippy warnings before committing — never suppress them with `#[allow(...)]`.
 

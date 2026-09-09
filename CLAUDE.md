@@ -104,10 +104,13 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
   **Do not pin its baseline.** A pinned baseline plus a major version bump runs 0 checks
   and still prints "no semver update required" — a gate that passes while checking
   nothing. The `semver` recipe carries a comment explaining this; leave it there.
-- **`typos` runs in neither CI nor the pre-commit hook** — only via `/review`. The
-  `locale = "en-us"` policy in `_typos.toml` is therefore advisory, and the repo has
-  pre-existing British spellings in older prose. Fix the ones your change introduces;
-  don't rewrite shipped CHANGELOG entries.
+- **`typos` runs in the pre-commit hook (via `.pre-commit-config.yaml`) but not in CI** —
+  and there, only over the staged files. The whole tree is checked only by
+  `pre-commit run --all-files` or `/review`, so `locale = "en-us"` stays advisory for
+  files nobody touches. The hook is **report-only**: the upstream default
+  `--write-changes` is dropped on purpose, because auto-rewriting would corrupt the
+  CHANGELOG entries that quote British spellings. Fix the hits your change introduces
+  by hand; don't rewrite shipped CHANGELOG entries.
 - **Real-data parity is local-only.** `data/` is gitignored, so `just parity` cannot run
   in CI. The Python CI job asserts only that 12 metrics come out and one is positive —
   it would not catch a wrong number. Run parity locally before claiming metrics hold.
@@ -189,13 +192,24 @@ All visual surfaces (browse UI, docs site, matplotlib, Plotly dashboard) share t
 
 ## Pre-Commit Checks
 
-A git pre-commit hook in `.github/hooks/pre-commit` runs formatting, clippy, and tests. All must pass or the commit is rejected.
+A git pre-commit hook in `.github/hooks/pre-commit` runs formatting, clippy, tests, and
+`pre-commit run` over the staged files. All must pass or the commit is rejected.
 
 To install the hook (one-time setup — works in both main repo and worktrees):
 
 ```bash
 git config core.hooksPath .github/hooks
+uv tool install pre-commit
 ```
+
+**Never run `pre-commit install`.** It refuses to install while `core.hooksPath` is set,
+and the bash hook already invokes it — `pre-commit` on `PATH`, else `uvx pre-commit`.
+`.pre-commit-config.yaml` holds the trivial hygiene hooks (whitespace, line endings,
+YAML/TOML/JSON syntax) plus `ruff` and `typos`; every version there is pinned, and the
+`ruff` pin must move together with the one in `pyproject.toml` and `ci.yml`. Vendored and
+generated trees (`external/`, `scripts/fixtures/`, `python/hotcoco/_fonts/`, minified
+bundles under `python/hotcoco/static/`) are excluded so the whitespace fixers cannot
+rewrite them. Check the whole tree with `pre-commit run --all-files`.
 
 If formatting fails, run `cargo fmt --all` to fix, then re-commit. If clippy fails, fix the warning before committing. **Never suppress clippy warnings with allows. Never skip the hook with `--no-verify`.**
 
