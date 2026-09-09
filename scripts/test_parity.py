@@ -940,8 +940,11 @@ def test_set_ann_field_handles_scalar_and_shaped_fields_alike():
     # Shaped fields and custom keys take the dict round-trip instead.
     coco.set_ann_field("bbox", {1: [1.0, 2.0, 3.0, 4.0]})
     assert coco.dataset["annotations"][0]["bbox"] == [1.0, 2.0, 3.0, 4.0]
-    coco.set_ann_field("provenance", {1: "hand-drawn"})
+    coco.set_ann_field("provenance", {1: "hand-drawn"}, create=True)
     assert coco.dataset["annotations"][0]["provenance"] == "hand-drawn"
+    # Already on the record now, so no flag needed to change it again.
+    coco.set_ann_field("provenance", {1: "traced"})
+    assert coco.dataset["annotations"][0]["provenance"] == "traced"
 
 
 def test_set_ann_field_rejects_a_value_that_does_not_fit():
@@ -963,3 +966,34 @@ def test_update_anns_input_shape():
     edited["area"] = 5.0
     coco.update_anns([edited])
     assert coco.dataset["annotations"][0]["area"] == 5.0
+
+
+def test_set_ann_field_catches_a_misspelled_field():
+    # A typo used to land as a custom key, leaving the intended edit undone with
+    # nothing raised — the silent no-op these methods exist to remove.
+    coco = COCO(_make_minimal_gt("bbox", annotations=[_make_bbox_ann(1)]))
+
+    with pytest.raises(KeyError, match="Area"):
+        coco.set_ann_field("Area", {1: 5000.0})
+
+    ann = coco.dataset["annotations"][0]
+    assert ann["area"] == 10000.0
+    assert "Area" not in ann
+
+
+def test_set_ann_field_reports_a_negative_id_as_a_lookup_failure():
+    coco = COCO(_make_minimal_gt("bbox", annotations=[_make_bbox_ann(1)]))
+
+    with pytest.raises(KeyError):
+        coco.set_ann_field("area", {-1: 5.0})
+    with pytest.raises(TypeError):
+        coco.set_ann_field("area", {"1": 5.0})
+
+
+def test_update_anns_reports_the_missing_id_first():
+    # The dict is missing `image_id` too; the absent `id` is the more useful
+    # diagnostic, so it must not be pre-empted by the conversion.
+    coco = COCO(_make_minimal_gt("bbox", annotations=[_make_bbox_ann(1)]))
+
+    with pytest.raises(KeyError, match="id"):
+        coco.update_anns([{"area": 1.0}])

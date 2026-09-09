@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   one dataset under several IoU types, where each annotation's active `area` has
   to follow the box for `bbox` and the mask for `segm`.
   `set_ann_field("area", {ann_id: value})` sets one field and keeps every other
-  field of each record; `update_anns([ann, ...])` replaces whole annotations,
+  field of each record — a field outside the COCO schema is a custom key, and
+  adding one the annotations do not carry yet needs `create=True`, so a
+  misspelled schema field raises instead of landing quietly beside the field you
+  meant to change; `update_anns([ann, ...])` replaces whole annotations,
   matched by `id`. Both keep the indices current, the way assigning `dataset`
   does, and both raise `KeyError` on an id the dataset does not have rather than
   skipping it — a silent skip is the failure they exist to remove. Editing a

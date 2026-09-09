@@ -394,7 +394,11 @@ type:
 Set one field on the named annotations, keeping the indices current. Every other
 field of each annotation is carried over, so a partial edit cannot drop the rest
 of the record.
-Fields outside the COCO schema work the same way.
+
+A field outside the COCO schema is a custom key. Setting one the annotations
+already carry works like any other field; adding a new one needs `create=True`,
+so a misspelled schema field — `"Area"`, `"iscrowed"` — raises instead of quietly
+landing beside the field you meant to change.
 
 This is what evaluating one dataset under several IoU types needs: each
 annotation's active `area` follows the box for `bbox` and the mask for `segm`.
@@ -402,13 +406,14 @@ annotation's active `area` follows the box for `bbox` and the mask for `segm`.
 === "Python"
 
     ```python
-    set_ann_field(field: str, values: dict[int, Any]) -> None
+    set_ann_field(field: str, values: dict[int, Any], *, create: bool = False) -> None
     ```
 
     | Parameter | Type | Description |
     |---|---|---|
     | `field` | `str` | Annotation key to set, for example `"area"`. Cannot be `"id"`. |
     | `values` | `dict[int, Any]` | Annotation ID to new value. |
+    | `create` | `bool` | Allow `field` to be a custom key the annotations do not have yet. Default `False`. |
 
     ```python
     mask_areas = {ann["id"]: mask.area(coco.ann_to_rle(ann)) for ann in coco.dataset["annotations"]}
@@ -420,9 +425,11 @@ annotation's active `area` follows the box for `bbox` and the mask for `segm`.
     Python only. In Rust, edit `coco.dataset.annotations` and call
     `create_index()`, or use `update_anns` below.
 
-Raises `KeyError` if an annotation ID is not in the dataset, and `ValueError`
-for `field="id"` or a value that does not fit the field. Nothing is written when
-either happens.
+Raises `KeyError` if an annotation ID is not in the dataset, or if `field` is
+neither a COCO field nor a custom key already on the annotation while `create` is
+`False`; `TypeError` if a value does not fit the field, as `{1: "big"}` does not
+fit `"area"`; and `ValueError` for `field="id"`. Nothing is written in any of
+those cases.
 
 ---
 
@@ -461,8 +468,11 @@ and keep the rest.
     ```
 
 Raises `KeyError` if a dict has no `id`, or names an `id` the dataset does not
-have; nothing is written in that case. In a dataset with duplicate annotation
-IDs, the last occurrence is the one replaced — the record the ID lookup holds.
+have; `TypeError` if the argument is not a list or an element is not a dict; and
+`ValueError` if a dict is missing a required field or holds a value that does not
+fit it, the same errors assigning `dataset` raises. Nothing is written in any of
+those cases. In a dataset with duplicate annotation IDs, the last occurrence is
+the one replaced — the record the ID lookup holds.
 
 !!! tip
     A `COCOeval` copies both datasets when it is constructed, so an evaluator

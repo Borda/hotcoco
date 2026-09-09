@@ -91,6 +91,19 @@ pub(crate) fn unknown_ann_ids_to_pyerr(err: hotcoco_core::UnknownAnnIds) -> PyEr
     pyo3::exceptions::PyKeyError::new_err(err.to_string())
 }
 
+/// Read an annotation id from a Python mapping key.
+///
+/// Through `i64` rather than straight to `u64`: a negative id is a lookup that
+/// cannot succeed, and `KeyError` says that, where a bare `u64` extract reports
+/// `OverflowError` and reads like a bug in the caller's arithmetic. A non-integer
+/// key still raises the `TypeError` the extract produces.
+fn extract_ann_id(key: &Bound<'_, PyAny>) -> PyResult<u64> {
+    let id: i64 = key.extract()?;
+    u64::try_from(id).map_err(|_| {
+        pyo3::exceptions::PyKeyError::new_err(format!("annotation id {id} not in this dataset"))
+    })
+}
+
 /// Emit a `UserWarning` through Python's `warnings` machinery.
 ///
 /// `eprintln!` writes to fd 2, which bypasses `sys.stderr` — invisible in a
@@ -135,7 +148,7 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 }
 
 use convert::{
-    IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
+    ANNOTATION_KEYS, IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
     dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_dataset,
     rle_to_coco_py, set_scalar_ann_field,
 };
@@ -1114,6 +1127,11 @@ impl PyCOCO {
     ///     If a dict has no ``id``, or names an ``id`` this dataset does not
     ///     have. Nothing is written in that case — an unknown id is a mistake
     ///     worth surfacing, not an edit to skip quietly.
+    /// TypeError
+    ///     If ``anns`` is not a list, or an element is not a dict.
+    /// ValueError
+    ///     If a dict is missing a required field or holds a value that does not
+    ///     fit it — the same errors the ``dataset`` setter raises.
     ///
     /// Examples
     /// --------
@@ -1127,17 +1145,17 @@ impl PyCOCO {
             let dict = item.cast::<PyDict>().map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err("update_anns: list elements must be dicts")
             })?;
-            let ann = py_to_annotation(dict)?;
-            // `py_to_annotation` defaults a missing id to 0, which would
-            // silently overwrite whichever annotation carries that id. Only id
-            // 0 has to be told apart from an absent key, so the extra lookup
-            // stays off the common path.
-            if ann.id == 0 && dict.get_item("id")?.is_none() {
+            // Before the conversion, not after: `py_to_annotation` defaults a
+            // missing id to 0, which would silently overwrite whichever
+            // annotation carries that id, and it rejects a dict missing
+            // `image_id` first — so a check placed afterwards never sees the
+            // annotation whose only problem is the absent id.
+            if dict.get_item("id")?.is_none() {
                 return Err(pyo3::exceptions::PyKeyError::new_err(
                     "every annotation passed to update_anns() needs an 'id'",
                 ));
             }
-            updated.push(ann);
+            updated.push(py_to_annotation(dict)?);
         }
         self.inner
             .update_anns(updated)
@@ -1152,8 +1170,11 @@ impl PyCOCO {
     /// area and its mask area between IoU types is the case this exists for —
     /// an edit made through the ``dataset`` copy would not land at all.
     ///
-    /// Fields outside the COCO schema work too — they round-trip through the
-    /// same custom-key path as everything else.
+    /// A field outside the COCO schema is a custom key. Setting one that the
+    /// annotations already carry works as it does for any other field; adding a
+    /// new one needs ``create=True``, so that a misspelled schema field —
+    /// ``"Area"``, ``"iscrowed"`` — raises instead of quietly landing beside the
+    /// field you meant to change.
     ///
     /// Parameters
     /// ----------
@@ -1161,24 +1182,32 @@ impl PyCOCO {
     ///     Annotation key to set, for example ``"area"`` or ``"iscrowd"``.
     /// values : dict
     ///     Annotation id to new value.
+    /// create : bool, keyword-only, default False
+    ///     Allow ``field`` to be a custom key the annotations do not have yet.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///     If an annotation id is not in this dataset. Nothing is written.
+    ///     If an annotation id is not in this dataset, or ``field`` is neither a
+    ///     COCO field nor a custom key already on the annotation and ``create``
+    ///     is False. Nothing is written in either case.
+    /// TypeError
+    ///     If a value does not fit the field — ``{1: "big"}`` for ``"area"``.
     /// ValueError
-    ///     If ``field`` is ``"id"``, or the value does not fit the field.
+    ///     If ``field`` is ``"id"``.
     ///
     /// Examples
     /// --------
     /// >>> mask_areas = {ann["id"]: mask.area(coco.ann_to_rle(ann))
     /// ...               for ann in coco.dataset["annotations"]}
     /// >>> coco.set_ann_field("area", mask_areas)
+    #[pyo3(signature = (field, values, *, create=false))]
     fn set_ann_field(
         &mut self,
         py: Python<'_>,
         field: &str,
         values: &Bound<'_, PyDict>,
+        create: bool,
     ) -> PyResult<()> {
         if field == "id" {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1186,14 +1215,22 @@ impl PyCOCO {
                  coco.dataset instead",
             ));
         }
+        let known = ANNOTATION_KEYS.contains(&field);
         let mut updated = Vec::with_capacity(values.len());
         for (key, value) in values.iter() {
-            let ann_id: u64 = key.extract()?;
+            let ann_id = extract_ann_id(&key)?;
             let ann = self.inner.get_ann(ann_id).ok_or_else(|| {
                 pyo3::exceptions::PyKeyError::new_err(format!(
                     "annotation id {ann_id} not in this dataset"
                 ))
             })?;
+            if !known && !create && !ann.extra.contains_key(field) {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "'{field}' is not an annotation field, and annotation {ann_id} does not \
+                     carry it as a custom key — check the spelling, or pass create=True to \
+                     add it"
+                )));
+            }
             // A scalar field is set on a clone. Everything else — a shaped
             // field, a custom key, a value that does not extract — rebuilds the
             // annotation through the dict converters, so shapes and type errors

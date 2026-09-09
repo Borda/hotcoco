@@ -25,7 +25,7 @@ macro_rules! req {
 /// The dict keys each record type owns. Any other key on an incoming dict is a
 /// custom key, preserved through the `extra` map (serde-flattened in the core
 /// types) so `load → filter → save` keeps user metadata the way pycocotools does.
-const ANNOTATION_KEYS: &[&str] = &[
+pub(crate) const ANNOTATION_KEYS: &[&str] = &[
     "id",
     "image_id",
     "category_id",
