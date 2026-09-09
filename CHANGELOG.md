@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`mask.encode` accepts `bool` masks.** Any one-byte integer or boolean dtype
+  is viewed as `uint8` instead of rejected, so the arrays torch-side code stores
+  (TorchMetrics keeps masks as `bool`) encode without a cast. A wider dtype, or a
+  non-array input, now raises a `TypeError` naming the dtype and the fix rather
+  than `'ndarray' object is not an instance of 'ndarray'`.
+
 ## [1.0.0] - 2026-09-02
 
 ### Added

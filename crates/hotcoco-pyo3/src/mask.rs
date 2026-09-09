@@ -43,6 +43,65 @@ fn extract_rle_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<hotcoco_core::Rle>> 
 // encode
 // ---------------------------------------------------------------------------
 
+/// View a mask array as `uint8`, or explain why it cannot be one.
+///
+/// Deliberate deviation: `pycocotools.mask.encode` takes `uint8` only and
+/// raises on anything else. Every torch-side consumer stores masks as `bool`
+/// (TorchMetrics does), so a `bool` array reaching the drop-in path is the
+/// common case, not a mistake. Any single-byte integer or boolean dtype is
+/// viewed as `uint8` — a zero-copy relabel that keeps the shape, strides, and
+/// `f_contiguous` flag the encode paths read. Wider dtypes are still an error,
+/// but one that names the dtype and the fix.
+fn view_as_uint8<'py>(mask: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    // A list has no `dtype` and a torch tensor's `dtype` has no `kind`; both
+    // become the same type error rather than surfacing as an AttributeError
+    // from whichever attribute happened to be missing.
+    let Ok((kind, itemsize)) = numpy_dtype_of(mask) else {
+        return Err(not_a_mask_array(&type_name_of(mask)));
+    };
+
+    if kind == "u" && itemsize == 1 {
+        return Ok(mask.clone());
+    }
+    // 'b' is numpy's boolean kind, 'i' its signed integers. Either is one byte
+    // wide only for `bool` and `int8`, and `encode` counts every nonzero value
+    // as foreground, so a negative `int8` is foreground like any other nonzero.
+    if (kind == "b" || kind == "i") && itemsize == 1 {
+        return mask.call_method1("view", ("uint8",));
+    }
+
+    let name: String = mask
+        .getattr("dtype")
+        .and_then(|d| d.getattr("name"))
+        .and_then(|n| n.extract())
+        .unwrap_or_else(|_| format!("itemsize {itemsize}"));
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "encode(): mask must be a numpy array with dtype uint8 or bool, got {name}; \
+         cast it with mask.astype(numpy.uint8)"
+    )))
+}
+
+/// The `(kind, itemsize)` pair of a numpy dtype, or an error for anything else.
+fn numpy_dtype_of(obj: &Bound<'_, PyAny>) -> PyResult<(String, usize)> {
+    let dtype = obj.getattr("dtype")?;
+    Ok((
+        dtype.getattr("kind")?.extract()?,
+        dtype.getattr("itemsize")?.extract()?,
+    ))
+}
+
+fn not_a_mask_array(type_name: &str) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "encode(): mask must be a numpy array with dtype uint8 or bool, got {type_name}"
+    ))
+}
+
+fn type_name_of(obj: &Bound<'_, PyAny>) -> String {
+    obj.get_type()
+        .name()
+        .map_or_else(|_| "unknown type".to_string(), |n| n.to_string())
+}
+
 /// Encode a binary mask to RLE in pycocotools format.
 ///
 /// Parameters
@@ -50,7 +109,8 @@ fn extract_rle_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<hotcoco_core::Rle>> 
 /// mask : numpy.ndarray
 ///     2-D ``(H, W)`` → returns a single RLE dict.
 ///     3-D ``(H, W, N)`` → returns a list of *N* RLE dicts.
-///     Accepts both Fortran-order (pycocotools convention) and C-order arrays.
+///     Accepts both Fortran-order (pycocotools convention) and C-order arrays,
+///     and both ``uint8`` and ``bool`` dtypes.
 ///
 /// Returns
 /// -------
@@ -59,6 +119,7 @@ fn extract_rle_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<hotcoco_core::Rle>> 
 #[pyfunction]
 #[pyo3(text_signature = "(mask)")]
 pub fn encode(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let mask = &view_as_uint8(mask)?;
     let ndim: usize = mask.getattr("ndim")?.extract()?;
     match ndim {
         2 => encode_2d(py, mask),
