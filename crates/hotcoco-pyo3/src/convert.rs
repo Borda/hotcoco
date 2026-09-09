@@ -222,10 +222,32 @@ fn py_to_segmentation(obj: &Bound<'_, PyAny>) -> PyResult<Segmentation> {
         let counts_obj = dict
             .get_item("counts")?
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("dict missing 'counts'"))?;
+        // Try str first, then bytes (what `mask.encode` returns, matching
+        // pycocotools), then a list of ints (uncompressed RLE). Bytes must be
+        // checked before the list: a `bytes` object is a Python sequence of
+        // ints, so `extract::<Vec<u32>>()` succeeds on it and silently turns
+        // the compressed string's byte values into an uncompressed RLE.
         if let Ok(s) = counts_obj.extract::<String>() {
             return Ok(Segmentation::CompressedRle { size, counts: s });
         }
-        let counts: Vec<u32> = counts_obj.extract()?;
+        if let Ok(b) = counts_obj.cast::<PyBytes>() {
+            let s = std::str::from_utf8(b.as_bytes()).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
+            })?;
+            return Ok(Segmentation::CompressedRle {
+                size,
+                counts: s.to_string(),
+            });
+        }
+        let counts: Vec<u32> = counts_obj.extract().map_err(|_| {
+            let name = counts_obj
+                .get_type()
+                .name()
+                .map_or_else(|_| "?".to_string(), |n| n.to_string());
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "RLE 'counts' must be str, bytes, or a list of ints, got {name}"
+            ))
+        })?;
         return Ok(Segmentation::UncompressedRle { size, counts });
     }
     // Otherwise it's a polygon (list of lists)
