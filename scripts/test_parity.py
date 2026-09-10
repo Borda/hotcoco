@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import warnings
 
+import numpy as np
 import pytest
 from helpers import COCO_KEYPOINT_NAMES, COCO_SKELETON, assert_metrics_match, run_both, suppress_output, written_json
-from hotcoco import COCO, COCOeval, Hierarchy
+from hotcoco import COCO, COCOeval, Hierarchy, mask
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -265,6 +266,80 @@ def test_segm_polygon_rasterization():
     ]
     py_stats, rs_stats, _ = run_both(gt, dts, "segm")
     assert_metrics_match(py_stats, rs_stats, "segm")
+
+
+def _bytes_rle():
+    """An RLE with ``counts`` as bytes, exactly what ``mask.encode`` returns."""
+    m = np.zeros((10, 10), dtype=np.uint8)
+    m[2:5, 2:5] = 1
+    rle = mask.encode(np.asfortranarray(m))
+    assert isinstance(rle["counts"], bytes)
+    return rle
+
+
+def _dataset_with_segmentation(segmentation):
+    return {
+        "images": [{"id": 1, "height": 10, "width": 10, "file_name": "test.jpg"}],
+        "annotations": [
+            {
+                "id": 1,
+                "image_id": 1,
+                "category_id": 1,
+                "bbox": [2.0, 2.0, 3.0, 3.0],
+                "area": 9.0,
+                "iscrowd": 0,
+                "segmentation": segmentation,
+            }
+        ],
+        "categories": [{"id": 1, "name": "cat", "supercategory": "none"}],
+    }
+
+
+def test_bytes_rle_round_trips_through_coco():
+    """encode() -> COCO() -> load_anns() -> decode() keeps the mask.
+
+    `mask.encode` returns `counts` as bytes (pycocotools' format). A `bytes`
+    object is a Python sequence of ints, so extracting it as a list of counts
+    succeeds and silently produces a garbage uncompressed RLE instead of
+    raising — the failure surfaced as segmentation AP of exactly 0.000.
+    """
+    rle = _bytes_rle()
+    coco = COCO(_dataset_with_segmentation(rle))
+    loaded = coco.load_anns([1])[0]["segmentation"]
+    assert mask.decode(loaded).sum() == 9
+
+
+def test_bytes_rle_round_trips_through_load_res():
+    """The same path for detections, which is how mask consumers evaluate."""
+    rle = _bytes_rle()
+    coco = COCO(_dataset_with_segmentation(rle))
+    # No bbox, so `load_res` treats the results as segm and derives area from
+    # the mask — a wrong parse shows up as a wrong area, not only a wrong mask.
+    dt = coco.load_res([{"image_id": 1, "category_id": 1, "score": 0.9, "segmentation": rle}])
+    ann = dt.load_anns(dt.get_ann_ids())[0]
+    assert mask.decode(ann["segmentation"]).sum() == 9
+    assert ann["area"] == 9.0
+
+
+def test_every_counts_form_agrees():
+    """bytes, str, and an uncompressed list of ints must all load the same mask."""
+    rle = _bytes_rle()
+    as_str = {"size": rle["size"], "counts": rle["counts"].decode("ascii")}
+    # Column-major runs for a 3x3 block at rows 2-4, cols 2-4 of a 10x10 mask.
+    as_list = {"size": [10, 10], "counts": [22, 3, 7, 3, 7, 3, 55]}
+    decoded = [
+        mask.decode(COCO(_dataset_with_segmentation(seg)).load_anns([1])[0]["segmentation"])
+        for seg in (rle, as_str, as_list)
+    ]
+    assert decoded[0].sum() == 9
+    assert (decoded[0] == decoded[1]).all()
+    assert (decoded[0] == decoded[2]).all()
+
+
+def test_unsupported_counts_type_raises():
+    """Anything that is not str, bytes, or a list of ints is an error, not an empty mask."""
+    with pytest.raises(TypeError, match="counts"):
+        COCO(_dataset_with_segmentation({"size": [10, 10], "counts": 3.5}))
 
 
 # ---------------------------------------------------------------------------
