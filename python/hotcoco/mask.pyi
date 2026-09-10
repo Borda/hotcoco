@@ -15,13 +15,15 @@ import numpy.typing as npt
 
 _Rle = dict[str, Any]
 
+_MaskDtype = np.dtype[np.uint8] | np.dtype[np.bool_]
+
 @overload
-def encode(mask: np.ndarray[tuple[int, int], np.dtype[np.uint8]]) -> _Rle:
+def encode(mask: np.ndarray[tuple[int, int], _MaskDtype]) -> _Rle:
     """Encode a 2-D ``(H, W)`` binary mask to a single RLE dict."""
     ...
 
 @overload
-def encode(mask: np.ndarray[tuple[int, int, int], np.dtype[np.uint8]]) -> list[_Rle]:
+def encode(mask: np.ndarray[tuple[int, int, int], _MaskDtype]) -> list[_Rle]:
     """Encode a 3-D ``(H, W, N)`` mask stack to a list of N RLE dicts."""
     ...
 

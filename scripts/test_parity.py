@@ -794,3 +794,44 @@ def test_non_reference_params_warn_and_downgrade_provenance():
     assert any("rec_thrs" in m for m in messages), f"expected a rec_thrs warning catchable from Python, got {messages}"
     # Provenance has to survive into the archived artifact, not just the report.
     assert off.results()["provenance"] == "extension"
+
+
+# ---------------------------------------------------------------------------
+# mask.encode dtypes
+# ---------------------------------------------------------------------------
+
+
+def test_encode_accepts_bool_masks():
+    """A `bool` mask encodes to the same RLE as its `uint8` twin.
+
+    pycocotools takes `uint8` only, but every torch-side consumer stores masks
+    as `bool` -- TorchMetrics does -- so `bool` reaching the drop-in path is the
+    common case, not a mistake.
+    """
+    m = np.zeros((10, 10), dtype=bool)
+    m[2:5, 2:5] = True
+
+    for arr in (m, np.asfortranarray(m)):
+        assert mask.encode(arr) == mask.encode(arr.astype(np.uint8))
+
+
+def test_encode_accepts_bool_mask_stacks():
+    """The reported repro: a 3-D `(H, W, N)` Fortran-order `bool` stack."""
+    m = np.zeros((10, 10, 1), dtype=bool)
+    m[2:5, 2:5, 0] = True
+    stack = np.asfortranarray(m)
+
+    assert mask.encode(stack) == mask.encode(stack.astype(np.uint8))
+
+
+def test_encode_rejects_wide_dtypes_with_a_readable_message():
+    """A dtype that is not one byte wide is an error naming the dtype and the fix.
+
+    The message is the point: the old failure was `'ndarray' object is not an
+    instance of 'ndarray'`, which names neither the dtype nor the argument.
+    """
+    with pytest.raises(TypeError, match=r"float32.*astype"):
+        mask.encode(np.zeros((10, 10), dtype=np.float32))
+
+    with pytest.raises(TypeError, match=r"mask must be a numpy array"):
+        mask.encode([[0, 1], [1, 0]])

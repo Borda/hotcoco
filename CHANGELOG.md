@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`mask.encode` accepts `bool` masks.** Any one-byte integer or boolean dtype
+  is viewed as `uint8` instead of rejected, so the arrays torch-side code stores
+  (TorchMetrics keeps masks as `bool`) encode without a cast. A wider dtype, or a
+  non-array input, now raises a `TypeError` naming the dtype and the fix rather
+  than `'ndarray' object is not an instance of 'ndarray'`.
 - **RLE `counts` as `bytes` loads correctly.** `mask.encode()` returns `counts`
   as a `bytes` object, matching pycocotools, but the dataset loader decoded only
   the `str` form. A `bytes` object is a Python sequence of ints, so it extracted

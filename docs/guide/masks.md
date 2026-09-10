@@ -50,6 +50,11 @@ An RLE dict looks like:
     m_c = np.zeros((100, 100), dtype=np.uint8)
     m_c[10:50, 20:80] = 1
     rle = mask.encode(m_c)  # same result
+
+    # bool masks encode too — what torch-side code (TorchMetrics) produces
+    m_bool = np.zeros((100, 100), dtype=bool, order="F")
+    m_bool[10:50, 20:80] = True
+    rle = mask.encode(m_bool)  # same result, no cast needed
     ```
 
 === "Rust"
