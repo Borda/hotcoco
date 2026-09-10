@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (TorchMetrics keeps masks as `bool`) encode without a cast. A wider dtype, or a
   non-array input, now raises a `TypeError` naming the dtype and the fix rather
   than `'ndarray' object is not an instance of 'ndarray'`.
+- **RLE `counts` as `bytes` loads correctly.** `mask.encode()` returns `counts`
+  as a `bytes` object, matching pycocotools, but the dataset loader decoded only
+  the `str` form. A `bytes` object is a Python sequence of ints, so it extracted
+  as a list of run lengths and became an uncompressed RLE holding the compressed
+  string's byte values — a mask that decodes to nothing. Nothing raised, so the
+  failure surfaced as segmentation AP of exactly `0.000`. `bytes` is now accepted
+  wherever a `segmentation` dict is parsed, in the `COCO` constructor and in
+  `load_res()` alike, and a `counts` value that is not `str`, `bytes`, or a list
+  of ints raises `TypeError` naming the type it got instead of producing an empty
+  mask.
 
 ## [1.0.0] - 2026-09-02
 
