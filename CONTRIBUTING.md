@@ -124,7 +124,8 @@ the documented `fr_py_objects` did not exist.
 ## Code style
 
 - **Rust:** `cargo fmt --all`. No clippy warnings.
-- **Python:** `ruff format` and `ruff check` — enforced by the pre-commit hook and CI (`just py-fmt-check`, `just py-lint`).
+- **Python:** `pre-commit run ruff-format --all-files` and `pre-commit run ruff-check --all-files` — enforced by the pre-commit hook and CI. `just py-fmt` and `just py-fmt-check` run the formatting hook, which fixes files and fails when changes are needed. Use `just py-lint` for Python linting.
+- **Ruff version:** pinned only in `.pre-commit-config.yaml`. Update that revision to change the version for local commands and CI; keep rule settings in `pyproject.toml`.
 - Don't add comments where the logic is self-evident. Comments should explain *why*, not *what* — and "why" means a constraint or invariant the code can't show, not the history of how the code got here. Never narrate a change ("used to", "previously", "the old version...") or justify it against alternatives the reader can't see; that rationale belongs in the commit message.
 
 ## Documentation style

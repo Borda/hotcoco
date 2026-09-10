@@ -1,10 +1,9 @@
-# Mirrors the tools already configured in pyproject.toml and _typos.toml.
-# Pins are deliberate: local, pre-commit, and CI must agree on lint results.
-# Bump ruff here, in pyproject.toml's [dev] extra, and in ci.yml together.
+# Tool versions live here; settings live in pyproject.toml and _typos.toml.
+# Local commands and CI use these same pins to prevent lint version drift.
 #
 # This repo sets `core.hooksPath = .github/hooks`, so `pre-commit install`
-# refuses to run. Use `pre-commit run --all-files`, or call
-# `pre-commit run --hook-stage pre-commit` from .github/hooks/pre-commit.
+# refuses to run. Use `pre-commit run --all-files`; the custom hook invokes
+# it when Python files are staged. CI selects the Ruff checks from this config.
 # Rust checks (fmt, clippy, cargo test) stay in that hook — they are not
 # duplicated here.
 

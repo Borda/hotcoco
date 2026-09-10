@@ -104,10 +104,9 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
   **Do not pin its baseline.** A pinned baseline plus a major version bump runs 0 checks
   and still prints "no semver update required" — a gate that passes while checking
   nothing. The `semver` recipe carries a comment explaining this; leave it there.
-- **`typos` runs in the pre-commit hook (via `.pre-commit-config.yaml`) but not in CI** —
-  and there, only over the staged files. The whole tree is checked only by
-  `pre-commit run --all-files` or `/review`, so `locale = "en-us"` stays advisory for
-  files nobody touches. The hook is **report-only**: the upstream default
+- **`typos` runs across the whole tree when Python files are staged, but not in CI**
+  via `.pre-commit-config.yaml`. Run `pre-commit run --all-files` manually for other
+  local changes. The hook is **report-only**: the upstream default
   `--write-changes` is dropped on purpose, because auto-rewriting would corrupt the
   CHANGELOG entries that quote British spellings. Fix the hits your change introduces
   by hand; don't rewrite shipped CHANGELOG entries.
@@ -193,7 +192,9 @@ All visual surfaces (browse UI, docs site, matplotlib, Plotly dashboard) share t
 ## Pre-Commit Checks
 
 A git pre-commit hook in `.github/hooks/pre-commit` runs formatting, clippy, tests, and
-`pre-commit run` over the staged files. All must pass or the commit is rejected.
+`pre-commit run --all-files` when Python files are staged. All applicable checks
+must pass or the commit is rejected. Python lint CI runs only the Ruff checks from
+the same pre-commit configuration.
 
 To install the hook (one-time setup — works in both main repo and worktrees):
 
@@ -205,8 +206,8 @@ uv tool install pre-commit
 **Never run `pre-commit install`.** It refuses to install while `core.hooksPath` is set,
 and the bash hook already invokes it — `pre-commit` on `PATH`, else `uvx pre-commit`.
 `.pre-commit-config.yaml` holds the trivial hygiene hooks (whitespace, line endings,
-YAML/TOML/JSON syntax) plus `ruff` and `typos`; every version there is pinned, and the
-`ruff` pin must move together with the one in `pyproject.toml` and `ci.yml`. Vendored and
+YAML/TOML/JSON syntax) plus `ruff` and `typos`. It is the sole source of Ruff versions
+for local commands and CI; `pyproject.toml` holds Ruff settings only. Vendored and
 generated trees (`external/`, `scripts/fixtures/`, `python/hotcoco/_fonts/`, minified
 bundles under `python/hotcoco/static/`) are excluded so the whitespace fixers cannot
 rewrite them. Check the whole tree with `pre-commit run --all-files`.
