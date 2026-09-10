@@ -96,6 +96,7 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - For Python binding changes: `just build` as a smoke test, then `just parity` to verify metrics.
 - `just test` runs `cargo test` + fast Python regression tests (`scripts/test_parity.py`) — safe for CI, completes in under 30s.
 - `just fuzz` runs the hypothesis-based fuzzer (`scripts/fuzz_parity.py`) — use to hunt for parity bugs, not in CI. Takes several minutes.
+- `just fuzz-dropin` runs `scripts/fuzz_dropin.py` — one dataset under many in-memory spellings (bytes `counts`, numpy scalars, tuples, missing optional keys) versus pycocotools. `fuzz_parity.py` goes through JSON files and cannot see any of those; this is the fuzzer that finds the issue #5 class. It fails only on a spelling that changes the numbers and prints loud gaps as a summary.
 - Model: use the fuzzer to *find* bugs, then prove fixes with Rust integration tests in `crates/hotcoco/tests/`.
 
 ### What CI does and does not check

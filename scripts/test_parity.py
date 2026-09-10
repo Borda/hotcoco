@@ -761,10 +761,10 @@ def test_params_in_place_mutation_takes_effect():
 def test_non_reference_params_warn_and_downgrade_provenance():
     """Off-reference configuration is visible from Python, both ways.
 
-    `summarize()` writes its warnings with `eprintln!`, straight to file
-    descriptor 2 — which bypasses `sys.stderr`, so they are invisible in a
-    notebook, invisible to `capsys`, and uncatchable by `warnings.catch_warnings`.
-    They are re-raised as real Python warnings for that reason.
+    The Rust `summarize()` writes its warnings with `eprintln!`, straight to
+    file descriptor 2 — which bypasses `sys.stderr`, so they would be invisible
+    in a notebook, invisible to `capsys`, and uncatchable by
+    `warnings.catch_warnings`. The binding emits real Python warnings instead.
     """
     gt = _make_minimal_gt("bbox", annotations=[_make_bbox_ann(1, bbox=[10, 10, 50, 50])])
     dts = [_make_bbox_det(bbox=[10, 10, 50, 50], score=0.9)]

@@ -102,6 +102,7 @@ coco.createIndex()                  # supported, but a formality after assignmen
 | Annotation IDs | Requires unique positive integers | Also accepts 0-based IDs |
 | `getAnnIds(areaRng=...)` on annotations missing `area` | Raises `KeyError` | Excludes them from the query |
 | Mutating `coco.dataset` / `ev.params` internals in place | Mutates shared state | No-op on a copy — [assign back to apply](#getters-return-copies-assign-back-to-apply) |
+| `summarize()` with non-default params | Prints the table only | Also emits a `UserWarning` per deviation — filter with `warnings.filterwarnings` |
 | Performance | Single-threaded C + Python | Multi-threaded Rust |
 
 ## Metric parity

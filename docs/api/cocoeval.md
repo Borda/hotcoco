@@ -262,6 +262,8 @@ summarize() -> None
 
 Compute and print the standard COCO metrics. Populates `stats`.
 
+The table goes through Python's `sys.stdout`, so `contextlib.redirect_stdout` captures or silences it, and it shows in a notebook cell. To skip printing altogether, call [`summary_lines`](#summary_lines) instead.
+
 !!! warning "Non-default parameters"
     `summarize()` uses a fixed display format that assumes default `iou_thrs`, `max_dets`, and `area_rng_lbl`. If you've changed any of these, a `UserWarning` is emitted (catchable with `warnings.catch_warnings`, visible in Jupyter) and some metrics might show `-1.000` (for example, AP50 when `iou_thrs` doesn't include 0.50). The `stats` array always has 12 entries (10 for keypoints) regardless of your parameters. `-1.000` always means "not computed for this configuration" — an unknown area label or max-dets value degrades to `-1.0` rather than silently substituting the `"all"` slice.
 

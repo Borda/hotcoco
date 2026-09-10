@@ -1346,8 +1346,9 @@ impl PyParams {
         self.inner.use_cats
     }
     #[setter]
-    fn set_use_cats(&mut self, val: bool) {
-        self.inner.use_cats = val;
+    fn set_use_cats(&mut self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.use_cats = convert::extract_flag(val)?;
+        Ok(())
     }
     #[getter]
     fn expand_dt(&self) -> bool {
@@ -1438,8 +1439,8 @@ impl PyParams {
         self.use_cats()
     }
     #[setter(useCats)]
-    fn set_use_cats_camel(&mut self, val: bool) {
-        self.set_use_cats(val);
+    fn set_use_cats_camel(&mut self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.set_use_cats(val)
     }
 }
 
@@ -1740,9 +1741,9 @@ impl PyCOCOeval {
             )?;
         }
 
-        // Re-raise the comparability warnings as real Python warnings.
-        // `COCOeval::summarize` writes them with `eprintln!` to fd 2, which
-        // bypasses `sys.stderr` — invisible in a Jupyter cell, uncatchable by
+        // The comparability warnings are real Python warnings, not the Rust
+        // `summarize()`'s `eprintln!` — fd 2 bypasses `sys.stderr`, so that copy
+        // is invisible in a Jupyter cell and uncatchable by
         // `warnings.catch_warnings`. Emitting here makes filters, -W flags, and
         // pytest.warns all work. Synced via `with_params` so a post-`evaluate()`
         // params mutation still reaches the comparability check.
@@ -1751,13 +1752,14 @@ impl PyCOCOeval {
             warn_user(py, &format!("hotcoco: {w}"))?;
         }
 
-        // `summarize_lines()` rather than `summarize()`: the latter also prints the
-        // same warnings with `eprintln!`, and emitting them on fd 2 *and* as Python
-        // warnings would be duplicate output — the fd-2 copy being invisible to
-        // notebook users is the whole reason for the block above.
-        self.with_params(py, |ev| {
-            let _ = ev.summarize_lines();
-        });
+        // Print through Python's own `print`, not Rust's `println!`: the latter
+        // writes to fd 1 and skips `sys.stdout`, so `contextlib.redirect_stdout`
+        // and notebook cells never see the table.
+        let lines = self.with_params(py, hotcoco_core::COCOeval::summarize_lines);
+        let print = py.import("builtins")?.getattr("print")?;
+        for line in &lines {
+            print.call1((line,))?;
+        }
         Ok(())
     }
 

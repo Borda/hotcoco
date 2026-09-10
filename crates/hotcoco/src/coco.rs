@@ -358,6 +358,12 @@ impl COCO {
             self.imgs.insert(img.id, i);
         }
 
+        let unnamed = self.fill_placeholder_cat_names();
+        if unnamed > 0 {
+            self.warn(format!(
+                "{unnamed} category record(s) without a name; using cat_<id> as the display name."
+            ));
+        }
         for (i, cat) in self.dataset.categories.iter().enumerate() {
             self.cats.insert(cat.id, i);
         }
@@ -521,7 +527,33 @@ impl COCO {
     /// stand-in.
     pub fn cat_name(&self, id: u64) -> String {
         self.get_cat(id)
-            .map_or_else(|| format!("cat_{id}"), |c| c.name.clone())
+            .map_or_else(|| Self::placeholder_cat_name(id), |c| c.name.clone())
+    }
+
+    /// Give every category loaded without a `name` its
+    /// [`placeholder_cat_name`](Self::placeholder_cat_name); returns how many.
+    ///
+    /// Part of every index rebuild, so an indexed dataset never carries an
+    /// empty name. Idempotent: zero on any rebuild after the first.
+    fn fill_placeholder_cat_names(&mut self) -> usize {
+        let mut unnamed = 0;
+        for cat in &mut self.dataset.categories {
+            if cat.name.is_empty() {
+                cat.name = Self::placeholder_cat_name(cat.id);
+                unnamed += 1;
+            }
+        }
+        unnamed
+    }
+
+    /// The stand-in name for a category that has none: `cat_{id}`.
+    ///
+    /// Used both for an id the dataset does not know and for a category
+    /// record loaded without a `name` (pycocotools tolerates the omission, and
+    /// TorchMetrics emits bare `{"id": i}` records). One owner, so the two
+    /// cases read the same in a report.
+    pub fn placeholder_cat_name(id: u64) -> String {
+        format!("cat_{id}")
     }
 
     /// Get annotation IDs for a specific (image, category) pair.

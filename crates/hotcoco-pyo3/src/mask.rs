@@ -3,7 +3,10 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3, PyUnty
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::convert::{bool_vec, f64_array, f64_matrix, py_to_rle, rle_to_coco_py};
+use crate::convert::{
+    bool_vec, extract_flag, f64_array, f64_matrix, numpy_dtype_name, py_to_rle, rle_to_coco_py,
+    type_name,
+};
 use crate::to_pyerr;
 
 /// Transpose between row-major (numpy) and column-major (hotcoco) mask layouts.
@@ -43,65 +46,6 @@ fn extract_rle_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<hotcoco_core::Rle>> 
 // encode
 // ---------------------------------------------------------------------------
 
-/// View a mask array as `uint8`, or explain why it cannot be one.
-///
-/// Deliberate deviation: `pycocotools.mask.encode` takes `uint8` only and
-/// raises on anything else. Every torch-side consumer stores masks as `bool`
-/// (TorchMetrics does), so a `bool` array reaching the drop-in path is the
-/// common case, not a mistake. Any single-byte integer or boolean dtype is
-/// viewed as `uint8` — a zero-copy relabel that keeps the shape, strides, and
-/// `f_contiguous` flag the encode paths read. Wider dtypes are still an error,
-/// but one that names the dtype and the fix.
-fn view_as_uint8<'py>(mask: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    // A list has no `dtype` and a torch tensor's `dtype` has no `kind`; both
-    // become the same type error rather than surfacing as an AttributeError
-    // from whichever attribute happened to be missing.
-    let Ok((kind, itemsize)) = numpy_dtype_of(mask) else {
-        return Err(not_a_mask_array(&type_name_of(mask)));
-    };
-
-    if kind == "u" && itemsize == 1 {
-        return Ok(mask.clone());
-    }
-    // 'b' is numpy's boolean kind, 'i' its signed integers. Either is one byte
-    // wide only for `bool` and `int8`, and `encode` counts every nonzero value
-    // as foreground, so a negative `int8` is foreground like any other nonzero.
-    if (kind == "b" || kind == "i") && itemsize == 1 {
-        return mask.call_method1("view", ("uint8",));
-    }
-
-    let name: String = mask
-        .getattr("dtype")
-        .and_then(|d| d.getattr("name"))
-        .and_then(|n| n.extract())
-        .unwrap_or_else(|_| format!("itemsize {itemsize}"));
-    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-        "encode(): mask must be a numpy array with dtype uint8 or bool, got {name}; \
-         cast it with mask.astype(numpy.uint8)"
-    )))
-}
-
-/// The `(kind, itemsize)` pair of a numpy dtype, or an error for anything else.
-fn numpy_dtype_of(obj: &Bound<'_, PyAny>) -> PyResult<(String, usize)> {
-    let dtype = obj.getattr("dtype")?;
-    Ok((
-        dtype.getattr("kind")?.extract()?,
-        dtype.getattr("itemsize")?.extract()?,
-    ))
-}
-
-fn not_a_mask_array(type_name: &str) -> PyErr {
-    PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-        "encode(): mask must be a numpy array with dtype uint8 or bool, got {type_name}"
-    ))
-}
-
-fn type_name_of(obj: &Bound<'_, PyAny>) -> String {
-    obj.get_type()
-        .name()
-        .map_or_else(|_| "unknown type".to_string(), |n| n.to_string())
-}
-
 /// Encode a binary mask to RLE in pycocotools format.
 ///
 /// Parameters
@@ -109,8 +53,8 @@ fn type_name_of(obj: &Bound<'_, PyAny>) -> String {
 /// mask : numpy.ndarray
 ///     2-D ``(H, W)`` → returns a single RLE dict.
 ///     3-D ``(H, W, N)`` → returns a list of *N* RLE dicts.
-///     Accepts both Fortran-order (pycocotools convention) and C-order arrays,
-///     and both ``uint8`` and ``bool`` dtypes.
+///     Accepts any memory layout, and the ``uint8``, ``bool``, and ``int8``
+///     dtypes.
 ///
 /// Returns
 /// -------
@@ -119,7 +63,7 @@ fn type_name_of(obj: &Bound<'_, PyAny>) -> String {
 #[pyfunction]
 #[pyo3(text_signature = "(mask)")]
 pub fn encode(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    let mask = &view_as_uint8(mask)?;
+    let mask = &as_uint8(mask)?;
     let ndim: usize = mask.getattr("ndim")?.extract()?;
     match ndim {
         2 => encode_2d(py, mask),
@@ -130,24 +74,58 @@ pub fn encode(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// The `TypeError` for a mask that is not a one-byte numpy array.
+///
+/// numpy's own extraction failure reads `'ndarray' object is not an instance
+/// of 'ndarray'`, which names the same type twice and never mentions the
+/// dtype — the one thing the caller has to change. A list, or a torch tensor
+/// passed by mistake, has no numpy `dtype` and is named by its type instead.
+fn mask_dtype_error(mask: &Bound<'_, PyAny>) -> PyErr {
+    let got = numpy_dtype_name(mask).map_or_else(
+        || type_name(mask),
+        |dtype| format!("{dtype}; cast it with mask.astype(numpy.uint8)"),
+    );
+    pyo3::exceptions::PyTypeError::new_err(format!(
+        "encode(): mask must be a numpy array with dtype uint8, bool, or int8, got {got}"
+    ))
+}
+
+/// The mask as a `uint8` array object.
+///
+/// `uint8` passes through. `bool` and `int8` are one byte wide too, so a
+/// `view("uint8")` relabels them without a copy — shape and strides carry
+/// over, a sliced view stays a view — and the core encoder's own rule, any
+/// nonzero byte is foreground, does the rest (`-1` is `255`). The one-byte
+/// limit is deliberate: a wider dtype is an error naming the dtype and the
+/// cast, so nothing is silently truncated.
+fn as_uint8<'py>(mask: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    match numpy_dtype_name(mask).as_deref() {
+        Some("uint8") => Ok(mask.clone()),
+        Some("bool" | "int8") => mask.call_method1("view", ("uint8",)),
+        _ => Err(mask_dtype_error(mask)),
+    }
+}
+
+/// Column-major (Fortran-order) bytes of one `(H, W)` view, whatever its
+/// memory layout.
+///
+/// The transpose of a Fortran-order view is already standard layout, so
+/// `as_standard_layout` borrows and the result is one copy. A C-order or
+/// sliced view goes through ndarray's layout conversion first: its strided
+/// copy is about 3× faster than iterating the transposed view element by
+/// element (350 µs against 1.2 ms for a 480×640 mask), which is why this is
+/// not `t.iter().copied().collect()`.
+fn col_major(view: numpy::ndarray::ArrayView2<'_, u8>) -> Vec<u8> {
+    let t = view.t();
+    let std = t.as_standard_layout();
+    std.as_slice()
+        .map_or_else(|| std.iter().copied().collect(), <[u8]>::to_vec)
+}
+
 fn encode_2d(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let arr: PyReadonlyArray2<u8> = mask.extract()?;
-    let shape = arr.shape();
-    let h = shape[0];
-    let w = shape[1];
-
-    // Check if Fortran-order (column-major)
-    let is_fortran: bool = mask.getattr("flags")?.getattr("f_contiguous")?.extract()?;
-
-    let col_major = if is_fortran {
-        // Already column-major — use raw data directly
-        arr.as_slice()?.to_vec()
-    } else {
-        // C-order — transpose to column-major
-        let slice = arr.as_slice()?;
-        transpose_mask(slice, h, w)
-    };
-
+    let [h, w] = [arr.shape()[0], arr.shape()[1]];
+    let col_major = col_major(arr.as_array());
     // Owned buffer from here on, so the encode itself runs without the GIL —
     // same convention as the COCOeval driver paths.
     let rle = py
@@ -158,26 +136,24 @@ fn encode_2d(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 
 fn encode_3d(py: Python<'_>, mask: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let arr: PyReadonlyArray3<u8> = mask.extract()?;
-    let shape = arr.shape();
-    let h = shape[0];
-    let w = shape[1];
-    let n = shape[2];
-
-    let raw = arr.as_array();
+    let [h, w, n] = [arr.shape()[0], arr.shape()[1], arr.shape()[2]];
+    // Each slice is converted from the borrowed view; the stack is never
+    // copied whole.
+    let view = arr.as_array();
+    let slices: Vec<Vec<u8>> = (0..n)
+        .map(|i| col_major(view.index_axis(numpy::ndarray::Axis(2), i)))
+        .collect();
+    let rles = py
+        .detach(|| {
+            slices
+                .iter()
+                .map(|s| rmask::encode(s, h as u32, w as u32))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(to_pyerr)?;
     let list = PyList::empty(py);
-    for i in 0..n {
-        // Build column-major data: iterate column-by-column (x then y)
-        let slice_2d = raw.index_axis(numpy::ndarray::Axis(2), i);
-        let mut col_major = Vec::with_capacity(h * w);
-        for x in 0..w {
-            for y in 0..h {
-                col_major.push(slice_2d[[y, x]]);
-            }
-        }
-        let rle = py
-            .detach(|| rmask::encode(&col_major, h as u32, w as u32))
-            .map_err(to_pyerr)?;
-        list.append(rle_to_coco_py(py, &rle)?)?;
+    for rle in &rles {
+        list.append(rle_to_coco_py(py, rle)?)?;
     }
     Ok(list.into_any().unbind())
 }
@@ -336,24 +312,12 @@ fn check_iscrowd_len(iscrowd_len: usize, gt_len: usize) -> PyResult<()> {
 /// `types::deserialize_iscrowd`); this is the same convention at the Python edge.
 fn extract_iscrowd(obj: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
     // `bool_vec` covers bools (list or numpy bool array) with the same fast
-    // path COCOeval's own bool arguments get. It doesn't know int 0/1, so fall
-    // back to per-element extraction only for that case.
+    // path COCOeval's own bool arguments get. Anything else goes through the
+    // one flag reader, element by element.
     if let Ok(v) = bool_vec(obj, "iscrowd") {
         return Ok(v);
     }
-    let mut out = Vec::new();
-    for item in obj.try_iter()? {
-        let item = item?;
-        if let Ok(i) = item.extract::<i64>() {
-            out.push(i != 0);
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "iscrowd entries must be bool or int (0/1), got {}",
-                item.get_type().name()?
-            )));
-        }
-    }
-    Ok(out)
+    obj.try_iter()?.map(|item| extract_flag(&item?)).collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -22,6 +22,116 @@ macro_rules! req {
     };
 }
 
+/// A non-negative integer field that also accepts an integral float.
+///
+/// Ids come back as `1.0` from a JSON written by pandas or a numpy-backed
+/// encoder, and pycocotools accepts them because `1.0 == 1` and they hash
+/// alike. A fractional or negative value is still an error, naming the value;
+/// a value that does not fit the field's width is an `OverflowError`. The
+/// JSON loader applies the same rule through `types::deserialize_uint`.
+pub(crate) fn extract_int<T: TryFrom<u64>>(v: &Bound<'_, PyAny>) -> PyResult<T> {
+    let n = if let Ok(i) = v.extract::<u64>() {
+        i
+    } else if let Ok(f) = v.extract::<f64>()
+        && f.fract() == 0.0
+        && f >= 0.0
+        && f <= u64::MAX as f64
+    {
+        f as u64
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "expected a non-negative integer, got {}",
+            v.repr()?
+        )));
+    };
+    T::try_from(n).map_err(|_| {
+        pyo3::exceptions::PyOverflowError::new_err(format!(
+            "integer {n} is out of range for this field"
+        ))
+    })
+}
+
+/// A 0/1 flag: `bool`, any integer, or an integral float.
+///
+/// The one Python-side reader for `iscrowd`, `is_group_of`, `useCats`, and
+/// the `iscrowd` argument of the mask functions, so every flag in the API
+/// agrees on what counts as one. pycocotools' own default is `useCats = 1`,
+/// Open Images spells `IsGroupOf` as `0`/`1`, and a flag column read back
+/// from pandas is `0.0`. The JSON loader applies the same rule through
+/// `types::deserialize_flag`.
+pub(crate) fn extract_flag(v: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(b) = v.extract::<bool>() {
+        return Ok(b);
+    }
+    if let Ok(i) = v.extract::<i64>() {
+        return Ok(i != 0);
+    }
+    if let Ok(f) = v.extract::<f64>()
+        && f.fract() == 0.0
+    {
+        return Ok(f != 0.0);
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "expected a bool or 0/1 flag, got {}",
+        v.repr()?
+    )))
+}
+
+/// The Python type name of `obj`, for error messages.
+pub(crate) fn type_name(obj: &Bound<'_, PyAny>) -> String {
+    obj.get_type()
+        .name()
+        .map_or_else(|_| "unknown type".to_owned(), |n| n.to_string())
+}
+
+/// The numpy dtype name of `obj` (`"uint8"`, `"float32"`, …), or `None` for
+/// anything without a numpy `dtype`.
+pub(crate) fn numpy_dtype_name(obj: &Bound<'_, PyAny>) -> Option<String> {
+    obj.getattr("dtype")
+        .and_then(|d| d.getattr("name"))
+        .and_then(|n| n.extract::<String>())
+        .ok()
+}
+
+/// Compressed RLE `counts` as a string, from either the `str` or the `bytes`
+/// spelling; `None` for anything else (an uncompressed list).
+///
+/// `bytes` is what `mask.encode` and pycocotools emit. It has to be checked
+/// before any list branch: Python bytes extract as a sequence of ints, so a
+/// caller that tries the list first reads the ASCII codes of the compressed
+/// string as run lengths — a silently empty mask, not an error. Both RLE
+/// parsers go through here so that cannot happen to one and not the other
+/// again.
+fn counts_as_str(counts: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if let Ok(s) = counts.extract::<String>() {
+        return Ok(Some(s));
+    }
+    if let Ok(b) = counts.cast::<PyBytes>() {
+        return std::str::from_utf8(b.as_bytes())
+            .map(|s| Some(s.to_owned()))
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
+            });
+    }
+    Ok(None)
+}
+
+/// `req!` with an explicit reader — [`extract_int`] or [`extract_flag`].
+macro_rules! req_with {
+    ($dict:expr, $key:expr, $read:expr) => {
+        $read(&$dict.get_item($key)?.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(concat!("dict missing '", $key, "'"))
+        })?)?
+    };
+}
+
+/// `opt!` with an explicit reader — [`extract_int`] or [`extract_flag`].
+macro_rules! opt_with {
+    ($dict:expr, $key:expr, $read:expr) => {
+        $dict.get_item($key)?.map(|v| $read(&v)).transpose()?
+    };
+}
+
 /// The dict keys each record type owns. Any other key on an incoming dict is a
 /// custom key, preserved through the `extra` map (serde-flattened in the core
 /// types) so `load → filter → save` keeps user metadata the way pycocotools does.
@@ -174,28 +284,32 @@ pub fn segmentation_to_py(py: Python<'_>, seg: &Segmentation) -> PyResult<Py<PyA
 }
 
 pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
-    let id: u64 = opt!(dict, "id").unwrap_or(0);
-    let image_id: u64 = req!(dict, "image_id");
-    let category_id: u64 = opt!(dict, "category_id").unwrap_or(0);
+    let id: u64 = opt_with!(dict, "id", extract_int).unwrap_or(0);
+    let image_id: u64 = req_with!(dict, "image_id", extract_int);
+    let category_id: u64 = opt_with!(dict, "category_id", extract_int).unwrap_or(0);
     let bbox: Option<[f64; 4]> = opt!(dict, "bbox");
     let area: Option<f64> = opt!(dict, "area");
     let segmentation: Option<Segmentation> = dict
         .get_item("segmentation")?
         .map(|v| py_to_segmentation(&v))
         .transpose()?;
-    let iscrowd: bool = dict
-        .get_item("iscrowd")?
+    let iscrowd: bool = opt_with!(dict, "iscrowd", extract_flag).unwrap_or(false);
+    let keypoints: Option<Vec<f64>> = dict
+        .get_item("keypoints")?
         .map(|v| {
-            v.extract::<bool>()
-                .or_else(|_| v.extract::<u8>().map(|i| i != 0))
+            // Flat `[x, y, v, …]` is the COCO spelling; an `(N, 3)` array is
+            // how the same triplets sit in a tensor. Both mean one thing.
+            v.extract::<Vec<f64>>().or_else(|flat_err| {
+                v.extract::<Vec<[f64; 3]>>()
+                    .map(|rows| rows.into_iter().flatten().collect())
+                    .map_err(|_| flat_err)
+            })
         })
-        .transpose()?
-        .unwrap_or(false);
-    let keypoints: Option<Vec<f64>> = opt!(dict, "keypoints");
-    let num_keypoints: Option<u32> = opt!(dict, "num_keypoints");
+        .transpose()?;
+    let num_keypoints: Option<u32> = opt_with!(dict, "num_keypoints", extract_int);
     let obb: Option<[f64; 5]> = opt!(dict, "obb");
     let score: Option<f64> = opt!(dict, "score");
-    let is_group_of: Option<bool> = opt!(dict, "is_group_of");
+    let is_group_of: Option<bool> = opt_with!(dict, "is_group_of", extract_flag);
     let extra = extract_extra(dict, ANNOTATION_KEYS)?;
 
     Ok(Annotation {
@@ -222,30 +336,13 @@ fn py_to_segmentation(obj: &Bound<'_, PyAny>) -> PyResult<Segmentation> {
         let counts_obj = dict
             .get_item("counts")?
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("dict missing 'counts'"))?;
-        // Try str first, then bytes (what `mask.encode` returns, matching
-        // pycocotools), then a list of ints (uncompressed RLE). Bytes must be
-        // checked before the list: a `bytes` object is a Python sequence of
-        // ints, so `extract::<Vec<u32>>()` succeeds on it and silently turns
-        // the compressed string's byte values into an uncompressed RLE.
-        if let Ok(s) = counts_obj.extract::<String>() {
-            return Ok(Segmentation::CompressedRle { size, counts: s });
-        }
-        if let Ok(b) = counts_obj.cast::<PyBytes>() {
-            let s = std::str::from_utf8(b.as_bytes()).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
-            })?;
-            return Ok(Segmentation::CompressedRle {
-                size,
-                counts: s.to_string(),
-            });
+        if let Some(counts) = counts_as_str(&counts_obj)? {
+            return Ok(Segmentation::CompressedRle { size, counts });
         }
         let counts: Vec<u32> = counts_obj.extract().map_err(|_| {
-            let name = counts_obj
-                .get_type()
-                .name()
-                .map_or_else(|_| "?".to_string(), |n| n.to_string());
             pyo3::exceptions::PyTypeError::new_err(format!(
-                "RLE 'counts' must be str, bytes, or a list of ints, got {name}"
+                "RLE 'counts' must be str, bytes, or a list of ints, got {}",
+                type_name(&counts_obj)
             ))
         })?;
         return Ok(Segmentation::UncompressedRle { size, counts });
@@ -368,20 +465,11 @@ pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
         let counts_obj = dict.get_item("counts")?.ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("RLE dict has 'size' but missing 'counts'")
         })?;
-        // Try str first
-        if let Ok(s) = counts_obj.extract::<String>() {
+        if let Some(s) = counts_as_str(&counts_obj)? {
             return hotcoco_core::mask::rle_from_string(&s, size[0], size[1])
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
         }
-        // Try bytes (pycocotools format)
-        if let Ok(b) = counts_obj.cast::<PyBytes>() {
-            let s = std::str::from_utf8(b.as_bytes()).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
-            })?;
-            return hotcoco_core::mask::rle_from_string(s, size[0], size[1])
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
-        }
-        // Try list of ints (uncompressed RLE)
+        // Uncompressed RLE: a list of ints
         let counts: Vec<u32> = counts_obj.extract()?;
         return Ok(Rle {
             h: size[0],
@@ -405,16 +493,16 @@ pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
 }
 
 pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
-    let id: u64 = req!(dict, "id");
+    let id: u64 = req_with!(dict, "id", extract_int);
     let file_name: String = opt!(dict, "file_name").unwrap_or_default();
     // Default rather than require: pycocotools' assignment flow (`coco.dataset
     // = d; coco.createIndex()`) builds images as bare `{"id": …}` — that is
     // what torchmetrics' pycocotools backend passes. Dimensions are only
     // consumed by mask operations, which pycocotools equally cannot perform
     // without them.
-    let height: u32 = opt!(dict, "height").unwrap_or_default();
-    let width: u32 = opt!(dict, "width").unwrap_or_default();
-    let license: Option<u64> = opt!(dict, "license");
+    let height: u32 = opt_with!(dict, "height", extract_int).unwrap_or_default();
+    let width: u32 = opt_with!(dict, "width", extract_int).unwrap_or_default();
+    let license: Option<u64> = opt_with!(dict, "license", extract_int);
     let coco_url: Option<String> = opt!(dict, "coco_url");
     let flickr_url: Option<String> = opt!(dict, "flickr_url");
     let date_captured: Option<String> = opt!(dict, "date_captured");
@@ -439,8 +527,10 @@ pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
 }
 
 pub fn py_to_category(dict: &Bound<'_, PyDict>) -> PyResult<Category> {
-    let id: u64 = req!(dict, "id");
-    let name: String = req!(dict, "name");
+    let id: u64 = req_with!(dict, "id", extract_int);
+    // Missing `name` is tolerated the way pycocotools tolerates it (it stores
+    // raw dicts); `COCO::create_index` fills the placeholder.
+    let name: String = opt!(dict, "name").unwrap_or_default();
     let supercategory: Option<String> = opt!(dict, "supercategory");
     let skeleton: Option<Vec<[u32; 2]>> = opt!(dict, "skeleton");
     let keypoints: Option<Vec<String>> = opt!(dict, "keypoints");

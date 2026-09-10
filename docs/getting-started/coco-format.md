@@ -29,7 +29,7 @@ dicts) — see [Working with results](../guide/results.md#loading-results).
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `id` | int | **yes** | Unique per image. 0-based IDs are accepted. |
+| `id` | int | **yes** | Unique per image. 0-based IDs are accepted, and so is an integral float such as `1.0`, which is how a numpy-backed JSON writer spells an int. |
 | `width`, `height` | int | **yes** | Pixel dimensions. Needed for mask decoding, YOLO/Open Images export, and the browser. |
 | `file_name` | str | no | Defaults to `""`. Needed by `browse()` and image-dir workflows. |
 | `license`, `coco_url`, `flickr_url`, `date_captured` | — | no | Carried through untouched. |
@@ -44,10 +44,10 @@ dicts) — see [Working with results](../guide/results.md#loading-results).
 | `id` | int | no | Defaults to 0. Duplicate ids are tolerated but reported in [`load_warnings`](../api/coco.md#load_warnings). |
 | `bbox` | `[x, y, w, h]` | for bbox eval | Pixel coordinates, top-left corner + size — not `[x1, y1, x2, y2]`. |
 | `area` | float | no | Computed by `load_res` when missing. Annotations without `area` are excluded from explicit area-range queries (`get_ann_ids(area_rng=...)`, `filter(area_rng=...)`). |
-| `segmentation` | polygon(s) or RLE | for segm eval | A list of flat polygon coordinate lists, an uncompressed RLE dict (`counts` as a list of ints), or a compressed RLE dict (`counts` as a string). See [Mask operations](../guide/masks.md). |
+| `segmentation` | polygon(s) or RLE | for segm eval | A list of flat polygon coordinate lists, an uncompressed RLE dict (`counts` as a list of ints), or a compressed RLE dict (`counts` as a string, or as the `bytes` that `mask.encode` and pycocotools produce). See [Mask operations](../guide/masks.md). |
 | `iscrowd` | 0/1 or bool | no | Defaults to 0. Crowd regions match by IoA and are ignored rather than scored. |
 | `keypoints` | flat list | for keypoint eval | `[x1, y1, v1, x2, y2, v2, ...]` with visibility flags. |
-| `num_keypoints` | int | no | GT annotations with `num_keypoints == 0` are ignored in keypoint eval. |
+| `num_keypoints` | int | no | GT annotations with `num_keypoints == 0` are ignored in keypoint eval. When absent, it is derived from `keypoints` (the count with visibility `> 0`). |
 | `obb` | `[cx, cy, w, h, angle]` | for OBB eval | hotcoco extension; angle in radians. See [OBB evaluation](../guide/evaluation.md#oriented-bounding-box-obb-evaluation). |
 | `is_group_of` | bool | no | Open Images group-of flag — distinct matching semantics from `iscrowd`. |
 | `score` | float | no | Present only in detection results, not ground truth. |
@@ -57,7 +57,7 @@ dicts) — see [Working with results](../guide/results.md#loading-results).
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `id` | int | **yes** | Unique per category. |
-| `name` | str | **yes** | Used in per-class reports and format converters. |
+| `name` | str | no | Used in per-class reports and format converters. A category without one gets the display name `cat_<id>`, and the load is flagged in `load_warnings`. |
 | `supercategory` | str | no | Used for `get_cat_ids(sup_nms=...)` queries and Open Images hierarchy derivation. |
 | `keypoints`, `skeleton` | — | no | Keypoint names and connectivity, as in the COCO person file. |
 | `frequency` | `"r"`/`"c"`/`"f"` | no | LVIS frequency bucket, drives APr/APc/APf. |

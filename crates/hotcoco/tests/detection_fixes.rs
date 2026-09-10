@@ -333,3 +333,74 @@ fn eval_params_archive_is_self_explaining() {
         ev.reference_deviations()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Found by scripts/fuzz_dropin.py: a keypoint GT without `num_keypoints`
+// read the field as 0 and was ignored — every ground truth in a file that
+// omits the field, so keypoint AP scored a dataset with nothing to match.
+// ---------------------------------------------------------------------------
+
+fn keypoint_pair(with_num_keypoints: bool) -> (COCO, COCO) {
+    // 17 COCO keypoints, five labeled, the rest absent.
+    let mut kps = vec![0.0; 51];
+    for k in 0..5 {
+        kps[k * 3] = 10.0 + k as f64;
+        kps[k * 3 + 1] = 10.0 + k as f64;
+        kps[k * 3 + 2] = 2.0;
+    }
+    let gt_ann = Annotation {
+        id: 1,
+        image_id: 1,
+        category_id: 1,
+        bbox: Some([5.0, 5.0, 20.0, 20.0]),
+        area: Some(400.0),
+        keypoints: Some(kps),
+        num_keypoints: with_num_keypoints.then_some(5),
+        ..Default::default()
+    };
+    let dt_ann = Annotation {
+        score: Some(0.9),
+        num_keypoints: None,
+        ..gt_ann.clone()
+    };
+    (coco_from(vec![gt_ann]), coco_from(vec![dt_ann]))
+}
+
+#[test]
+fn num_keypoints_is_derived_when_absent() {
+    let ann = Annotation {
+        keypoints: Some(vec![1.0, 1.0, 2.0, 0.0, 0.0, 0.0, 3.0, 3.0, 1.0]),
+        ..Default::default()
+    };
+    assert_eq!(
+        ann.num_visible_keypoints(),
+        2,
+        "derived from visibility flags"
+    );
+    let explicit = Annotation {
+        num_keypoints: Some(7),
+        ..ann.clone()
+    };
+    assert_eq!(
+        explicit.num_visible_keypoints(),
+        7,
+        "the field wins when present"
+    );
+    assert_eq!(Annotation::default().num_visible_keypoints(), 0);
+
+    let stats = |with_field: bool| {
+        let (gt, dt) = keypoint_pair(with_field);
+        let mut ev = COCOeval::new(gt, dt, IouType::Keypoints);
+        ev.evaluate();
+        ev.accumulate();
+        ev.summarize_lines();
+        ev.stats().unwrap().to_vec()
+    };
+    let with = stats(true);
+    let without = stats(false);
+    assert_eq!(with[0], 1.0, "identical keypoints must score AP 1.0");
+    assert_eq!(
+        with, without,
+        "omitting num_keypoints must not change a single metric"
+    );
+}

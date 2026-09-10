@@ -11,16 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`coco --version`** prints the installed hotcoco version. `coco-eval --version`
   already did.
+- **`scripts/fuzz_dropin.py`, run as `just fuzz-dropin`** — a drop-in spelling
+  fuzzer. `fuzz_parity.py` round-trips every dataset through JSON files, so it
+  can never see a `bytes` RLE `counts`, a numpy scalar id, a tuple bbox, or a
+  missing optional key. This one builds a dataset in memory, evaluates it under
+  57 spellings pycocotools treats as equivalent, and fails on any spelling that
+  changes the stats or the `precision`/`recall`/`scores` arrays. Loud gaps and
+  places where both implementations drift together are summarized, not failed.
+- **`crates/hotcoco-pyo3/tests` runs in `just test` and in CI.** The binding
+  regression tests (drop-in gaps, mask parity, integrations) gated nothing
+  before; only `scripts/` was collected.
 
 ### Changed
+
+- **A category without `name` loads.** pycocotools tolerates the omission and
+  TorchMetrics emits bare `{"id": i}` records. The record gets the display name
+  `cat_<id>` — the same placeholder `COCO::cat_name` already used for an unknown
+  id — and the load is flagged in `load_warnings`.
+- **Integral floats are accepted for integer fields**, from a JSON file and from
+  a dict alike — `image_id: 1.0` is how a JSON written through pandas or numpy
+  reads back, and pycocotools accepts it because `1.0 == 1`. A fractional or
+  negative value still raises, naming the value; one that does not fit the
+  field is an `OverflowError`. Image `height`/`width` are optional in a file, as
+  they already were in a dict.
+- **`iscrowd`, `is_group_of`, `params.useCats`, and the mask functions'
+  `iscrowd` argument share one flag reader**, from a JSON file and from a dict
+  alike: `bool`, any int, or an integral float. pycocotools' own default is the
+  int `useCats = 1`, Open Images spells `IsGroupOf` as `0`/`1`, and each site
+  previously accepted a different subset.
+- **`keypoints` may be an `(N, 3)` array** as well as the flat COCO list.
 
 ### Fixed
 
 - **`mask.encode` accepts `bool` masks.** Any one-byte integer or boolean dtype
-  is viewed as `uint8` instead of rejected, so the arrays torch-side code stores
-  (TorchMetrics keeps masks as `bool`) encode without a cast. A wider dtype, or a
+  is read as `uint8` instead of rejected, so the arrays torch-side code stores
+  (TorchMetrics keeps masks as `bool`) encode without a cast, and any memory
+  layout works — C-order, Fortran-order, or a sliced view. A wider dtype, or a
   non-array input, now raises a `TypeError` naming the dtype and the fix rather
-  than `'ndarray' object is not an instance of 'ndarray'`.
+  than `'ndarray' object is not an instance of 'ndarray'`. Reported in
+  [#5](https://github.com/derekallman/hotcoco/issues/5), fixed in
+  [#7](https://github.com/derekallman/hotcoco/pull/7) by @Borda.
 - **RLE `counts` as `bytes` loads correctly.** `mask.encode()` returns `counts`
   as a `bytes` object, matching pycocotools, but the dataset loader decoded only
   the `str` form. A `bytes` object is a Python sequence of ints, so it extracted
@@ -30,7 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wherever a `segmentation` dict is parsed, in the `COCO` constructor and in
   `load_res()` alike, and a `counts` value that is not `str`, `bytes`, or a list
   of ints raises `TypeError` naming the type it got instead of producing an empty
-  mask.
+  mask. Reported in [#5](https://github.com/derekallman/hotcoco/issues/5),
+  fixed in [#6](https://github.com/derekallman/hotcoco/pull/6) by @Borda.
+- **`COCOeval.summarize()` prints its table again.** The 1.0 binding computed
+  the lines and dropped them; `stats` was populated and every documented
+  example showed a table that never appeared. The lines now go through Python's
+  `sys.stdout`, so `contextlib.redirect_stdout` and notebook capture work.
+- **A keypoint ground truth without `num_keypoints` is scored, not ignored.**
+  The missing field was read as 0, which is the "no labeled keypoints" ignore
+  rule, so a file that omits it evaluated as a dataset with nothing to match.
+  `num_keypoints` is now derived from the visibility flags when absent (the
+  Rust `Annotation::num_visible_keypoints` is the one reader). Found by the new
+  `scripts/fuzz_dropin.py`, which evaluates one dataset under many in-memory
+  spellings — bytes counts, numpy scalars, tuples, missing optional keys — and
+  fails on any spelling that changes the numbers.
+- **The non-default-parameter warning fires once, not twice.** `summarize()`
+  raised it as a Python `UserWarning` and the Rust core also wrote it to fd 2.
+  The Rust `COCOeval::summarize_lines` now prints nothing; `summarize()` owns
+  the stderr copy.
 
 ## [1.0.0] - 2026-09-02
 

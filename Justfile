@@ -16,11 +16,15 @@ build:
 # Run all tests: Rust unit tests + Python parity regression tests
 test: build
     cargo test
-    uv run pytest scripts/test_parity.py scripts/test_stubs.py scripts/test_theme.py scripts/test_cli.py -v -x --tb=short
+    uv run pytest scripts/test_parity.py crates/hotcoco-pyo3/tests scripts/test_stubs.py scripts/test_theme.py scripts/test_cli.py -v -x --tb=short
 
 # Run hypothesis-based parity fuzzer (slow — for bug hunting, not CI)
 fuzz: build
     uv run pytest scripts/fuzz_parity.py -v -x --tb=short
+
+# Fuzz in-memory spellings of one dataset against pycocotools (~1 min)
+fuzz-dropin: build
+    uv run pytest scripts/fuzz_dropin.py -x -q -p no:cacheprovider
 
 # Verify metric parity vs pycocotools on COCO val2017
 parity: build

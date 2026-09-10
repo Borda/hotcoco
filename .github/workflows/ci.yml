@@ -59,7 +59,7 @@ jobs:
       - name: Tests
         run: cargo test -p hotcoco -p hotcoco-cli
 
-      # The 1.0 reorganisation moves nearly every type between modules while
+      # The 1.0 reorganization moves nearly every type between modules while
       # promising the crate-root paths keep resolving. Reading lib.rs is not
       # enough to verify that — during the `quality/` move, the crate-root
       # re-exports all still resolved while `hotcoco::types::SummaryStats` had
@@ -179,7 +179,7 @@ jobs:
       - name: Differential parity vs pycocotools
         run: |
           source .venv/bin/activate
-          pytest scripts/test_parity.py -q
+          pytest scripts/test_parity.py crates/hotcoco-pyo3/tests -q
 
       - name: Differential parity vs lvis-api
         run: |

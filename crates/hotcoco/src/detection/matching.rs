@@ -217,7 +217,7 @@ fn partition_gt<'a>(
             } else {
                 let mut ignore = ann.iscrowd || area_ignore;
                 if is_kp {
-                    ignore = ignore || ann.num_keypoints.unwrap_or(0) == 0;
+                    ignore = ignore || ann.num_visible_keypoints() == 0;
                 }
                 (ignore, !ignore)
             }
