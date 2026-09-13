@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.0.1] - 2026-09-12
+
+### Added
+
 - **`coco --version`** prints the installed hotcoco version. `coco-eval --version`
   already did.
 - **`scripts/fuzz_dropin.py`, run as `just fuzz-dropin`** — a drop-in spelling
