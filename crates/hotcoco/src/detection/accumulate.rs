@@ -210,11 +210,56 @@ pub(super) fn accumulate_impl(
                 scores_writes: Vec::with_capacity(m * t * r),
             };
 
-            // Buffers reused across the M axis and the threshold sweep.
+            // One gather and one sort per work item, shared by every `m`.
+            //
+            // pycocotools concatenates each cell's `dtScores[0:maxDet]` and
+            // mergesorts (stably) per `m`. A stable sort of the per-cell-truncated
+            // concatenation equals the stable sort of the concatenation truncated
+            // at the *largest* cap, filtered to `rank_in_cell < maxDet`: filtering
+            // preserves relative order, and ties break on concatenation position,
+            // which the filter also preserves. So gather at `Params::max_det()`
+            // once, sort once, and derive each `m` by a stable filter — three
+            // gathers and three sorts of the same 1.5M-detection sequence per cell
+            // collapsed into one each. Cells may hold more detections than the
+            // *current* cap when `params.max_dets` shrank between `evaluate()` and
+            // `accumulate()`, so the gather truncates to the current cap and never
+            // trusts the stored length.
+            //
+            // The identity needs a strict weak order on scores, which `partial_cmp`
+            // gives for every finite value (and for `-0.0` versus `0.0`, which
+            // compare equal and keep input order). A NaN score breaks it: the
+            // comparator below treats NaN as equal to everything, so the sorted
+            // order — and therefore which detections a filtered slot keeps —
+            // depends on the input sequence. `load_res` rejects NaN scores;
+            // `COCO::from_dataset` does not, and neither did the per-`m` sort
+            // this replaced, so NaN ranking stays undefined rather than newly so.
+            let cap = params.max_det();
             let mut all_dt_scores: Vec<f64> = Vec::new();
+            // Position of each gathered detection inside its cell's score-descending
+            // list — the per-cell truncation index that `dtScores[0:maxDet]` applies.
+            let mut rank_in_cell: Vec<usize> = Vec::new();
             let mut all_dt_matched: Vec<Vec<bool>> = vec![Vec::new(); t];
             let mut all_dt_ignore: Vec<Vec<bool>> = vec![Vec::new(); t];
-            let mut sorted_scores: Vec<f64> = Vec::new();
+            for eval_img in &evals {
+                let nd = eval_img.dt_scores.len().min(cap);
+                all_dt_scores.extend_from_slice(&eval_img.dt_scores[..nd]);
+                rank_in_cell.extend(0..nd);
+                for t_idx in 0..t {
+                    all_dt_matched[t_idx].extend_from_slice(&eval_img.dt_matched.row(t_idx)[..nd]);
+                    all_dt_ignore[t_idx].extend_from_slice(&eval_img.dt_ignore.row(t_idx)[..nd]);
+                }
+            }
+
+            // Sort by score descending — stable, ties keep concatenation order.
+            let mut order: Vec<usize> = (0..all_dt_scores.len()).collect();
+            order.sort_by(|&a, &b| {
+                all_dt_scores[b]
+                    .partial_cmp(&all_dt_scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Buffers reused across the M axis and the threshold sweep.
+            let mut inds: Vec<usize> = Vec::with_capacity(order.len());
             let (mut tp, mut fp) = (Vec::new(), Vec::new());
             let mut pr_scratch = crate::metrics::counts::PrCurveScratch::default();
             let mut curve: Vec<(usize, f64, usize)> = Vec::new();
@@ -222,30 +267,13 @@ pub(super) fn accumulate_impl(
             for m_idx in 0..m {
                 let max_det = params.max_dets[m_idx];
 
-                all_dt_scores.clear();
-                for v in all_dt_matched.iter_mut().chain(all_dt_ignore.iter_mut()) {
-                    v.clear();
+                // Stable filter of the shared order == per-`m` sort (see above).
+                inds.clear();
+                if max_det >= cap {
+                    inds.extend_from_slice(&order);
+                } else {
+                    inds.extend(order.iter().copied().filter(|&i| rank_in_cell[i] < max_det));
                 }
-
-                for eval_img in &evals {
-                    let nd = eval_img.dt_scores.len().min(max_det);
-
-                    all_dt_scores.extend_from_slice(&eval_img.dt_scores[..nd]);
-                    for t_idx in 0..t {
-                        all_dt_matched[t_idx]
-                            .extend_from_slice(&eval_img.dt_matched.row(t_idx)[..nd]);
-                        all_dt_ignore[t_idx]
-                            .extend_from_slice(&eval_img.dt_ignore.row(t_idx)[..nd]);
-                    }
-                }
-
-                // Sort by score descending
-                let mut inds: Vec<usize> = (0..all_dt_scores.len()).collect();
-                inds.sort_by(|&a, &b| {
-                    all_dt_scores[b]
-                        .partial_cmp(&all_dt_scores[a])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
 
                 let nd = inds.len();
 
@@ -261,10 +289,6 @@ pub(super) fn accumulate_impl(
                     }
                     continue;
                 }
-
-                // Hoist sorted_scores outside the threshold loop (identical across thresholds)
-                sorted_scores.clear();
-                sorted_scores.extend(inds.iter().map(|&i| all_dt_scores[i]));
 
                 for t_idx in 0..t {
                     // `metrics::counts` owns the TP/FP classification and its
@@ -302,7 +326,7 @@ pub(super) fn accumulate_impl(
                     for &(r_idx, pr_val, rc_ptr) in &curve {
                         let p_idx = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
                         out.precision_writes.push((p_idx, pr_val));
-                        out.scores_writes.push((p_idx, sorted_scores[rc_ptr]));
+                        out.scores_writes.push((p_idx, all_dt_scores[inds[rc_ptr]]));
                     }
                 }
             }

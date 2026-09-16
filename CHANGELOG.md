@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`accumulate()` sorts each (category, area range) once, not once per
+  `maxDets` entry.** pycocotools concatenates every image's `dtScores[0:maxDet]`
+  and mergesorts the result for each cap. The three sorted sequences are the same
+  sequence: a stable sort of the concatenation truncated at the largest cap,
+  filtered to detections whose rank inside their image is below the smaller cap,
+  is the stable sort of the smaller-cap concatenation — filtering keeps relative
+  order, and ties break on concatenation position, which the filter also keeps.
+  So the gather and the sort run once per (category, area range) and each
+  `maxDets` slot is a filter of that order. On a 1.5M-detection RF-DETR-shaped
+  workload (300 detections per image, `maxDets=[1, 10, 300]`) `accumulate()` is
+  22–24% faster at 1, 2, and 16 threads, and end-to-end evaluate + accumulate +
+  summarize 10–14%. Every `precision`, `recall`, and `scores` value is
+  bit-identical to before, including under cross-image score ties, an unsorted
+  `maxDets`, and `maxDets` lowered between `evaluate()` and `accumulate()`; a new
+  Rust test pins each of those against fresh single-cap runs.
+
 ### Fixed
 
 ## [1.0.1] - 2026-09-12
