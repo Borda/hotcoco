@@ -9,7 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`metrics::counts::precision_recall_curve_of_order_into`** — the interpolated
+  precision-recall curve straight from ranked match flags, without the
+  cumulative TP/FP arrays `precision_recall_curve_into` reads. Same values, same
+  emission order; `accumulate()` now runs on it (below).
+
 ### Changed
+
+- **`accumulate()` computes each precision-recall curve in one pass over the
+  ranked detections instead of four array round trips.** The previous kernel
+  wrote cumulative TP and FP arrays, then recall and precision arrays, then
+  read them back for the envelope and the recall-threshold scan. The new one
+  keeps integer counters, computes precision only at true-positive ranks — the
+  only ranks the VOC envelope can take its maximum from, and the only ranks a
+  recall threshold can first be met at — and samples the thresholds while
+  scanning. `accumulate()` is 34–37% faster and `compare()` (one accumulation
+  per bootstrap resample) 37% faster on a 1.5M-detection, 300-per-image
+  workload at 1 and 2 threads; end-to-end 18–25%. Every `precision`, `recall`,
+  and `scores` value is bit-identical to before; Open Images keeps the
+  cumulative arrays, which its all-points AP needs. The identity is checked by
+  `metrics::counts::tests::fused_curve_matches_cumulative_then_interpolate_bit_for_bit`
+  against the previous two-function path, including unsorted, duplicated, and
+  `NaN` recall thresholds.
 
 ### Fixed
 
