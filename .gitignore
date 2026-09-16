@@ -167,5 +167,6 @@ report.pdf
 
 # Session working notes (PR bodies, review write-ups) — same rationale as
 # `plans/`: short half-life, not documentation anyone should find in the repo.
+/.plans/
 /.reports/
 /.temp/

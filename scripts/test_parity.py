@@ -202,6 +202,131 @@ def test_many_detections_few_gt():
     assert_metrics_match(py_stats, rs_stats, "bbox")
 
 
+# ---------------------------------------------------------------------------
+# Accumulated arrays, bit for bit
+# ---------------------------------------------------------------------------
+
+
+class _Lcg:
+    """Deterministic 64-bit LCG so the score ties below never depend on a seed
+    anyone can change."""
+
+    def __init__(self, state: int) -> None:
+        self.state = state
+
+    def next(self) -> int:
+        self.state = (self.state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        return self.state >> 33
+
+    def score(self) -> float:
+        """Two-decimal scores: ~100 distinct values over ~500 detections."""
+        return (self.next() % 100) / 100.0
+
+
+def _tie_heavy_dataset():
+    """12 images x 3 categories, 14 detections per cell, scores quantized to two
+    decimals so equal scores span images, plus one hand-built tie: a TP in image 1
+    and an FP in image 2 both scoring exactly 0.70. Category 3 has no ground truth.
+
+    Every cell holds more detections than the middle ``maxDets`` cap, so per-image
+    truncation fires, and the cross-image ties make the stable tie-break inside
+    ``accumulate()`` observable in the precision curve.
+    """
+    sizes = [20.0, 50.0, 120.0]  # small, medium, large by COCO area
+    dets_per_cell = 14
+    rng = _Lcg(0x9E3779B97F4A7C15)
+    images = [{"id": i, "width": 640, "height": 480, "file_name": f"{i}.jpg"} for i in range(1, 13)]
+    no_gt_cat = 3
+    categories = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": no_gt_cat, "name": "no-gt"}]
+    anns, dts = [], []
+    for img_id in range(1, 13):
+        for cat_id in range(1, 4):
+            n_gt = 0 if cat_id == no_gt_cat else (img_id + cat_id) % 4
+            cell = []
+            for j in range(n_gt):
+                size = sizes[(j + cat_id) % 3]
+                gt_box = [20.0 + 130.0 * j, 20.0 + 150.0 * cat_id, size, size]
+                anns.append(_make_bbox_ann(len(anns) + 1, img_id, cat_id, bbox=gt_box))
+                # Two pixels off the box: IoU well above 0.5 at every size.
+                cell.append(([gt_box[0] + 2.0, gt_box[1] + 2.0, size, size], rng.score()))
+            while len(cell) < dets_per_cell:
+                size = sizes[rng.next() % 3]
+                # Far below every GT row, so never a match.
+                cell.append(([float(rng.next() % 500), 480.0, size, size], rng.score()))
+            dts.extend(_make_bbox_det(img_id, cat_id, bbox=box, score=s) for box, s in cell)
+    # Image 1 / category 1 has three GT boxes; the first is [20, 170, 50, 50].
+    assert any(a["image_id"] == 1 and a["category_id"] == 1 and a["bbox"] == [20.0, 170.0, 50.0, 50.0] for a in anns)
+    dts.append(_make_bbox_det(1, 1, bbox=[22.0, 172.0, 50.0, 50.0], score=0.70))
+    dts.append(_make_bbox_det(2, 1, bbox=[300.0, 480.0, 50.0, 50.0], score=0.70))
+    return _make_minimal_gt("bbox", images=images, categories=categories, annotations=anns), dts
+
+
+def _accumulated_arrays(gt, dts, max_dets, acc_max_dets=None):
+    """Run evaluate + accumulate through both tools and return the two ``eval``
+    dicts. ``acc_max_dets`` re-assigns the caps between the two calls — the
+    pycocotools ``accumulate(p)`` idiom, which leaves cells holding more
+    detections than the current cap."""
+    from pycocotools.coco import COCO as PyCOCO  # noqa: PLC0415
+    from pycocotools.cocoeval import COCOeval as PyCOCOeval  # noqa: PLC0415
+
+    with written_json(gt, dts, quiet=True) as (gt_path, dt_path):
+        with suppress_output():
+            py_gt = PyCOCO(gt_path)
+            py_ev = PyCOCOeval(py_gt, py_gt.loadRes(dt_path), "bbox")
+            py_ev.params.maxDets = list(max_dets)
+            py_ev.evaluate()
+            if acc_max_dets is not None:
+                py_ev.params.maxDets = list(acc_max_dets)
+            py_ev.accumulate()
+
+        rs_gt = COCO(gt_path)
+        rs_ev = COCOeval(rs_gt, rs_gt.load_res(dt_path), "bbox")
+        rs_ev.params.max_dets = list(max_dets)
+        rs_ev.evaluate()
+        if acc_max_dets is not None:
+            rs_ev.params.max_dets = list(acc_max_dets)
+        rs_ev.accumulate()
+    return py_ev.eval, rs_ev.eval
+
+
+def _assert_arrays_bit_equal(py_eval, rs_eval, what):
+    for key in ("precision", "recall", "scores"):
+        py_arr, rs_arr = np.asarray(py_eval[key]), np.asarray(rs_eval[key])
+        assert py_arr.shape == rs_arr.shape, f"{what}: {key} shape {py_arr.shape} vs {rs_arr.shape}"
+        mismatch = np.argwhere(py_arr.view(np.uint64) != rs_arr.view(np.uint64))
+        assert mismatch.size == 0, (
+            f"{what}: {key} differs at {len(mismatch)} positions, first (t, r, k, a, m)={mismatch[0].tolist()}: "
+            f"pycocotools {py_arr[tuple(mismatch[0])]!r} vs hotcoco {rs_arr[tuple(mismatch[0])]!r}"
+        )
+
+
+def test_accumulated_arrays_match_pycocotools_bit_for_bit():
+    """``precision``, ``recall`` and ``scores`` equal pycocotools' exactly, not
+    within a tolerance, on a dataset built to expose ranking order.
+
+    Each headline AP averages 1,010 precision points, so one tie broken the wrong
+    way moves it by about 1e-4 — inside the tolerance the val2017 parity run
+    accepts — and the fast suite has no other dataset where scores collide across
+    images while ``maxDets`` truncates. The arrays compare every point and name
+    the first ``(t, r, k, a, m)`` that differs. Two cases: the default caps, and
+    caps lowered between ``evaluate()`` and ``accumulate()``.
+    """
+    gt, dts = _tie_heavy_dataset()
+    scores = [d["score"] for d in dts]
+    assert len(set(scores)) < len(scores) // 4, "scores must collide across cells for the tie-break to matter"
+
+    py_eval, rs_eval = _accumulated_arrays(gt, dts, [1, 10, 100])
+    precision = np.asarray(py_eval["precision"])
+    assert not np.array_equal(precision[..., 0], precision[..., 1]), "cap 1 and cap 10 must yield different curves"
+    assert ((precision > 0) & (precision < 1)).any(), "curves must be non-trivial"
+    _assert_arrays_bit_equal(py_eval, rs_eval, "maxDets=[1, 10, 100]")
+
+    lowered = [10, 1]
+    py_eval, rs_eval = _accumulated_arrays(gt, dts, [1, 10, 100], acc_max_dets=lowered)
+    assert np.asarray(rs_eval["precision"]).shape[-1] == len(lowered)
+    _assert_arrays_bit_equal(py_eval, rs_eval, "evaluate maxDets=[1, 10, 100], accumulate maxDets=[10, 1]")
+
+
 def test_kpt_no_visible():
     """Keypoint GT with num_keypoints=0 should be ignored."""
     kpts_zero = [0, 0, 0] * 17
