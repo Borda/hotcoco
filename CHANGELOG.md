@@ -30,7 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `params` reconfigured between the two — categories or area ranges dropped,
   reordered, or listed twice — resolves every cell exactly as the sequential
   walk did; `detection::accumulate::tests` checks that against the old walk
-  under several run boundaries.
+  under several run boundaries, and
+  `accumulate_arrays_are_independent_of_thread_count` checks every output
+  array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
+  dataset with tied scores across images.
 
 ### Fixed
 
