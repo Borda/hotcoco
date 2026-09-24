@@ -291,33 +291,45 @@ pub(super) fn accumulate_impl(
                 }
 
                 for t_idx in 0..t {
-                    // `metrics::counts` owns the TP/FP classification and its
-                    // running sums.
-                    crate::metrics::counts::cumulative_tp_fp(
-                        inds.iter().copied(),
-                        &all_dt_matched[t_idx],
-                        Some(&all_dt_ignore[t_idx]),
-                        &mut tp,
-                        &mut fp,
-                    );
-
-                    let final_recall = crate::metrics::counts::precision_recall_curve_into(
-                        &tp,
-                        &fp,
-                        num_gt,
-                        &params.rec_thrs,
-                        &mut pr_scratch,
-                        &mut curve,
-                    );
-
-                    // The all-points AP is the exact area under the same envelope the
-                    // grid samples. It has to be computed here, where `tp`/`fp` are
-                    // already score-ordered and cumulative — it cannot be recovered
-                    // from the 101 samples afterwards.
-                    let all_points_ap = if want_all_points {
-                        crate::metrics::counts::average_precision_all_points(&tp, &fp, num_gt)
+                    // `metrics::counts` owns the TP/FP classification and the
+                    // curve. The all-points AP is the exact area under the same
+                    // envelope the grid samples and needs the cumulative `tp`/`fp`
+                    // arrays, score-ordered — it cannot be recovered from the 101
+                    // samples afterwards — so Open Images materializes them and
+                    // reads the curve from them. Every other mode discards that
+                    // AP and takes the fused kernel, which produces the same
+                    // curve without the two arrays.
+                    let (final_recall, all_points_ap) = if want_all_points {
+                        crate::metrics::counts::cumulative_tp_fp(
+                            inds.iter().copied(),
+                            &all_dt_matched[t_idx],
+                            Some(&all_dt_ignore[t_idx]),
+                            &mut tp,
+                            &mut fp,
+                        );
+                        let final_recall = crate::metrics::counts::precision_recall_curve_into(
+                            &tp,
+                            &fp,
+                            num_gt,
+                            &params.rec_thrs,
+                            &mut pr_scratch,
+                            &mut curve,
+                        );
+                        let ap =
+                            crate::metrics::counts::average_precision_all_points(&tp, &fp, num_gt);
+                        (final_recall, ap)
                     } else {
-                        -1.0
+                        let final_recall =
+                            crate::metrics::counts::precision_recall_curve_of_order_into(
+                                inds.iter().copied(),
+                                &all_dt_matched[t_idx],
+                                Some(&all_dt_ignore[t_idx]),
+                                num_gt,
+                                &params.rec_thrs,
+                                &mut pr_scratch,
+                                &mut curve,
+                            );
+                        (final_recall, -1.0)
                     };
                     let recall_idx = shape.recall_idx(t_idx, k_idx, a_idx, m_idx);
                     out.recall_writes
