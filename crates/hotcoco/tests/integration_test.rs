@@ -5428,6 +5428,183 @@ fn evaluation_is_independent_of_thread_count() {
     }
 }
 
+/// `accumulate()`'s arrays must be independent of the rayon thread count,
+/// bitwise, on a dataset where the order of tied detections decides the answer.
+///
+/// `evaluation_is_independent_of_thread_count` above checks the twelve summary
+/// numbers on a small fixture. This one checks every `precision`, `recall`,
+/// `scores`, and `ap_all_points` entry, plus a filtered re-accumulation through
+/// `slice_by`, on a dataset built to have equal scores across images and
+/// categories with a true positive on one side of a tie and a false positive on
+/// the other. The bucketing that feeds the stable score sort is built in
+/// parallel runs whose boundaries move with the thread count; a run concatenated
+/// out of order swaps tied detections between images and moves a precision
+/// value. Two-decimal scores over ~500 detections make such ties common, and one
+/// is built by hand so the fixture cannot lose them to an edit.
+#[test]
+fn accumulate_arrays_are_independent_of_thread_count() {
+    const DETS_PER_CELL: usize = 12;
+    const SIZES: [f64; 3] = [20.0, 50.0, 120.0]; // small, medium, large by COCO area
+
+    // Deterministic LCG: the ties must not depend on a seed anyone can change.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) as u32
+        }
+        fn score(&mut self) -> f64 {
+            f64::from(self.next() % 100) / 100.0
+        }
+    }
+    let mut rng = Lcg(0xA3_5EED_0000_0001);
+
+    let images: Vec<Image> = (1..=12).map(img).collect();
+    let categories = vec![cat(1, "a"), cat(2, "b"), cat(3, "no-gt")];
+    let mut gts = Vec::new();
+    let mut dts = Vec::new();
+    let (mut gt_id, mut dt_id) = (1u64, 1u64);
+    for image_id in 1..=12u64 {
+        for cat_id in 1..=3u64 {
+            let n_gt = if cat_id == 3 {
+                0
+            } else {
+                ((image_id + cat_id) % 4) as usize
+            };
+            for j in 0..n_gt {
+                let size = SIZES[(j + cat_id as usize) % 3];
+                let gt_box = [
+                    20.0 + 130.0 * j as f64,
+                    20.0 + 150.0 * cat_id as f64,
+                    size,
+                    size,
+                ];
+                gts.push(ann(gt_id, gt_box).in_img(image_id).in_cat(cat_id));
+                gt_id += 1;
+                let tp_box = [gt_box[0] + 2.0, gt_box[1] + 2.0, size, size];
+                assert!(iou_of(gt_box, tp_box) > 0.5);
+                dts.push(
+                    det(dt_id, tp_box, rng.score())
+                        .in_img(image_id)
+                        .in_cat(cat_id),
+                );
+                dt_id += 1;
+            }
+            for _ in n_gt..DETS_PER_CELL {
+                let size = SIZES[(rng.next() % 3) as usize];
+                // Far from every GT row (y >= 480 + size <= 640).
+                let fp_box = [f64::from(rng.next() % 500), 480.0, size, size];
+                dts.push(
+                    det(dt_id, fp_box, rng.score())
+                        .in_img(image_id)
+                        .in_cat(cat_id),
+                );
+                dt_id += 1;
+            }
+        }
+    }
+    // Hand-built cross-image tie: image 1 / category 1 has three GT boxes
+    // (`(1 + 1) % 4`); the first is `[20, 170, 50, 50]`. Its TP and an FP in
+    // image 2 both score exactly 0.70.
+    let tie_gt = [20.0, 170.0, 50.0, 50.0];
+    assert!(
+        gts.iter()
+            .any(|g| g.image_id == 1 && g.category_id == 1 && g.bbox == Some(tie_gt))
+    );
+    let tie_tp = [22.0, 172.0, 50.0, 50.0];
+    assert!(iou_of(tie_gt, tie_tp) > 0.5);
+    dts.push(det(dt_id, tie_tp, 0.70).in_img(1));
+    dts.push(det(dt_id + 1, [300.0, 480.0, 50.0, 50.0], 0.70).in_img(2));
+
+    let gt_ds = dataset(images.clone(), categories.clone(), gts);
+    let dt_ds = dataset(images, categories, dts);
+    let slices: HashMap<String, Vec<u64>> = HashMap::from([
+        (
+            "odd".to_string(),
+            (1..=12u64).filter(|i| i % 2 == 1).collect(),
+        ),
+        ("first-third".to_string(), (1..=4u64).collect()),
+    ]);
+
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool");
+        pool.install(|| {
+            let coco_gt = COCO::from_dataset(gt_ds.clone());
+            let coco_dt = COCO::from_dataset(dt_ds.clone());
+            let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+            ev.params.max_dets = vec![1, 5, 100];
+            ev.evaluate();
+            ev.accumulate();
+            let sliced = ev.slice_by(slices.clone()).expect("slice_by");
+            let slice_metrics: Vec<(String, Vec<(String, f64)>)> = sliced
+                .slices
+                .iter()
+                .map(|sl| {
+                    (
+                        sl.name.clone(),
+                        sl.metrics.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                    )
+                })
+                .collect();
+            (
+                ev.accumulated().expect("accumulate sets eval").clone(),
+                slice_metrics,
+            )
+        })
+    };
+
+    let assert_bits_eq = |name: &str, threads: usize, a: &[f64], b: &[f64]| {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "{name}: length differs at {threads} threads"
+        );
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            // Bitwise, not approximate: the claim is determinism.
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{name}[{i}] differs between 1 thread ({x}) and {threads} threads ({y})"
+            );
+        }
+    };
+
+    let (single, single_slices) = run(1);
+    // Precondition: the arrays carry real curves, not only sentinels.
+    assert!(single.precision.iter().any(|&p| p > 0.0 && p < 1.0));
+    for threads in [2usize, 3, 5, 8, 16] {
+        let (many, many_slices) = run(threads);
+        assert_eq!(single.precision.len(), many.precision.len());
+        assert_bits_eq("precision", threads, &single.precision, &many.precision);
+        assert_bits_eq("recall", threads, &single.recall, &many.recall);
+        assert_bits_eq("scores", threads, &single.scores, &many.scores);
+        assert_bits_eq(
+            "ap_all_points",
+            threads,
+            &single.ap_all_points,
+            &many.ap_all_points,
+        );
+        assert_eq!(single_slices.len(), many_slices.len());
+        for ((name_a, ma), (name_b, mb)) in single_slices.iter().zip(&many_slices) {
+            assert_eq!(name_a, name_b);
+            for ((ka, va), (kb, vb)) in ma.iter().zip(mb) {
+                assert_eq!(ka, kb);
+                assert_eq!(
+                    va.to_bits(),
+                    vb.to_bits(),
+                    "slice {name_a} metric {ka} differs between 1 thread ({va}) and {threads} threads ({vb})"
+                );
+            }
+        }
+    }
+}
+
 /// `tide_errors` must be independent of the rayon thread count, bitwise, even
 /// with tied detection scores spanning multiple images and categories.
 ///

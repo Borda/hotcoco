@@ -46,6 +46,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `metrics::counts::tests::fused_curve_matches_cumulative_then_interpolate_bit_for_bit`
   against the previous two-function path, including unsorted, duplicated, and
   `NaN` recall thresholds.
+- **`accumulate()` buckets its evaluated cells in parallel, with one hash lookup
+  per (image, category) pair instead of three per cell.** Before the
+  precision-recall work starts, `accumulate()` groups every evaluated cell by
+  category and area range. That walk was sequential and did three hash lookups
+  per cell — category id, area-range key, image id — over ~1.5M 360-byte cells
+  on an RF-DETR-shaped run (5,000 images × 300 detections, `maxDets=[1, 10,
+  300]`), which made it 69 ms of the 189 ms `accumulate()` took on 16 threads:
+  the one serial step left. The walk is now cut into a few runs per thread that
+  are concatenated in order, the area range is matched by a bit-exact scan of
+  the handful of ranges, and the category and image lookups are memoized on the
+  id of the previous cell, which `evaluate()`'s layout makes a hit on almost
+  every cell. Same workload, same machine: grouping 69 → 32 / 18 / 6 ms and
+  `accumulate()` 1.49 → 1.45 s (≈ −3%, noise-level) / 0.80 → 0.75 s (−7%) /
+  0.207 → 0.136 s (**−34%**) at 1 / 2 / 16 threads. `precision`, `recall`,
+  `scores`, and `stats` are bit-identical to before on ten configurations,
+  including `maxDets` reassigned between `evaluate()` and `accumulate()`. A
+  `params` reconfigured between the two — categories or area ranges dropped,
+  reordered, or listed twice — resolves every cell exactly as the sequential
+  walk did; `detection::accumulate::tests` checks that against the old walk
+  under several run boundaries, and
+  `accumulate_arrays_are_independent_of_thread_count` checks every output
+  array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
+  dataset with tied scores across images.
 
 ### Fixed
 
