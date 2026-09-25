@@ -69,6 +69,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `accumulate_arrays_are_independent_of_thread_count` checks every output
   array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
   dataset with tied scores across images.
+- **Decoding a Python dict into a dataset interns its field-name keys instead of
+  allocating a new string per key per record.** `COCO(dict)`, `loadRes(list of
+  dicts)`, and the RLE/segmentation decoders looked up each field with a bare
+  string literal, and `PyDict.get_item` allocates a fresh `PyString` for that on
+  every call; decoding an RF-DETR-shaped annotation list calls this once per
+  field per detection — millions of throwaway strings for a fixed set of ~10
+  field names. Those lookups now go through `pyo3::intern!`, which builds each
+  literal's `PyString` once per process and reuses it. `COCO(dict)` construction
+  is 18–20% faster across three shapes (a small dict, a 1.5M-annotation
+  segmentation dict, and a bounding-box-only dict), with no numeric or
+  structural change to the decoded dataset. A new test,
+  `TestKnownKeysRoundTrip`, round-trips every known field of an annotation,
+  image, and category through `COCO(dict)` and fails if any interned key
+  literal drifts from the field it names, whether the field is required
+  (raises instead of decoding) or optional (silently dropped instead of
+  decoding) — both failure shapes are pinned by injection. A separate
+  reprofile found that `extra`-field extraction, not covered by this change,
+  now costs roughly half of what remains of dict decoding on the same
+  workloads; that cost is unaddressed here.
 
 ### Fixed
 
@@ -315,7 +334,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report, and `ev.results()` in Python - the artifacts users archive and come
   back to. Previously the marker existed only on `EvalReport`, which nothing that
   writes a file uses, so comparability died with the process.
-
 
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
