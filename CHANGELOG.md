@@ -13,6 +13,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   precision-recall curve straight from ranked match flags, without the
   cumulative TP/FP arrays `precision_recall_curve_into` reads. Same values, same
   emission order; `accumulate()` now runs on it (below).
+- **`StreamingEval`** (Rust `hotcoco::StreamingEval`, Python `hotcoco.StreamingEval`)
+  — incremental evaluation: call `add_image()` as each image's ground truth and
+  detections become available, instead of loading a whole dataset and calling
+  `COCOeval::evaluate()` once at the end. Per-image matching runs immediately in
+  `add_image()` (overlappable with other work, such as postprocessing between
+  training steps); `finalize()` assembles every image seen so far into an
+  ordinary `COCOeval`, ready for `accumulate()` → `summarize()` → `report()`.
+  This moves `loadRes` and `evaluate()`'s matching off the end-of-epoch critical
+  path — together the largest two phases of `compute()` on an RF-DETR-shaped
+  workload. No Open Images support (hierarchy expansion needs the whole GT
+  dataset up front); the category list is fixed at construction, so a category
+  with zero annotations still gets a scored `-1.0` slot instead of vanishing;
+  and the `COCOeval` `finalize()` returns carries categories but no annotations
+  in `coco_gt`/`coco_dt`, so `confusion_matrix()`, `tide_errors()`, `compare()`,
+  and `slice_by()` need a batch-built `COCOeval` instead. A per-cell `EvalImg`
+  compaction format (~20 B/detection, cutting peak memory) is left for a
+  follow-up PR that can use this one's bit-identity tests as its oracle. New
+  Rust integration tests reproduce a tie-heavy fixture and LVIS federated
+  filtering (`neg_category_ids`/`not_exhaustive_category_ids`) bit-for-bit
+  against the batch pipeline, with two proven fault injections (a wrong
+  `(image, category)` sort order, a dropped area-range slot); new Python tests
+  cover the same LVIS filtering and the spent-evaluator error paths.
 
 ### Changed
 
@@ -315,7 +337,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report, and `ev.results()` in Python - the artifacts users archive and come
   back to. Previously the marker existed only on `EvalReport`, which nothing that
   writes a file uses, so comparability died with the process.
-
 
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
