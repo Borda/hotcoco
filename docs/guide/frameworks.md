@@ -13,7 +13,7 @@ This patches `sys.modules` so that `pycocotools`, `pycocotools.coco`, `pycocotoo
 |-----------|------|------------------------|
 | Detectron2 | pycocotools | Yes |
 | MMDetection | pycocotools (default) | Yes (default path) |
-| RF-DETR | pycocotools | Yes |
+| RF-DETR | hotcoco (native, 1.10+) | Not needed — see [RF-DETR](#rf-detr) |
 | Ultralytics YOLO | Internal (custom) | No — see [Ultralytics YOLO](#ultralytics-yolo) |
 
 ---
@@ -73,17 +73,23 @@ from mmengine.runner import Runner
 
 ## RF-DETR
 
-RF-DETR imports `pycocotools.cocoeval.COCOeval` directly:
+RF-DETR 1.10.0 (2026-09-04) evaluates on hotcoco natively. The `train` extra installs it, and `TrainConfig.eval_backend` defaults to `"hotcoco"`, so no patching is needed:
+
+```bash
+pip install "rfdetr[train]"
+```
 
 ```python
-from hotcoco import init_as_pycocotools
-init_as_pycocotools()
+from rfdetr import RFDETRSmall
 
-from rfdetr import RFDETRBase
-
-model = RFDETRBase()
+model = RFDETRSmall()
 model.train(dataset_dir="coco/", epochs=12)
 ```
+
+Pass `eval_backend="faster_coco_eval"` to `model.train()` to restore the previous evaluator. Both backends report identical metrics; hotcoco is several times faster at `compute()` time.
+
+!!! note
+    RF-DETR releases before 1.10 evaluate with `faster-coco-eval`, not pycocotools, so `init_as_pycocotools()` has no effect there. Upgrade to 1.10 or later to evaluate with hotcoco.
 
 ---
 
