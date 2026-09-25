@@ -1682,8 +1682,14 @@ impl PyCOCOeval {
         }
 
         let iou = parse_iou_type(&iou_type)?;
-        let gt = hotcoco_core::COCO::from_dataset(coco_gt.inner.dataset.clone());
-        let dt = hotcoco_core::COCO::from_dataset(coco_dt.inner.dataset.clone());
+        // `PyCOCO` keeps `inner`'s index in lockstep with `inner.dataset` — every
+        // write path replaces the whole `COCO` (the `dataset` setter, `derived*`,
+        // `without_image_dir`) — so the evaluator's snapshot can copy the built
+        // index instead of rehashing every id a second time. Still a full copy:
+        // the evaluator owns its data, and OID `evaluate()` overwrites these
+        // fields.
+        let gt = coco_gt.inner.clone();
+        let dt = coco_dt.inner.clone();
 
         let inner = if oid_style {
             if iou != hotcoco_core::IouType::Bbox {
