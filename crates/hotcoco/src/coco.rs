@@ -3,7 +3,7 @@
 //! Faithful port of `pycocotools/coco.py`.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::mask;
@@ -630,21 +630,61 @@ impl COCO {
     /// Prefer this over `load_res` when results are already in memory — it avoids
     /// a round-trip through the filesystem. The Python binding uses this internally
     /// when `load_res` is called with a list of dicts or a numpy array.
-    pub fn load_res_anns(&self, anns: Vec<Annotation>) -> crate::error::Result<COCO> {
-        let warnings = self.validate_results(&anns)?;
-
-        let mut dataset = Dataset {
-            info: self.dataset.info.clone(),
-            images: self.dataset.images.clone(),
-            annotations: anns,
-            categories: self.dataset.categories.clone(),
-            licenses: self.dataset.licenses.clone(),
-        };
-
+    pub fn load_res_anns(&self, mut anns: Vec<Annotation>) -> crate::error::Result<COCO> {
         // One kind for the whole file, from the first annotation, as pycocotools
         // does — then fill in whatever geometry that kind implies.
-        if let Some(kind) = dataset.annotations.first().and_then(ResultKind::of) {
-            for ann in &mut dataset.annotations {
+        let kind = anns.first().and_then(ResultKind::of);
+        let has_cats = !self.cats.is_empty();
+        let mut warnings = Vec::new();
+        let mut img_mismatch_warned = false;
+        let mut cat_mismatch_warned = false;
+
+        // Validate, derive geometry, and assign ids in one pass instead of five —
+        // probing the index maps this `COCO` already built (`self.imgs`/`self.cats`)
+        // rather than rebuilding a fresh `HashSet` of GT ids on every call.
+        // `COCO::from_dataset` below still walks `anns` a second time to build the
+        // result's own index — that walk is `create_index`'s, not this function's,
+        // and is out of scope here (see the plan doc's candidate C).
+        for (i, ann) in anns.iter_mut().enumerate() {
+            // A NaN score is rejected rather than warned about: it corrupts the
+            // whole run, not one annotation. Every ranking path sorts with
+            // `partial_cmp(..).unwrap_or(Equal)`, which is not transitive once NaN
+            // is present — the sort silently produces an arbitrary order, so AP
+            // becomes a function of the sort implementation. (`healthcheck`
+            // reports the same condition as an error and points here.)
+            if ann.score.is_some_and(f64::is_nan) {
+                return Err(format!(
+                    "load_res(): annotation {} (id {}, image_id {}) has a NaN score. \
+                     Scores order the detection ranking, and NaN makes that order \
+                     undefined — every metric downstream would be meaningless. Filter \
+                     or repair these detections before evaluating.",
+                    i, ann.id, ann.image_id
+                )
+                .into());
+            }
+
+            // Warn on the first annotation whose image_id or category_id isn't in
+            // the GT — a common mistake that causes DTs to silently produce
+            // misleadingly low metrics.
+            if !img_mismatch_warned && !self.imgs.contains_key(&ann.image_id) {
+                warnings.push(format!(
+                    "load_res() warning — found annotation with image_id {} not in the \
+                     GT dataset. These DTs will never match. Check your results file matches the \
+                     correct GT split.",
+                    ann.image_id
+                ));
+                img_mismatch_warned = true;
+            }
+            if has_cats && !cat_mismatch_warned && !self.cats.contains_key(&ann.category_id) {
+                warnings.push(format!(
+                    "load_res() warning — found annotation with category_id {} not \
+                     in the GT dataset. These DTs will never match.",
+                    ann.category_id
+                ));
+                cat_mismatch_warned = true;
+            }
+
+            if let Some(kind) = kind {
                 // Detection results are never crowd regions, whatever the input
                 // file claimed.
                 ann.iscrowd = false;
@@ -655,77 +695,24 @@ impl COCO {
                     ResultKind::Obb => Self::derive_from_obb(ann),
                 }
             }
-        }
 
-        // Assign IDs to result annotations (1-indexed, unconditional like pycocotools)
-        for (i, ann) in dataset.annotations.iter_mut().enumerate() {
+            // Assign IDs to result annotations (1-indexed, unconditional like pycocotools)
             ann.id = (i + 1) as u64;
         }
+
+        let dataset = Dataset {
+            info: self.dataset.info.clone(),
+            images: self.dataset.images.clone(),
+            annotations: anns,
+            categories: self.dataset.categories.clone(),
+            licenses: self.dataset.licenses.clone(),
+        };
 
         let mut res = COCO::from_dataset(dataset);
         for w in warnings {
             res.warn(w);
         }
         Ok(res)
-    }
-
-    /// Reject results that would make the run meaningless, and warn about ones
-    /// that merely make it wrong.
-    ///
-    /// The split is deliberate: a mismatched id yields misleadingly low metrics
-    /// that the user can still investigate, while a NaN score has no correct
-    /// interpretation at all.
-    ///
-    /// Returns the warnings so the caller can attach them to the result `COCO`
-    /// (they are emitted to stderr there, via [`warn`](Self::warn)).
-    fn validate_results(&self, anns: &[Annotation]) -> crate::error::Result<Vec<String>> {
-        let mut warnings = Vec::new();
-
-        // Warn on the first annotation whose image_id or category_id isn't in the GT —
-        // a common mistake that causes DTs to silently produce misleadingly low metrics.
-        let gt_img_ids: HashSet<u64> = self.dataset.images.iter().map(|i| i.id).collect();
-        if let Some(ann) = anns.iter().find(|a| !gt_img_ids.contains(&a.image_id)) {
-            warnings.push(format!(
-                "load_res() warning — found annotation with image_id {} not in the \
-                 GT dataset. These DTs will never match. Check your results file matches the \
-                 correct GT split.",
-                ann.image_id
-            ));
-        }
-
-        if !self.dataset.categories.is_empty() {
-            let gt_cat_ids: HashSet<u64> = self.dataset.categories.iter().map(|c| c.id).collect();
-            if let Some(ann) = anns.iter().find(|a| !gt_cat_ids.contains(&a.category_id)) {
-                warnings.push(format!(
-                    "load_res() warning — found annotation with category_id {} not \
-                     in the GT dataset. These DTs will never match.",
-                    ann.category_id
-                ));
-            }
-        }
-
-        // A NaN score is rejected rather than warned about: it corrupts the whole
-        // run, not one annotation. Every ranking path sorts with
-        // `partial_cmp(..).unwrap_or(Equal)`, which is not transitive once NaN is
-        // present — the sort silently produces an arbitrary order, so AP becomes
-        // a function of the sort implementation. (`healthcheck` reports the same
-        // condition as an error and points here.)
-        if let Some((i, ann)) = anns
-            .iter()
-            .enumerate()
-            .find(|(_, a)| a.score.is_some_and(f64::is_nan))
-        {
-            return Err(format!(
-                "load_res(): annotation {} (id {}, image_id {}) has a NaN score. \
-                 Scores order the detection ranking, and NaN makes that order \
-                 undefined — every metric downstream would be meaningless. Filter \
-                 or repair these detections before evaluating.",
-                i, ann.id, ann.image_id
-            )
-            .into());
-        }
-
-        Ok(warnings)
     }
 
     /// Area from the box, and a rectangular segmentation when none was given.

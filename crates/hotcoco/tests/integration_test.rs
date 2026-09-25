@@ -5766,6 +5766,93 @@ fn nan_detection_score_is_rejected() {
     );
 }
 
+/// `load_res_anns` warns once per mismatch kind, not once per offending
+/// annotation.
+///
+/// Regression for the single-pass rewrite that probes the GT's own `imgs`/
+/// `cats` index maps directly instead of rebuilding a fresh `HashSet` of GT
+/// ids on every call: a fused loop that forgets to gate each check on
+/// "already warned" would push one warning per mismatched detection instead
+/// of one per kind, and would report the last offender instead of the first.
+#[test]
+fn load_res_anns_warns_once_per_mismatch_kind() {
+    let gt = dataset(
+        vec![img(1), img(2)],
+        vec![cat(1, "person"), cat(2, "car")],
+        vec![],
+    );
+    let coco_gt = COCO::from_dataset(gt);
+
+    let dets = vec![
+        det(1, [0.0, 0.0, 10.0, 10.0], 0.9).in_img(99).in_cat(1),
+        det(2, [0.0, 0.0, 10.0, 10.0], 0.8).in_img(98).in_cat(1),
+        det(3, [0.0, 0.0, 10.0, 10.0], 0.7).in_img(1).in_cat(77),
+        det(4, [0.0, 0.0, 10.0, 10.0], 0.6).in_img(1).in_cat(76),
+    ];
+
+    let coco_dt = coco_gt
+        .load_res_anns(dets)
+        .expect("mismatched ids should warn, not error");
+    let warnings = coco_dt.load_warnings();
+
+    let img_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("image_id")).collect();
+    let cat_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("category_id"))
+        .collect();
+
+    assert_eq!(
+        img_warnings.len(),
+        1,
+        "expected exactly one image_id mismatch warning, got: {warnings:?}"
+    );
+    assert_eq!(
+        cat_warnings.len(),
+        1,
+        "expected exactly one category_id mismatch warning, got: {warnings:?}"
+    );
+    assert!(
+        img_warnings[0].contains("99"),
+        "should name the first mismatched image_id (99), got: {}",
+        img_warnings[0]
+    );
+    assert!(
+        cat_warnings[0].contains("77"),
+        "should name the first mismatched category_id (77), got: {}",
+        cat_warnings[0]
+    );
+}
+
+/// A GT with no categories at all must never emit a category_id mismatch
+/// warning, whatever `category_id` the results carry.
+///
+/// Regression for the `has_cats` gate on the fused validation loop: without
+/// it, an empty GT category list would warn on every detection, since every
+/// `category_id` is "not in the GT dataset" when the GT declares none.
+#[test]
+fn load_res_anns_skips_category_check_when_gt_has_no_categories() {
+    let gt = dataset(vec![img(1)], vec![], vec![]);
+    let coco_gt = COCO::from_dataset(gt);
+
+    let dets = vec![
+        det(1, [0.0, 0.0, 10.0, 10.0], 0.9).in_cat(1),
+        det(2, [0.0, 0.0, 10.0, 10.0], 0.8).in_cat(2),
+    ];
+
+    let coco_dt = coco_gt
+        .load_res_anns(dets)
+        .expect("no-category GT should still load results");
+    let cat_warnings: Vec<_> = coco_dt
+        .load_warnings()
+        .iter()
+        .filter(|w| w.contains("category_id"))
+        .collect();
+    assert!(
+        cat_warnings.is_empty(),
+        "GT with no categories must not warn about category_id, got: {cat_warnings:?}"
+    );
+}
+
 /// The five FP error types partition every unmatched, non-ignored detection.
 ///
 /// `classify_fp` is total — it returns one of Cls/Loc/Both/Dupe/Bkg for every

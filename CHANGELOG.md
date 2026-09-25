@@ -69,6 +69,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `accumulate_arrays_are_independent_of_thread_count` checks every output
   array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
   dataset with tied scores across images.
+- **`load_res_anns` validates, derives geometry, and assigns ids in one pass
+  over the detections instead of five, and checks GT membership against the
+  index this `COCO` already built instead of rebuilding a `HashSet` of GT ids
+  on every call.** The image-id and category-id mismatch checks used to scan
+  the whole detection list independently of the NaN-score check and the
+  geometry/id loops that follow; they now run together, still warning at most
+  once per mismatch kind (naming the first offender) and still rejecting a NaN
+  score outright. `derive_from_bbox`'s rectangular polygon, the unconditional
+  detection ids, and the mismatch warnings are all unchanged in content — only
+  how many times the detection list is walked to produce them. Both the
+  in-memory dict path and the numpy `loadRes(ndarray)` fast path share this
+  function, so both benefit from one fix. On a 1.5M-detection RF-DETR-shaped
+  workload `loadRes` itself is 16–19% faster, a reproducible win (the two
+  builds' measured ranges across five repeats don't overlap); the end-to-end
+  effect is not distinguishable from run-to-run noise on this workload, since
+  `loadRes` is a smaller share of the total than the constructor and evaluation
+  phases. `precision`, `recall`, `scores`, and `stats` are bit-identical to
+  before across ten configurations. One behavior note for direct Rust callers
+  only (the Python binding is unaffected): the mismatch checks now read the
+  same index that every other query method already depends on being current,
+  rather than the raw dataset — a caller that mutates `.dataset` in place
+  without calling `create_index()` was already getting a stale index from
+  every other method, and now gets it here too, which brings this method in
+  line with the rest of the type. Two new tests,
+  `load_res_anns_warns_once_per_mismatch_kind` and
+  `load_res_anns_skips_category_check_when_gt_has_no_categories`, pin the
+  once-per-kind warning behavior and the no-categories edge case, and fail if
+  either guard is dropped.
 
 ### Fixed
 
@@ -315,7 +343,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report, and `ev.results()` in Python - the artifacts users archive and come
   back to. Previously the marker existed only on `EvalReport`, which nothing that
   writes a file uses, so comparability died with the process.
-
 
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
