@@ -154,6 +154,108 @@ fn iou_of(a: [f64; 4], b: [f64; 4]) -> f64 {
     if union > 0.0 { inter / union } else { 0.0 }
 }
 
+/// A fixed 64-bit linear congruential generator.
+///
+/// Fixtures whose ties carry the test use this rather than `rand`: its output
+/// cannot move with a `rand` release, and `scripts/test_parity.py` runs the
+/// same generator, so the Python and Rust copies of a fixture stay identical.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) as u32
+    }
+
+    /// Two-decimal scores: 100 distinct values over ~500 detections.
+    fn score(&mut self) -> f64 {
+        f64::from(self.next() % 100) / 100.0
+    }
+}
+
+/// Ground truth and detections built so that tie order decides the answer.
+///
+/// 12 images × 3 categories, 14 detections per (image, category) cell, scores
+/// quantized to two decimals so equal scores span images, plus one hand-built
+/// cross-image tie: a TP in image 1 and an FP in image 2 both scoring exactly
+/// 0.70. Category 3 has no ground truth, so the `-1.0` early return runs
+/// alongside the real curves. Every cell holds more detections than a `maxDets`
+/// cap of 10, so per-image truncation fires. Same data, same generator, and
+/// same seed as `_tie_heavy_dataset` in `scripts/test_parity.py`, which proves
+/// the arrays it yields equal pycocotools'; the tests here add invariants on
+/// top of that.
+fn tie_heavy_datasets() -> (Dataset, Dataset) {
+    const DETS_PER_CELL: usize = 14;
+    const SIZES: [f64; 3] = [20.0, 50.0, 120.0]; // small, medium, large by COCO area
+    let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+
+    let images: Vec<Image> = (1..=12).map(img).collect();
+    let categories = vec![cat(1, "a"), cat(2, "b"), cat(3, "no-gt")];
+    let mut gts = Vec::new();
+    let mut dts = Vec::new();
+    let (mut gt_id, mut dt_id) = (1u64, 1u64);
+    for image_id in 1..=12u64 {
+        for cat_id in 1..=3u64 {
+            let n_gt = if cat_id == 3 {
+                0
+            } else {
+                ((image_id + cat_id) % 4) as usize
+            };
+            for j in 0..n_gt {
+                let size = SIZES[(j + cat_id as usize) % 3];
+                let gt_box = [
+                    20.0 + 130.0 * j as f64,
+                    20.0 + 150.0 * cat_id as f64,
+                    size,
+                    size,
+                ];
+                gts.push(ann(gt_id, gt_box).in_img(image_id).in_cat(cat_id));
+                gt_id += 1;
+                // Two pixels off the box: IoU well above 0.5 at every size, so
+                // it is the cell's TP candidate.
+                let tp_box = [gt_box[0] + 2.0, gt_box[1] + 2.0, size, size];
+                assert!(iou_of(gt_box, tp_box) > 0.5);
+                dts.push(
+                    det(dt_id, tp_box, rng.score())
+                        .in_img(image_id)
+                        .in_cat(cat_id),
+                );
+                dt_id += 1;
+            }
+            for _ in n_gt..DETS_PER_CELL {
+                let size = SIZES[(rng.next() % 3) as usize];
+                // Far from every GT row (y >= 480 + size <= 640).
+                let fp_box = [f64::from(rng.next() % 500), 480.0, size, size];
+                dts.push(
+                    det(dt_id, fp_box, rng.score())
+                        .in_img(image_id)
+                        .in_cat(cat_id),
+                );
+                dt_id += 1;
+            }
+        }
+    }
+    // The hand-built tie: image 1 / category 1 has three GT boxes
+    // (`(1 + 1) % 4`); the first is `[20, 170, 50, 50]`.
+    let tie_gt = [20.0, 170.0, 50.0, 50.0];
+    assert!(
+        gts.iter()
+            .any(|g| g.image_id == 1 && g.category_id == 1 && g.bbox == Some(tie_gt))
+    );
+    let tie_tp = [22.0, 172.0, 50.0, 50.0];
+    assert!(iou_of(tie_gt, tie_tp) > 0.5);
+    dts.push(det(dt_id, tie_tp, 0.70).in_img(1));
+    dts.push(det(dt_id + 1, [300.0, 480.0, 50.0, 50.0], 0.70).in_img(2));
+
+    (
+        dataset(images.clone(), categories.clone(), gts),
+        dataset(images, categories, dts),
+    )
+}
+
 /// Intersection-over-area of `a` — `inter / area(a)`, where `a` is the detection.
 ///
 /// This is the measure COCO uses for crowd regions and Open Images uses for
@@ -5439,88 +5541,10 @@ fn evaluation_is_independent_of_thread_count() {
 /// the other. The bucketing that feeds the stable score sort is built in
 /// parallel runs whose boundaries move with the thread count; a run concatenated
 /// out of order swaps tied detections between images and moves a precision
-/// value. Two-decimal scores over ~500 detections make such ties common, and one
-/// is built by hand so the fixture cannot lose them to an edit.
+/// value. `tie_heavy_datasets` supplies the ties.
 #[test]
 fn accumulate_arrays_are_independent_of_thread_count() {
-    const DETS_PER_CELL: usize = 12;
-    const SIZES: [f64; 3] = [20.0, 50.0, 120.0]; // small, medium, large by COCO area
-
-    // Deterministic LCG: the ties must not depend on a seed anyone can change.
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (self.0 >> 33) as u32
-        }
-        fn score(&mut self) -> f64 {
-            f64::from(self.next() % 100) / 100.0
-        }
-    }
-    let mut rng = Lcg(0xA3_5EED_0000_0001);
-
-    let images: Vec<Image> = (1..=12).map(img).collect();
-    let categories = vec![cat(1, "a"), cat(2, "b"), cat(3, "no-gt")];
-    let mut gts = Vec::new();
-    let mut dts = Vec::new();
-    let (mut gt_id, mut dt_id) = (1u64, 1u64);
-    for image_id in 1..=12u64 {
-        for cat_id in 1..=3u64 {
-            let n_gt = if cat_id == 3 {
-                0
-            } else {
-                ((image_id + cat_id) % 4) as usize
-            };
-            for j in 0..n_gt {
-                let size = SIZES[(j + cat_id as usize) % 3];
-                let gt_box = [
-                    20.0 + 130.0 * j as f64,
-                    20.0 + 150.0 * cat_id as f64,
-                    size,
-                    size,
-                ];
-                gts.push(ann(gt_id, gt_box).in_img(image_id).in_cat(cat_id));
-                gt_id += 1;
-                let tp_box = [gt_box[0] + 2.0, gt_box[1] + 2.0, size, size];
-                assert!(iou_of(gt_box, tp_box) > 0.5);
-                dts.push(
-                    det(dt_id, tp_box, rng.score())
-                        .in_img(image_id)
-                        .in_cat(cat_id),
-                );
-                dt_id += 1;
-            }
-            for _ in n_gt..DETS_PER_CELL {
-                let size = SIZES[(rng.next() % 3) as usize];
-                // Far from every GT row (y >= 480 + size <= 640).
-                let fp_box = [f64::from(rng.next() % 500), 480.0, size, size];
-                dts.push(
-                    det(dt_id, fp_box, rng.score())
-                        .in_img(image_id)
-                        .in_cat(cat_id),
-                );
-                dt_id += 1;
-            }
-        }
-    }
-    // Hand-built cross-image tie: image 1 / category 1 has three GT boxes
-    // (`(1 + 1) % 4`); the first is `[20, 170, 50, 50]`. Its TP and an FP in
-    // image 2 both score exactly 0.70.
-    let tie_gt = [20.0, 170.0, 50.0, 50.0];
-    assert!(
-        gts.iter()
-            .any(|g| g.image_id == 1 && g.category_id == 1 && g.bbox == Some(tie_gt))
-    );
-    let tie_tp = [22.0, 172.0, 50.0, 50.0];
-    assert!(iou_of(tie_gt, tie_tp) > 0.5);
-    dts.push(det(dt_id, tie_tp, 0.70).in_img(1));
-    dts.push(det(dt_id + 1, [300.0, 480.0, 50.0, 50.0], 0.70).in_img(2));
-
-    let gt_ds = dataset(images.clone(), categories.clone(), gts);
-    let dt_ds = dataset(images, categories, dts);
+    let (gt_ds, dt_ds) = tie_heavy_datasets();
     let slices: HashMap<String, Vec<u64>> = HashMap::from([
         (
             "odd".to_string(),
@@ -5542,19 +5566,9 @@ fn accumulate_arrays_are_independent_of_thread_count() {
             ev.evaluate();
             ev.accumulate();
             let sliced = ev.slice_by(slices.clone()).expect("slice_by");
-            let slice_metrics: Vec<(String, Vec<(String, f64)>)> = sliced
-                .slices
-                .iter()
-                .map(|sl| {
-                    (
-                        sl.name.clone(),
-                        sl.metrics.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                    )
-                })
-                .collect();
             (
                 ev.accumulated().expect("accumulate sets eval").clone(),
-                slice_metrics,
+                sliced.slices,
             )
         })
     };
@@ -5580,7 +5594,6 @@ fn accumulate_arrays_are_independent_of_thread_count() {
     assert!(single.precision.iter().any(|&p| p > 0.0 && p < 1.0));
     for threads in [2usize, 3, 5, 8, 16] {
         let (many, many_slices) = run(threads);
-        assert_eq!(single.precision.len(), many.precision.len());
         assert_bits_eq("precision", threads, &single.precision, &many.precision);
         assert_bits_eq("recall", threads, &single.recall, &many.recall);
         assert_bits_eq("scores", threads, &single.scores, &many.scores);
@@ -5591,14 +5604,16 @@ fn accumulate_arrays_are_independent_of_thread_count() {
             &many.ap_all_points,
         );
         assert_eq!(single_slices.len(), many_slices.len());
-        for ((name_a, ma), (name_b, mb)) in single_slices.iter().zip(&many_slices) {
-            assert_eq!(name_a, name_b);
-            for ((ka, va), (kb, vb)) in ma.iter().zip(mb) {
+        for (sa, sb) in single_slices.iter().zip(&many_slices) {
+            assert_eq!(sa.name, sb.name);
+            assert_eq!(sa.metrics.len(), sb.metrics.len());
+            for ((ka, va), (kb, vb)) in sa.metrics.iter().zip(&sb.metrics) {
                 assert_eq!(ka, kb);
                 assert_eq!(
                     va.to_bits(),
                     vb.to_bits(),
-                    "slice {name_a} metric {ka} differs between 1 thread ({va}) and {threads} threads ({vb})"
+                    "slice {} metric {ka} differs between 1 thread ({va}) and {threads} threads ({vb})",
+                    sa.name
                 );
             }
         }
@@ -5895,92 +5910,12 @@ fn test_max_dets_order_is_irrelevant() {
 /// fresh single-cap run never takes the filter branch (its cap *is* the cap),
 /// so it is an independent oracle for the filtered slices of a multi-cap run.
 ///
-/// Ties are the whole burden: scores are quantized to two decimals so equal
-/// scores span cells, and one tie is built by hand — a TP in image 1 and an FP
-/// in image 2 at the same score — so an unstable filter or a reversed tie-break
-/// moves a precision value. Cells hold more detections than the middle cap, so
-/// both truncation and the filter fire. Category 3 has no ground truth, which
-/// exercises the `-1.0` early return alongside the real curves.
+/// Ties are the whole burden — an unstable filter or a reversed tie-break moves
+/// a precision value — and `tie_heavy_datasets` supplies them. Its cells hold
+/// more detections than the middle cap, so both truncation and the filter fire.
 #[test]
 fn test_accumulate_shared_order_equals_per_cap_runs() {
-    const DETS_PER_CELL: usize = 14;
-    const SIZES: [f64; 3] = [20.0, 50.0, 120.0]; // small, medium, large by COCO area
-
-    // Deterministic LCG — no `rand` dev-dependency, and the ties must not
-    // depend on a seed anyone can change.
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (self.0 >> 33) as u32
-        }
-        /// Two-decimal scores: 100 distinct values over ~500 detections.
-        fn score(&mut self) -> f64 {
-            f64::from(self.next() % 100) / 100.0
-        }
-    }
-    let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
-
-    let images: Vec<Image> = (1..=12).map(img).collect();
-    let categories = vec![cat(1, "a"), cat(2, "b"), cat(3, "no-gt")];
-    let mut gts = Vec::new();
-    let mut dts = Vec::new();
-    let mut gt_id = 1;
-    let mut dt_id = 1;
-    for image_id in 1..=12u64 {
-        for cat_id in 1..=3u64 {
-            let n_gt = if cat_id == 3 {
-                0
-            } else {
-                ((image_id + cat_id) % 4) as usize
-            };
-            let mut cell_dets = Vec::with_capacity(DETS_PER_CELL);
-            for j in 0..n_gt {
-                let size = SIZES[(j + cat_id as usize) % 3];
-                let gt_box = [
-                    20.0 + 130.0 * j as f64,
-                    20.0 + 150.0 * cat_id as f64,
-                    size,
-                    size,
-                ];
-                gts.push(ann(gt_id, gt_box).in_img(image_id).in_cat(cat_id));
-                gt_id += 1;
-                // A detection two pixels off the box: IoU well above 0.5 for
-                // every size, so it is the cell's TP candidate.
-                let tp_box = [gt_box[0] + 2.0, gt_box[1] + 2.0, size, size];
-                assert!(iou_of(gt_box, tp_box) > 0.5);
-                cell_dets.push((tp_box, rng.score()));
-            }
-            while cell_dets.len() < DETS_PER_CELL {
-                let size = SIZES[(rng.next() % 3) as usize];
-                // Far from every GT row (y >= 480 + size <= 640).
-                let fp_box = [f64::from(rng.next() % 500), 480.0, size, size];
-                cell_dets.push((fp_box, rng.score()));
-            }
-            for (bbox, s) in cell_dets {
-                dts.push(det(dt_id, bbox, s).in_img(image_id).in_cat(cat_id));
-                dt_id += 1;
-            }
-        }
-    }
-    // The hand-built cross-image tie: image 1 / category 1 has three GT boxes
-    // (`(1 + 1) % 4`); the first is `[20, 170, 50, 50]`. Its TP and an FP in
-    // image 2 both score exactly 0.70.
-    let tie_gt = [20.0, 170.0, 50.0, 50.0];
-    assert!(
-        gts.iter()
-            .any(|g| g.image_id == 1 && g.category_id == 1 && g.bbox == Some(tie_gt))
-    );
-    let tie_tp = [22.0, 172.0, 50.0, 50.0];
-    assert!(iou_of(tie_gt, tie_tp) > 0.5);
-    dts.push(det(dt_id, tie_tp, 0.70).in_img(1));
-    dts.push(det(dt_id + 1, [300.0, 480.0, 50.0, 50.0], 0.70).in_img(2));
-
-    let gt_ds = dataset(images.clone(), categories.clone(), gts);
-    let dt_ds = dataset(images, categories, dts);
+    let (gt_ds, dt_ds) = tie_heavy_datasets();
 
     // `acc_max_dets` re-assigns the caps between `evaluate()` and
     // `accumulate()` — pycocotools' `accumulate(p)` idiom, which leaves cells
@@ -5999,11 +5934,13 @@ fn test_accumulate_shared_order_equals_per_cap_runs() {
     };
 
     // Bit equality of one M slot against another, over all four arrays.
-    let assert_slot_eq = |x: &hotcoco::AccumulatedEval,
-                          mx: usize,
-                          y: &hotcoco::AccumulatedEval,
-                          my: usize,
-                          what: &str| {
+    fn assert_slot_eq(
+        x: &hotcoco::AccumulatedEval,
+        mx: usize,
+        y: &hotcoco::AccumulatedEval,
+        my: usize,
+        what: &str,
+    ) {
         let (sx, sy) = (&x.shape, &y.shape);
         assert_eq!(
             (sx.t, sx.r, sx.k, sx.a),
@@ -6043,7 +5980,7 @@ fn test_accumulate_shared_order_equals_per_cap_runs() {
                 }
             }
         }
-    };
+    }
 
     let fresh_1 = run(vec![1], None);
     let fresh_10 = run(vec![10], None);

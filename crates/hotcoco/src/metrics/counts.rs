@@ -163,7 +163,6 @@ pub fn precision_recall_curve_into(
 }
 
 /// How one ranked detection moves the TP/FP counters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tally {
     TruePositive,
     FalsePositive,
@@ -219,10 +218,10 @@ pub fn cumulative_tp_fp(
 /// [`precision_recall_curve_into`] straight from match flags, skipping the
 /// cumulative arrays.
 ///
-/// Same values, same emission order, same return as
-/// [`cumulative_tp_fp`] followed by [`precision_recall_curve_into`] — the pair
-/// this replaces on the hot path. `order` visits indices into `matched`/`ignored`
-/// score-descending, as for [`cumulative_tp_fp`]; classification is the private `tally`'s.
+/// Same values, same emission order, same return as [`cumulative_tp_fp`]
+/// followed by [`precision_recall_curve_into`] (the pair). `order` visits
+/// indices into `matched`/`ignored` score-descending, as for
+/// [`cumulative_tp_fp`]; classification is the private `tally`'s.
 ///
 /// Where the pair writes four `nd`-long arrays (`tp_cum`, `fp_cum`, recall,
 /// precision) and reads them back, this keeps integer counters, computes
@@ -277,13 +276,11 @@ pub fn precision_recall_curve_of_order_into(
     out.reserve(rec_thrs.len());
     env_idx.reserve(rec_thrs.len());
     let (mut tp, mut fp) = (0usize, 0usize);
-    let mut nd = 0usize;
     // `0 / num_gt`, exactly as the pair computes recall before the first true
-    // positive.
+    // positive; also the return for an empty `order`.
     let mut rc = 0.0f64;
     let mut r_ptr = 0;
     for (d, i) in order.into_iter().enumerate() {
-        nd = d + 1;
         let is_tp = match tally(i, matched, ignored) {
             Tally::TruePositive => {
                 tp += 1;
@@ -312,9 +309,6 @@ pub fn precision_recall_curve_of_order_into(
         }
     }
 
-    if nd == 0 {
-        return 0.0;
-    }
     let final_recall = rc;
 
     // Make precision monotonically non-increasing from right to left (VOC interp).

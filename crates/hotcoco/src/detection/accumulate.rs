@@ -72,9 +72,8 @@ impl<'a> EvalGrouping<'a> {
 
         // Area-range keys as bit-exact f64 pairs. The range values are copied verbatim
         // from `params`, so bit equality is the right test. A linear scan over the
-        // handful of ranges beats hashing a 16-byte key per cell; `rposition` keeps
-        // the last-wins semantics a `HashMap` built from the same list would have if
-        // a range is listed twice.
+        // handful of ranges beats hashing a 16-byte key per cell; `rposition` makes
+        // a range listed twice fill its last slot only.
         let area_keys: Vec<[u64; 2]> = params
             .area_ranges
             .iter()
@@ -90,9 +89,8 @@ impl<'a> EvalGrouping<'a> {
         // order below — so every bucket ends up in `eval_imgs` order exactly as a
         // sequential walk would leave it. That order feeds the stable score sort and
         // decides ties, so it is part of the output, not an implementation detail.
-        // (Explicit chunks, not `fold`: rayon's adaptive splitting produced ~9,000
-        // runs on 16 threads, and allocating and freeing `k * a` buckets per run
-        // cost more than the walk.)
+        // Explicit chunks rather than rayon's adaptive splitting: every run allocates
+        // `k * a` buckets, so runs must stay few.
         //
         // `evaluate()` writes `area_ranges.len()` consecutive cells per (image,
         // category) pair, pairs sorted by image then category, so consecutive cells
@@ -326,9 +324,7 @@ pub(super) fn accumulate_impl(
             // at the *largest* cap, filtered to `rank_in_cell < maxDet`: filtering
             // preserves relative order, and ties break on concatenation position,
             // which the filter also preserves. So gather at `Params::max_det()`
-            // once, sort once, and derive each `m` by a stable filter — three
-            // gathers and three sorts of the same 1.5M-detection sequence per cell
-            // collapsed into one each. Cells may hold more detections than the
+            // once, sort once, and derive each `m` by a stable filter. Cells may hold more detections than the
             // *current* cap when `params.max_dets` shrank between `evaluate()` and
             // `accumulate()`, so the gather truncates to the current cap and never
             // trusts the stored length.
@@ -339,8 +335,7 @@ pub(super) fn accumulate_impl(
             // comparator below treats NaN as equal to everything, so the sorted
             // order — and therefore which detections a filtered slot keeps —
             // depends on the input sequence. `load_res` rejects NaN scores;
-            // `COCO::from_dataset` does not, and neither did the per-`m` sort
-            // this replaced, so NaN ranking stays undefined rather than newly so.
+            // `COCO::from_dataset` does not, so NaN ranking is undefined.
             let cap = params.max_det();
             let mut all_dt_scores: Vec<f64> = Vec::new();
             // Position of each gathered detection inside its cell's score-descending
@@ -367,7 +362,7 @@ pub(super) fn accumulate_impl(
             });
 
             // Buffers reused across the M axis and the threshold sweep.
-            let mut inds: Vec<usize> = Vec::with_capacity(order.len());
+            let mut filtered: Vec<usize> = Vec::new();
             let (mut tp, mut fp) = (Vec::new(), Vec::new());
             let mut pr_scratch = crate::metrics::counts::PrCurveScratch::default();
             let mut curve: Vec<(usize, f64, usize)> = Vec::new();
@@ -376,12 +371,13 @@ pub(super) fn accumulate_impl(
                 let max_det = params.max_dets[m_idx];
 
                 // Stable filter of the shared order == per-`m` sort (see above).
-                inds.clear();
-                if max_det >= cap {
-                    inds.extend_from_slice(&order);
+                let inds: &[usize] = if max_det >= cap {
+                    &order
                 } else {
-                    inds.extend(order.iter().copied().filter(|&i| rank_in_cell[i] < max_det));
-                }
+                    filtered.clear();
+                    filtered.extend(order.iter().copied().filter(|&i| rank_in_cell[i] < max_det));
+                    &filtered
+                };
 
                 let nd = inds.len();
 
@@ -587,11 +583,10 @@ mod tests {
     use crate::params::{AreaRange, IouType};
     use crate::types::{Annotation, Category, Dataset, Image};
 
-    /// The grouping walk as it was before it went parallel and memoized: three
-    /// hash lookups per cell, one sequential pass. Kept here as the oracle the
-    /// production build is checked against — the production code shares none of
-    /// its lookups, so a memo keyed on the wrong id or a run concatenated out of
-    /// order shows up as a difference.
+    /// A sequential, unmemoized grouping walk: three hash lookups per cell. The
+    /// oracle the production build is checked against — the production code
+    /// shares none of its lookups, so a memo keyed on the wrong id or a run
+    /// concatenated out of order shows up as a difference.
     ///
     /// Returns, per `k_idx * a + a_idx` bucket, the cells in order as
     /// `(cell address, image_id)`; slot numbers are not compared (they are
@@ -793,8 +788,8 @@ mod tests {
             assert_same_grouping(&ev, chunk_len, "cat_ids = [3, 1]");
         }
 
-        // Area subset, reordered, one range listed twice: a repeated range keeps the
-        // last-wins bucket the old `HashMap` gave it, and the dropped ranges skip.
+        // Area subset, reordered, one range listed twice: a repeated range fills its
+        // last slot only, and the dropped ranges skip.
         ev.params.area_ranges = vec![
             area("large", 6400.0, 1e10),
             area("all", 0.0, 1e10),
@@ -804,13 +799,15 @@ mod tests {
             assert_same_grouping(&ev, chunk_len, "areas reordered with a duplicate");
         }
         let g = EvalGrouping::build(&ev);
-        let a = ev.params.area_ranges.len();
+        assert_eq!(
+            g.grouped.len(),
+            ev.params.cat_ids.len() * ev.params.area_ranges.len()
+        );
         for k_idx in 0..ev.params.cat_ids.len() {
             assert!(
                 g.cell(k_idx, 1).is_empty() && !g.cell(k_idx, 2).is_empty(),
                 "a repeated area range must fill its last slot only"
             );
-            assert_eq!(g.grouped.len(), ev.params.cat_ids.len() * a);
         }
 
         // Nothing left in scope: every bucket empty, no slots.

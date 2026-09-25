@@ -227,6 +227,8 @@ def _tie_heavy_dataset():
     """12 images x 3 categories, 14 detections per cell, scores quantized to two
     decimals so equal scores span images, plus one hand-built tie: a TP in image 1
     and an FP in image 2 both scoring exactly 0.70. Category 3 has no ground truth.
+    Same data, generator, and seed as ``tie_heavy_datasets`` in
+    ``crates/hotcoco/tests/integration_test.rs``; change both together.
 
     Every cell holds more detections than the middle ``maxDets`` cap, so per-image
     truncation fires, and the cross-image ties make the stable tie-break inside
