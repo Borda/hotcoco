@@ -14,7 +14,17 @@ Docs: https://derekallman.github.io/hotcoco/
 
 from __future__ import annotations
 
-from .hotcoco import COCO, COCOeval, Hierarchy, Params, compare, init_as_lvis, init_as_pycocotools, mask  # noqa: F401
+from .hotcoco import (  # noqa: F401
+    COCO,
+    COCOeval,
+    Hierarchy,
+    Params,
+    StreamingEval,
+    compare,
+    init_as_lvis,
+    init_as_pycocotools,
+    mask,
+)
 
 # `COCO` is the Rust class itself, `browse()` included (a Rust method that
 # forwards to `hotcoco.browse.browse_coco`). Do not wrap it in a Python
@@ -89,6 +99,7 @@ __all__ = [
     "LVISResults",
     "LVISeval",
     "Params",
+    "StreamingEval",
     "compare",
     "detection",
     "init_as_lvis",

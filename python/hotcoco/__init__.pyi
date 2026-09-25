@@ -234,6 +234,31 @@ class COCOeval:
     def evalImgs(self) -> list[dict[str, Any] | None]: ...
 
 # ---------------------------------------------------------------------------
+# StreamingEval
+# ---------------------------------------------------------------------------
+
+class StreamingEval:
+    """Incremental evaluation: feed images one at a time, get a COCOeval back.
+
+    No Open Images support; the category list is fixed at construction; the
+    returned ``COCOeval`` supports the accumulate/summarize/report path but
+    not ``confusion_matrix``/``tide_errors``/``compare``/``slice_by``, which
+    need real annotations in ``coco_gt``/``coco_dt``.
+    """
+
+    def __init__(
+        self,
+        categories: list[dict[str, Any]],
+        iou_type: str = "bbox",
+        lvis_style: bool = False,
+        params: Params | None = None,
+    ) -> None: ...
+    def add_image(
+        self, image: dict[str, Any], gt_anns: list[dict[str, Any]], dt_anns: list[dict[str, Any]]
+    ) -> None: ...
+    def finalize(self) -> COCOeval: ...
+
+# ---------------------------------------------------------------------------
 # Params
 # ---------------------------------------------------------------------------
 

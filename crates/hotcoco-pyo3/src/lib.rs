@@ -126,8 +126,8 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 
 use convert::{
     IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
-    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_dataset,
-    rle_to_coco_py,
+    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_category,
+    py_to_dataset, py_to_image, rle_to_coco_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -2619,6 +2619,153 @@ Example\n\
 }
 
 // ---------------------------------------------------------------------------
+// StreamingEval
+// ---------------------------------------------------------------------------
+
+#[doc = "Incremental (streaming) COCO evaluation.
+
+Feed images one at a time as their ground truth and detections become
+available — during postprocessing, overlapped with other work — instead of
+loading a whole dataset and evaluating it in one batch call. Matching runs
+immediately in ``add_image()``; ``finalize()`` assembles every image seen so
+far into an ordinary ``COCOeval``, ready for ``accumulate()`` →
+``summarize()`` → ``report()``. What this moves off the critical path is
+``loadRes`` and the per-image matching normally done in ``COCOeval.evaluate()``.
+
+Restrictions:
+
+- No Open Images support — the constructor raises ``ValueError``.
+- The category list is fixed at construction: pass every category the run
+  will ever see, including ones with no annotations in any image, so they
+  still get a scored slot (``-1.0``) instead of silently vanishing.
+- The ``COCOeval`` returned by ``finalize()`` has ``coco_gt``/``coco_dt``
+  populated with categories only, no annotations — enough for
+  ``accumulate()``, ``summarize()``, ``report()``, and ``results()``, which
+  never read annotations off those objects. ``confusion_matrix()``,
+  ``tide()``, ``compare()``, and ``slice_by()`` do read real annotations and
+  will silently see an empty dataset on a streaming-finalized evaluator;
+  build those from a batch ``COCOeval`` instead.
+
+>>> se = StreamingEval(categories, iou_type='bbox')
+>>> for image, gt_anns, dt_anns in batches:
+...     se.add_image(image, gt_anns, dt_anns)
+>>> ev = se.finalize()
+>>> ev.accumulate()
+>>> ev.summarize()
+"]
+#[pyclass(name = "StreamingEval")]
+struct PyStreamingEval {
+    /// `None` after `finalize()` consumes it — `add_image`/`finalize` on a
+    /// spent evaluator raise `RuntimeError` instead of panicking.
+    inner: Option<hotcoco_core::StreamingEval>,
+}
+
+fn dict_list_to<T>(
+    list: &Bound<'_, PyList>,
+    what: &str,
+    convert: impl Fn(&Bound<'_, PyDict>) -> PyResult<T>,
+) -> PyResult<Vec<T>> {
+    list.iter()
+        .map(|item| {
+            let dict = item.cast::<PyDict>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{what}: list elements must be dicts"
+                ))
+            })?;
+            convert(dict)
+        })
+        .collect()
+}
+
+#[pymethods]
+impl PyStreamingEval {
+    #[new]
+    #[pyo3(signature = (categories, iou_type="bbox", lvis_style=false, params=None))]
+    fn new(
+        categories: &Bound<'_, PyList>,
+        iou_type: &str,
+        lvis_style: bool,
+        params: Option<&PyParams>,
+    ) -> PyResult<Self> {
+        let iou = parse_iou_type(iou_type)?;
+        let categories = dict_list_to(categories, "StreamingEval", py_to_category)?;
+
+        let params = match params {
+            Some(p) => p.inner.clone(),
+            None => {
+                let mut p = hotcoco_core::Params::new(iou);
+                if lvis_style {
+                    p.max_dets = vec![300];
+                }
+                p
+            }
+        };
+        let eval_mode = if lvis_style {
+            hotcoco_core::EvalMode::Lvis
+        } else {
+            hotcoco_core::EvalMode::Coco
+        };
+
+        let inner = hotcoco_core::StreamingEval::new(params, eval_mode, categories)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(PyStreamingEval { inner: Some(inner) })
+    }
+
+    #[doc = "Match one image's ground truth against its detections, immediately.
+
+``image`` is a dict with at least ``id`` — plus, in LVIS mode,
+``neg_category_ids``/``not_exhaustive_category_ids`` where they apply.
+``gt_anns``/``dt_anns`` are lists of annotation dicts, COCO-shaped the same
+way ``COCO(dict)`` accepts them; detection dicts need ``score``.
+
+Raises ``RuntimeError`` if called after ``finalize()``."]
+    fn add_image(
+        &mut self,
+        image: &Bound<'_, PyDict>,
+        gt_anns: &Bound<'_, PyList>,
+        dt_anns: &Bound<'_, PyList>,
+    ) -> PyResult<()> {
+        let image = py_to_image(image)?;
+        let gt = dict_list_to(gt_anns, "add_image", py_to_annotation)?;
+        let dt = dict_list_to(dt_anns, "add_image", py_to_annotation)?;
+
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "add_image() called after finalize(); this StreamingEval is spent",
+            )
+        })?;
+        inner.add_image(&image, &gt, &dt);
+        Ok(())
+    }
+
+    #[doc = "Assemble every image seen so far into a ``COCOeval``, ready for
+``accumulate()`` → ``summarize()`` → ``report()``.
+
+Consumes this ``StreamingEval`` — calling ``add_image()`` or ``finalize()``
+again afterwards raises ``RuntimeError``."]
+    fn finalize(&mut self, py: Python<'_>) -> PyResult<PyCOCOeval> {
+        let inner = self.inner.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "finalize() already called; this StreamingEval is spent",
+            )
+        })?;
+        let ev = inner.finalize();
+        let params = Py::new(
+            py,
+            PyParams {
+                inner: ev.params.clone(),
+            },
+        )?;
+        Ok(PyCOCOeval {
+            inner: ev,
+            params,
+            eval_cache: None,
+            eval_params: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EvalImg / AccumulatedEval → Python converters
 // ---------------------------------------------------------------------------
 
@@ -2871,6 +3018,7 @@ fn compare(
 fn hotcoco(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCOCO>()?;
     m.add_class::<PyCOCOeval>()?;
+    m.add_class::<PyStreamingEval>()?;
     m.add_class::<PyParams>()?;
     m.add_class::<PyHierarchy>()?;
     m.add_function(wrap_pyfunction!(init_as_pycocotools, m)?)?;
