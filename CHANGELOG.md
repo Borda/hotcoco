@@ -69,6 +69,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `accumulate_arrays_are_independent_of_thread_count` checks every output
   array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
   dataset with tied scores across images.
+- **Segmentation `evaluate()` converts masks to RLE only for detections and
+  ground truth that share a category with something on the other side.**
+  `SegmRles::prepare` used to rasterize every mask in scope up front, mirroring
+  pycocotools' `_prepare`; `evaluate()` already skips computing an IoU matrix
+  for an `(image, category)` cell with only ground truth or only detections
+  (that cell's IoU is empty by construction), so those masks were converted for
+  nothing. A DETR-shaped result set spreads detections across every category
+  per image while each image's ground truth covers only a handful, so most of
+  that conversion was waste: on a 1.5M-detection, 80-category RF-DETR-shaped
+  workload, 90.7% of detections sit in a category with no matching ground truth
+  in their image. `evaluate()` on a segmentation run is 58–60% faster at both 2
+  and 16 threads (peak RSS during that phase down ~2.5 GB), with
+  `precision`/`recall`/`scores`/`stats` bit-identical to before on 4
+  configurations spanning two workload sizes and `maxDets` settings, and the
+  existing 10-configuration bbox baseline unaffected (bbox never builds this
+  cache). `confusion_matrix()`/`tide()` still read the same cache after
+  `evaluate()`; a detection this change excludes from it now falls back to
+  converting its mask on the spot instead of hitting a pre-built entry — a cost
+  that moves from `evaluate()` to whichever of those calls needs it, computed
+  at most once per image per call, and repeated on a second such call, since
+  neither extends the cache. Bounding-box evaluation is untouched — this cache
+  is built only for `iouType="segm"`. A new test,
+  `segm_rle_cache_skips_dt_only_cells`, pins that a detection with no matching
+  ground-truth category is excluded from the cache and fails if that gate is
+  dropped.
 
 ### Fixed
 
@@ -315,7 +340,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report, and `ev.results()` in Python - the artifacts users archive and come
   back to. Previously the marker existed only on `EvalReport`, which nothing that
   writes a file uses, so comparability died with the process.
-
 
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
