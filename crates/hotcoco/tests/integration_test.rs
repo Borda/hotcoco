@@ -6932,3 +6932,176 @@ fn test_keypoints_eval_end_to_end() {
     ];
     assert_stats(stats, &expected, &keys);
 }
+
+// ---------------------------------------------------------------------------
+// Streaming evaluation (candidate H): `StreamingEval::add_image`/`finalize`
+// must reproduce `COCOeval::evaluate()`'s `eval_imgs` and accumulated arrays
+// bit for bit, fed one image at a time instead of as one dataset-wide batch.
+// `matching::partition_gt` reorders ground truths *by area range*, so which
+// GT a detection matches can genuinely differ across "small"/"medium"/"large"
+// — a fixture with no ties would not exercise that, which is why this reuses
+// `tie_heavy_datasets()` rather than a fresh minimal dataset.
+// ---------------------------------------------------------------------------
+
+/// Group a dataset's annotations by `image_id`, preserving load order within
+/// each image — the order `StreamingEval::add_image` needs, matching what a
+/// tiny per-image `COCO` built from an out-of-order slice would not.
+fn group_by_image(anns: &[Annotation]) -> HashMap<u64, Vec<Annotation>> {
+    let mut by_image: HashMap<u64, Vec<Annotation>> = HashMap::new();
+    for ann in anns {
+        by_image.entry(ann.image_id).or_default().push(ann.clone());
+    }
+    by_image
+}
+
+/// Assert a streaming-built evaluator reproduces a batch-built one bit for
+/// bit: same per-cell matches in the same order, and the same accumulated
+/// arrays. Calls `accumulate()` on both; `evaluate()`/`finalize()` must have
+/// already run.
+fn assert_streaming_matches_batch(batch: &mut COCOeval, streamed: &mut COCOeval) {
+    batch.accumulate();
+    streamed.accumulate();
+
+    assert_eq!(
+        format!("{:?}", batch.eval_imgs()),
+        format!("{:?}", streamed.eval_imgs()),
+        "streaming eval_imgs must equal batch eval_imgs cell-for-cell"
+    );
+
+    let a = batch.accumulated().expect("batch accumulated");
+    let b = streamed.accumulated().expect("streamed accumulated");
+    assert_eq!(a.precision, b.precision, "precision arrays differ");
+    assert_eq!(a.recall, b.recall, "recall arrays differ");
+    assert_eq!(
+        a.ap_all_points, b.ap_all_points,
+        "ap_all_points arrays differ"
+    );
+    assert_eq!(a.scores, b.scores, "score arrays differ");
+    assert_eq!(
+        (a.shape.t, a.shape.r, a.shape.k, a.shape.a, a.shape.m),
+        (b.shape.t, b.shape.r, b.shape.k, b.shape.a, b.shape.m),
+        "accumulated shapes differ"
+    );
+}
+
+#[test]
+fn streaming_matches_batch_on_tie_heavy_bbox() {
+    let (gt_ds, dt_ds) = tie_heavy_datasets();
+
+    let mut batch = COCOeval::new(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Bbox,
+    );
+    batch.evaluate();
+
+    let gt_by_image = group_by_image(&gt_ds.annotations);
+    let dt_by_image = group_by_image(&dt_ds.annotations);
+    let empty: Vec<Annotation> = Vec::new();
+
+    let mut streaming = hotcoco::StreamingEval::new(
+        hotcoco::Params::new(IouType::Bbox),
+        hotcoco::EvalMode::Coco,
+        gt_ds.categories.clone(),
+    )
+    .expect("Coco mode is supported");
+    for image in &gt_ds.images {
+        streaming.add_image(
+            image,
+            gt_by_image.get(&image.id).unwrap_or(&empty),
+            dt_by_image.get(&image.id).unwrap_or(&empty),
+        );
+    }
+    let mut streamed = streaming.finalize();
+
+    assert_streaming_matches_batch(&mut batch, &mut streamed);
+}
+
+/// LVIS federated filtering: a category with no GT in an image is either
+/// excluded entirely (no confirmed-negative or not-exhaustive label), counted
+/// as FP (confirmed negative — `neg_category_ids`), or ignored when unmatched
+/// (`not_exhaustive_category_ids`, on a category that does have GT here).
+/// `StreamingEval::add_image` reads these off the `Image` it is given, since
+/// there is no whole-dataset `coco_gt.dataset.images` scan to read them from.
+#[test]
+fn streaming_matches_batch_on_lvis_federated_categories() {
+    let categories = vec![cat(1, "a"), cat(2, "b")];
+    let images = vec![
+        Image {
+            neg_category_ids: vec![2],
+            ..img(1)
+        },
+        Image {
+            not_exhaustive_category_ids: vec![1],
+            ..img(2)
+        },
+        img(3),
+    ];
+
+    let gts = vec![
+        ann(1, [10.0, 10.0, 50.0, 50.0]).in_img(1).in_cat(1),
+        ann(2, [10.0, 10.0, 50.0, 50.0]).in_img(2).in_cat(1),
+    ];
+    let dts = vec![
+        // TP against gt 1.
+        det(101, [12.0, 12.0, 50.0, 50.0], 0.9).in_img(1).in_cat(1),
+        // No GT for cat 2 in image 1, but neg_category_ids confirms it
+        // absent: this DT is scored as a false positive.
+        det(102, [200.0, 200.0, 50.0, 50.0], 0.8)
+            .in_img(1)
+            .in_cat(2),
+        // Unmatched against gt 2, but cat 1 is not_exhaustive in image 2:
+        // ignored rather than a false positive.
+        det(103, [300.0, 300.0, 50.0, 50.0], 0.7)
+            .in_img(2)
+            .in_cat(1),
+        // No GT for cat 2 anywhere and image 3 confirms nothing: this
+        // (image, category) pair is dropped from evaluation entirely.
+        det(104, [50.0, 50.0, 50.0, 50.0], 0.6).in_img(3).in_cat(2),
+    ];
+
+    let gt_ds = dataset(images.clone(), categories.clone(), gts);
+    let dt_ds = dataset(images.clone(), categories.clone(), dts);
+
+    let mut batch = COCOeval::new_lvis(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Bbox,
+    );
+    batch.evaluate();
+
+    let gt_by_image = group_by_image(&gt_ds.annotations);
+    let dt_by_image = group_by_image(&dt_ds.annotations);
+    let empty: Vec<Annotation> = Vec::new();
+
+    let mut params = hotcoco::Params::new(IouType::Bbox);
+    params.max_dets = vec![300];
+    let mut streaming =
+        hotcoco::StreamingEval::new(params, hotcoco::EvalMode::Lvis, categories.clone())
+            .expect("Lvis mode is supported");
+    for image in &images {
+        streaming.add_image(
+            image,
+            gt_by_image.get(&image.id).unwrap_or(&empty),
+            dt_by_image.get(&image.id).unwrap_or(&empty),
+        );
+    }
+    let mut streamed = streaming.finalize();
+
+    assert_streaming_matches_batch(&mut batch, &mut streamed);
+}
+
+#[test]
+fn streaming_rejects_open_images() {
+    match hotcoco::StreamingEval::new(
+        hotcoco::Params::new(IouType::Bbox),
+        hotcoco::EvalMode::OpenImages,
+        vec![cat(1, "a")],
+    ) {
+        Ok(_) => panic!("expected StreamingEval::new to reject Open Images"),
+        Err(err) => assert!(
+            format!("{err}").contains("Open Images"),
+            "expected an Open Images rejection message, got: {err}"
+        ),
+    }
+}

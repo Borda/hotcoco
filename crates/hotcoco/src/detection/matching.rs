@@ -590,3 +590,32 @@ pub(super) struct EvalImgContext<'a> {
     /// times per evaluation.
     pub(super) match_floors: &'a [f64],
 }
+
+/// Construct an [`EvalImgContext`] from its parts.
+///
+/// The one place outside `evaluate()` allowed to write the `ious` field:
+/// `tests/architecture.rs` restricts the literal `ious:` struct-literal syntax
+/// to this module, `mod.rs`, and `evaluate.rs`, because that field is normally
+/// the whole-dataset similarity cache and must stay driver-private. Streaming
+/// evaluation builds its own tiny, per-image similarity map — never the
+/// whole-dataset one — but still needs a context to hand to
+/// [`gather_pair`]/[`evaluate_cell`]. Routing through here keeps the one
+/// allowed write site as-is instead of widening that allowlist for a scratch
+/// map the check was never guarding against.
+pub(super) fn build_context<'a>(
+    coco_gt: &'a COCO,
+    coco_dt: &'a COCO,
+    params: &'a Params,
+    ious: &'a HashMap<(u64, u64), IouMatrix>,
+    eval_mode: EvalMode,
+    match_floors: &'a [f64],
+) -> EvalImgContext<'a> {
+    EvalImgContext {
+        coco_gt,
+        coco_dt,
+        params,
+        ious,
+        eval_mode,
+        match_floors,
+    }
+}

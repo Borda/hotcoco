@@ -28,6 +28,7 @@ mod mode;
 mod report;
 mod results;
 pub mod slice;
+mod streaming;
 mod summarize;
 mod tide;
 
@@ -44,6 +45,7 @@ pub use matching::EvalImg;
 pub use mode::{EvalMode, FreqGroup};
 pub use results::{EvalParams, EvalResults};
 pub use slice::{SliceResult, SlicedResults};
+pub use streaming::StreamingEval;
 pub use tide::TideErrors;
 
 use std::borrow::Cow;
