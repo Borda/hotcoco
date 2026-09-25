@@ -298,6 +298,7 @@ dependencies = [
  "quick-xml",
  "rand",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
  "simd-json",

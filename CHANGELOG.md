@@ -69,6 +69,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `accumulate_arrays_are_independent_of_thread_count` checks every output
   array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
   dataset with tied scores across images.
+- **`COCO::create_index` reserves its (image, category) index for the number of
+  distinct pairs it will hold, not the number of annotations, and derives the
+  category-to-images index from those pairs instead of pushing once per
+  annotation.** `img_cat_to_anns` holds one entry per distinct `(img, cat)`
+  pair — on a 1.5M-annotation, 300-per-image RF-DETR-shaped workload that is
+  ~400K pairs, so reserving for the annotation count left most of the table's
+  capacity unused. `cat_to_imgs` is now built from those already-unique pair
+  keys after the annotation loop (~400K pushes) instead of once per annotation
+  (~1.5M), then sorted into the same shape as before. All six index maps
+  (`anns`, `imgs`, `cats`, `img_to_anns`, `cat_to_imgs`, `img_cat_to_anns`) —
+  all private — also switched from the standard library's `HashMap` (SipHash)
+  to `rustc_hash::FxHashMap`, which is faster on the integer and integer-pair
+  keys these indices use throughout. `rustc-hash` was already in the dependency
+  graph transitively (via `numpy`); this makes it a direct dependency of
+  `hotcoco` (MIT/Apache-2.0). FxHash is not resistant to adversarially chosen
+  keys, an accepted trade-off for a local library indexing ids the caller
+  already chose to load — map iteration order was confirmed to never reach any
+  observable output before making the swap (every iteration site feeds a sort).
+  On the same RF-DETR-shaped workload, `gt.loadRes(ndarray)` is 34% faster and
+  the `COCOeval` constructor 49% faster (both call `create_index`); end-to-end
+  20% faster. `precision`, `recall`, `scores`, and `stats` are bit-identical to
+  before across ten configurations, including `maxDets` reassigned between
+  `evaluate()` and `accumulate()`. `coco::tests::test_cat_to_imgs_derived_from_pair_keys`
+  pins `cat_to_imgs`'s membership and deduplication and `get_ann_ids_for_img_cat`'s
+  dataset-order contract, and fails if the two index maps are conflated or the
+  order guarantee is dropped.
 
 ### Fixed
 
@@ -315,7 +341,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report, and `ev.results()` in Python - the artifacts users archive and come
   back to. Previously the marker existed only on `EvalReport`, which nothing that
   writes a file uses, so comparability died with the process.
-
 
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO
