@@ -4,17 +4,27 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 /// Extract an optional field from a Python dict.
+///
+/// `$key` is interned (`pyo3::intern!`) rather than passed as a bare `&str`:
+/// `get_item` takes anything `IntoPyObject`, and for a plain `&str` that means
+/// allocating a fresh `PyString` on every call. Decoding an RF-DETR-shaped
+/// annotation list calls this once per key per annotation — millions of
+/// throwaway strings for a fixed set of ~10 field names. Interning builds each
+/// literal's `PyString` once per process and reuses it from then on.
 macro_rules! opt {
-    ($dict:expr, $key:expr) => {
-        $dict.get_item($key)?.map(|v| v.extract()).transpose()?
+    ($dict:expr, $key:literal) => {
+        $dict
+            .get_item(pyo3::intern!($dict.py(), $key))?
+            .map(|v| v.extract())
+            .transpose()?
     };
 }
 
 /// Extract a required field from a Python dict, raising `PyValueError` if missing.
 macro_rules! req {
-    ($dict:expr, $key:expr) => {
+    ($dict:expr, $key:literal) => {
         $dict
-            .get_item($key)?
+            .get_item(pyo3::intern!($dict.py(), $key))?
             .ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(concat!("dict missing '", $key, "'"))
             })?
@@ -116,19 +126,28 @@ fn counts_as_str(counts: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     Ok(None)
 }
 
-/// `req!` with an explicit reader — [`extract_int`] or [`extract_flag`].
+/// `req!` with an explicit reader — [`extract_int`] or [`extract_flag`]. Same
+/// interning rationale as `opt!` above.
 macro_rules! req_with {
-    ($dict:expr, $key:expr, $read:expr) => {
-        $read(&$dict.get_item($key)?.ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(concat!("dict missing '", $key, "'"))
-        })?)?
+    ($dict:expr, $key:literal, $read:expr) => {
+        $read(
+            &$dict
+                .get_item(pyo3::intern!($dict.py(), $key))?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(concat!("dict missing '", $key, "'"))
+                })?,
+        )?
     };
 }
 
-/// `opt!` with an explicit reader — [`extract_int`] or [`extract_flag`].
+/// `opt!` with an explicit reader — [`extract_int`] or [`extract_flag`]. Same
+/// interning rationale as `opt!` above.
 macro_rules! opt_with {
-    ($dict:expr, $key:expr, $read:expr) => {
-        $dict.get_item($key)?.map(|v| $read(&v)).transpose()?
+    ($dict:expr, $key:literal, $read:expr) => {
+        $dict
+            .get_item(pyo3::intern!($dict.py(), $key))?
+            .map(|v| $read(&v))
+            .transpose()?
     };
 }
 
@@ -290,12 +309,12 @@ pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
     let bbox: Option<[f64; 4]> = opt!(dict, "bbox");
     let area: Option<f64> = opt!(dict, "area");
     let segmentation: Option<Segmentation> = dict
-        .get_item("segmentation")?
+        .get_item(pyo3::intern!(dict.py(), "segmentation"))?
         .map(|v| py_to_segmentation(&v))
         .transpose()?;
     let iscrowd: bool = opt_with!(dict, "iscrowd", extract_flag).unwrap_or(false);
     let keypoints: Option<Vec<f64>> = dict
-        .get_item("keypoints")?
+        .get_item(pyo3::intern!(dict.py(), "keypoints"))?
         .map(|v| {
             // Flat `[x, y, v, …]` is the COCO spelling; an `(N, 3)` array is
             // how the same triplets sit in a tensor. Both mean one thing.
@@ -334,7 +353,7 @@ fn py_to_segmentation(obj: &Bound<'_, PyAny>) -> PyResult<Segmentation> {
     if let Ok(dict) = obj.cast::<PyDict>() {
         let size: [u32; 2] = req!(dict, "size");
         let counts_obj = dict
-            .get_item("counts")?
+            .get_item(pyo3::intern!(dict.py(), "counts"))?
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("dict missing 'counts'"))?;
         if let Some(counts) = counts_as_str(&counts_obj)? {
             return Ok(Segmentation::CompressedRle { size, counts });
@@ -460,11 +479,13 @@ pub fn rle_to_coco_py(py: Python<'_>, rle: &Rle) -> PyResult<Py<PyAny>> {
 pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
     // Support {"h", "w", "counts": [ints]}, {"size": [h,w], "counts": "string"},
     // and {"size": [h,w], "counts": b"bytes"} (pycocotools format)
-    if let Some(size_obj) = dict.get_item("size")? {
+    if let Some(size_obj) = dict.get_item(pyo3::intern!(dict.py(), "size"))? {
         let size: [u32; 2] = size_obj.extract()?;
-        let counts_obj = dict.get_item("counts")?.ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("RLE dict has 'size' but missing 'counts'")
-        })?;
+        let counts_obj = dict
+            .get_item(pyo3::intern!(dict.py(), "counts"))?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("RLE dict has 'size' but missing 'counts'")
+            })?;
         if let Some(s) = counts_as_str(&counts_obj)? {
             return hotcoco_core::mask::rle_from_string(&s, size[0], size[1])
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
@@ -478,15 +499,15 @@ pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
         });
     }
     let h: u32 = dict
-        .get_item("h")?
+        .get_item(pyo3::intern!(dict.py(), "h"))?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("RLE dict missing 'h'"))?
         .extract()?;
     let w: u32 = dict
-        .get_item("w")?
+        .get_item(pyo3::intern!(dict.py(), "w"))?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("RLE dict missing 'w'"))?
         .extract()?;
     let counts: Vec<u32> = dict
-        .get_item("counts")?
+        .get_item(pyo3::intern!(dict.py(), "counts"))?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("RLE dict missing 'counts'"))?
         .extract()?;
     Ok(Rle { h, w, counts })
