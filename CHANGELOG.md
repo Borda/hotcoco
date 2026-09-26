@@ -95,6 +95,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pins `cat_to_imgs`'s membership and deduplication and `get_ann_ids_for_img_cat`'s
   dataset-order contract, and fails if the two index maps are conflated or the
   order guarantee is dropped.
+- **`COCOeval`'s constructor copies an already-indexed `COCO` instead of rebuilding the index
+  from scratch, for both the ground-truth and detection side.** `PyCOCOeval::new` used to clone
+  only the raw dataset and call `COCO::from_dataset`, which rehashes every annotation, image, and
+  category id into fresh index maps — even though the `COCO` object passed in already carries a
+  built index that is always kept in sync with its dataset (every write path — the `dataset`
+  setter, dataset-derived constructors — rebuilds the whole object, so the cached index can never
+  go stale). `COCO` now derives `Clone`, and the constructor copies it directly. On a
+  1.5M-annotation RF-DETR-shaped workload the `COCOeval` constructor is 74% faster and the
+  evaluator's whole `compute()`-shaped call sequence 11% faster end-to-end; peak RSS is unchanged
+  — the copy is still a full one, so nothing is saved on memory, only on the redundant rehash.
+  One side effect: `create_index()` prints non-fatal warnings (duplicate annotation ids, unnamed
+  categories) to stderr as it runs, so the previous rebuild-per-constructor re-printed a source
+  dataset's warnings on every `COCOeval()` call; the copy carries the already-collected warnings
+  instead of regenerating them, so the reprint is gone. `precision`, `recall`, `scores`, and
+  `stats` are bit-identical to before across ten configurations, including `maxDets` reassigned
+  between `evaluate()` and `accumulate()`. `coco::tests::test_clone_is_a_faithful_reindex` pins
+  that the clone's six index maps and warnings match a fresh rebuild and that the copy is an
+  independent snapshot, and fails if a future hand-written `Clone` impl drops a field.
 
 ### Fixed
 

@@ -12,6 +12,7 @@ use crate::mask;
 use crate::types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
 
 /// The COCO dataset API for loading, querying, and indexing annotations.
+#[derive(Clone)]
 pub struct COCO {
     /// The raw dataset. Public and mutable for pycocotools-style direct
     /// manipulation — but the query indices do **not** track it: after
@@ -1329,6 +1330,50 @@ mod tests {
             cat1.img_count, 2,
             "cat 1 appears on img1 and img2, once each"
         );
+    }
+
+    /// `COCOeval`'s constructor now copies an already-indexed `COCO` (`.clone()`)
+    /// instead of cloning the dataset and rebuilding the index from scratch —
+    /// safe only because every `PyCOCO` write path keeps `inner`'s index in
+    /// lockstep with `inner.dataset` (see `lib.rs`'s ctor comment). This pins
+    /// that a clone is a faithful stand-in for a fresh `create_index()` pass:
+    /// same six index maps, same warnings, and independent afterward.
+    #[test]
+    fn test_clone_is_a_faithful_reindex() {
+        let mut dataset = make_test_dataset();
+        // Reuse an existing id so `create_index` records a duplicate-id
+        // warning, giving `warnings` something to compare.
+        dataset.annotations.push(Annotation {
+            id: 3,
+            image_id: 2,
+            category_id: 1,
+            bbox: Some([5.0, 5.0, 5.0, 5.0]),
+            area: Some(25.0),
+            ..Default::default()
+        });
+
+        let a = COCO::from_dataset(dataset.clone()); // what a `PyCOCO` holds
+        let mut b = a.clone(); // what the ctor now takes instead of rebuilding
+        let c = COCO::from_dataset(dataset); // what the ctor used to build
+
+        assert_eq!(b.anns, c.anns);
+        assert_eq!(b.imgs, c.imgs);
+        assert_eq!(b.cats, c.cats);
+        assert_eq!(b.img_to_anns, c.img_to_anns);
+        assert_eq!(b.cat_to_imgs, c.cat_to_imgs);
+        assert_eq!(b.img_cat_to_anns, c.img_cat_to_anns);
+        assert!(
+            !c.warnings.is_empty(),
+            "fixture must trigger a duplicate-id warning"
+        );
+        assert_eq!(b.warnings, c.warnings);
+
+        // The evaluator's copy must be a snapshot, not a shared view: mutating
+        // it and re-indexing must leave the original untouched.
+        b.dataset.annotations.truncate(1);
+        b.create_index();
+        assert_eq!(a.anns, c.anns);
+        assert_eq!(a.img_cat_to_anns, c.img_cat_to_anns);
     }
 
     #[test]
