@@ -60,10 +60,14 @@ DT = VAL2017["bbox"]["dt"]
 
 # Keep in sync with the "Results (1x detections)" table in docs/benchmarks.md.
 BENCH = {
-    "bbox": {"pycocotools": 5.11, "faster-coco-eval": 1.21, "hotcoco": 0.14},
-    "segm": {"pycocotools": 5.98, "faster-coco-eval": 3.01, "hotcoco": 0.29},
-    "keypoints": {"pycocotools": 2.32, "faster-coco-eval": 1.63, "hotcoco": 0.12},
+    "bbox": {"pycocotools": 5.28, "faster-coco-eval": 1.20, "hotcoco": 0.13},
+    "segm": {"pycocotools": 5.88, "faster-coco-eval": 2.98, "hotcoco": 0.28},
+    "keypoints": {"pycocotools": 2.30, "faster-coco-eval": 1.65, "hotcoco": 0.12},
 }
+# hotcoco's speedup vs pycocotools, as the table states it: the median of the
+# per-run ratios, not a ratio of the two-decimal times above, which would round
+# a 0.134s median into a larger multiple than was measured.
+BENCH_SPEEDUP = {"bbox": 39.4, "segm": 20.8, "keypoints": 19.2}
 
 
 def benchmark_chart(out: Path, theme: str) -> None:
@@ -95,8 +99,7 @@ def benchmark_chart(out: Path, theme: str) -> None:
             # The speed-up multiple only means anything on our own bar; the other
             # two are the baseline it is measured against.
             labels = [
-                f"{v:.2f}s  ({BENCH[kind]['pycocotools'] / v:.0f}×)" if ours else f"{v:.2f}s"
-                for kind, v in zip(kinds, values)
+                f"{v:.2f}s  ({BENCH_SPEEDUP[kind]:.0f}×)" if ours else f"{v:.2f}s" for kind, v in zip(kinds, values)
             ]
             ax.bar_label(
                 bars,

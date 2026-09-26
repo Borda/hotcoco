@@ -26,10 +26,11 @@
 **Hardware:** Apple M1 MacBook Air — 8 cores (4 performance + 4 efficiency), 8 GB RAM
 **Dataset:** COCO val2017 — 5,000 images
 **Detections:** 36,781 synthetic — see [Methodology](#methodology)
-**Timing:** Wall clock time — per-cell median of 3 runs, at both 1× and 10×. The two
-scales were captured separately and the machine was busier during the 10× capture, so
-absolute times are comparable only within a table; the speedup ratios are not affected.
-**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco 1.0.0
+**Timing:** Wall clock time — per-cell median of 3 runs, at both 1× and 10×, captured
+back to back in one session (2026-09-25). Absolute times drift between captures on this
+machine, so compare them only within a table; the speedup ratios are not affected.
+**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco `main` at 773db52
+(1.0.1 plus the `accumulate()` changes listed under `[Unreleased]`)
 
 ### Results (1x detections)
 
@@ -42,9 +43,9 @@ to pycocotools'. Chart drawn with <code>hotcoco.plot</code>.</figcaption>
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 5.11s | 1.21s (4.2×) | **0.14s (36.2×)** |
-| segm      | 5.98s | 3.01s (2.0×) | **0.29s (20.8×)** |
-| keypoints | 2.32s | 1.63s (1.4×) | **0.12s (18.8×)** |
+| bbox      | 5.28s | 1.20s (4.3×) | **0.13s (39.4×)** |
+| segm      | 5.88s | 2.98s (2.0×) | **0.28s (20.8×)** |
+| keypoints | 2.30s | 1.65s (1.4×) | **0.12s (19.2×)** |
 
 Speedups in parentheses are vs pycocotools.
 
@@ -54,12 +55,12 @@ Scaling detections by 10x (~368,000) to test behavior under higher load:
 
 | Eval Type | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------------|------------------|-----------|
-| bbox      | 20.92s | 3.93s (5.3×) | **0.63s (33.4×)** |
-| segm      | 24.16s | 8.05s (3.0×) | **1.53s (15.8×)** |
-| keypoints | 9.86s | 7.83s (1.3×) | **1.24s (8.0×)** |
+| bbox      | 21.45s | 4.08s (5.3×) | **0.59s (36.2×)** |
+| segm      | 25.40s | 8.33s (3.0×) | **1.61s (15.7×)** |
+| keypoints | 10.89s | 8.19s (1.3×) | **1.40s (7.6×)** |
 
 Absolute times stay under 2s at 368,000 detections. hotcoco's relative advantage is
-narrower here than in the 1× table — 8–33× rather than 19–36× — because per-call
+narrower here than in the 1× table — 8–36× rather than 19–39× — because per-call
 overhead, where it gains most, is a smaller share of the total once there is this
 much work to do.
 
@@ -72,16 +73,16 @@ time (single run, same synthetic detections as the 1× table):
 
 | Eval type | Phase | pycocotools | faster-coco-eval | hotcoco |
 |-----------|-------|-------------|------------------|---------|
-| bbox      | load  | 0.35s | 0.33s (1.1×) | **0.07s (4.9×)** |
-|           | eval  | 4.67s | 0.98s (4.7×) | **0.07s (69.0×)** |
-| segm      | load  | 0.44s | 0.43s (1.0×) | **0.13s (3.3×)** |
-|           | eval  | 5.57s | 2.59s (2.1×) | **0.16s (35.5×)** |
-| keypoints | load  | 0.52s | 0.54s (1.0×) | **0.09s (5.5×)** |
-|           | eval  | 1.82s | 1.10s (1.7×) | **0.03s (63.3×)** |
-| bbox, bbox-only GT | load | 0.17s | 0.12s (1.4×) | **0.04s (4.2×)** |
-|           | eval  | 4.73s | 1.03s (4.6×) | **0.06s (73.9×)** |
+| bbox      | load  | 0.36s | 0.33s (1.1×) | **0.07s (5.2×)** |
+|           | eval  | 4.57s | 0.98s (4.7×) | **0.06s (77.4×)** |
+| segm      | load  | 0.43s | 0.42s (1.0×) | **0.14s (3.2×)** |
+|           | eval  | 5.46s | 2.57s (2.1×) | **0.15s (37.2×)** |
+| keypoints | load  | 0.52s | 0.54s (1.0×) | **0.09s (5.6×)** |
+|           | eval  | 1.81s | 1.09s (1.7×) | **0.03s (70.0×)** |
+| bbox, bbox-only GT | load | 0.17s | 0.12s (1.4×) | **0.04s (4.3×)** |
+|           | eval  | 4.53s | 1.02s (4.4×) | **0.05s (88.8×)** |
 
-The evaluation engine itself is 35–74× faster than pycocotools; the end-to-end
+The evaluation engine itself is 37–89× faster than pycocotools; the end-to-end
 headline is lower because JSON parsing is a much larger share of hotcoco's total
 than of anyone else's.
 
