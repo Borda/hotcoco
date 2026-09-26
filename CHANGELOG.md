@@ -113,6 +113,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   between `evaluate()` and `accumulate()`. `coco::tests::test_clone_is_a_faithful_reindex` pins
   that the clone's six index maps and warnings match a fresh rebuild and that the copy is an
   independent snapshot, and fails if a future hand-written `Clone` impl drops a field.
+- **`load_res_anns` validates, derives geometry, and assigns ids in one pass
+  over the detections instead of five, and checks GT membership against the
+  index this `COCO` already built instead of rebuilding a `HashSet` of GT ids
+  on every call.** The image-id and category-id mismatch checks used to scan
+  the whole detection list independently of the NaN-score check and the
+  geometry/id loops that follow; they now run together, still warning at most
+  once per mismatch kind (naming the first offender) and still rejecting a NaN
+  score outright. `derive_from_bbox`'s rectangular polygon, the unconditional
+  detection ids, and the mismatch warnings are all unchanged in content — only
+  how many times the detection list is walked to produce them. Both the
+  in-memory dict path and the numpy `loadRes(ndarray)` fast path share this
+  function, so both benefit from one fix. On a 1.5M-detection RF-DETR-shaped
+  workload `loadRes` itself is 16–19% faster, a reproducible win (the two
+  builds' measured ranges across five repeats don't overlap); the end-to-end
+  effect is not distinguishable from run-to-run noise on this workload, since
+  `loadRes` is a smaller share of the total than the constructor and evaluation
+  phases. `precision`, `recall`, `scores`, and `stats` are bit-identical to
+  before across ten configurations. One behavior note for direct Rust callers
+  only (the Python binding is unaffected): the mismatch checks now read the
+  same index that every other query method already depends on being current,
+  rather than the raw dataset — a caller that mutates `.dataset` in place
+  without calling `create_index()` was already getting a stale index from
+  every other method, and now gets it here too, which brings this method in
+  line with the rest of the type. Two new tests,
+  `load_res_anns_warns_once_per_mismatch_kind` and
+  `load_res_anns_skips_category_check_when_gt_has_no_categories`, pin the
+  once-per-kind warning behavior and the no-categories edge case, and fail if
+  either guard is dropped.
 
 ### Fixed
 
