@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`scripts/bench.py` benchmarks five libraries, one process per cell.**
+  ultrafast-pycocotools and vernier join pycocotools and faster-coco-eval as
+  baselines (both are dev extras now; a missing one leaves its column blank).
+  Every (library, eval type) cell runs in a fresh subprocess and reports its own
+  wall-clock load/eval times and peak resident memory, with the table showing
+  the median of `--reps` runs (default 3). `docs/benchmarks.md` carries the
+  memory table beside each timing table and a five-column feature comparison.
+
 - **`evaluate()` keeps a lean record per cell; `evalImgs` are built on first
   access.** `accumulate()` reads exactly three things per detection — its
   score, and a matched bit and an ignore bit per IoU threshold — so that is

@@ -2,65 +2,104 @@
 
 ## Feature comparison
 
-| Feature | pycocotools | faster-coco-eval | hotcoco |
-|---------|-------------|------------------|---------|
-| **Installation** | Prebuilt wheels available | Prebuilt wheels available | Prebuilt wheels — `pip install` just works |
-| **Metric parity** | Reference | Exact | `precision`/`recall`/`scores` arrays bit-identical; summary metrics within 3.7e-14 |
-| **LVIS evaluation** | No | Yes — via `lvis_style=True` flag | Yes — 13 metrics, `LVISeval` class, `init_as_lvis()` |
-| **TIDE error analysis** | No | No | Yes — 6 error types, ΔAP per type |
-| **Confusion matrix** | No | No | Yes — cross-category, configurable threshold |
-| **F-scores** | No | No | Yes — F-beta at any β |
-| **Per-class AP** | Manual only | Yes — via `extended_metrics` | Built-in via `get_results(per_class=True)` |
-| **Dataset operations** | No | No | Yes — filter, merge, split, sample, stats |
-| **Format conversion** | No | No | Yes — COCO ↔ YOLO, VOC, CVAT, DOTA, Open Images CSV |
-| **PyTorch integration** | Via torchvision | Yes — TorchVision compatible | Yes — `CocoDetection`, `CocoEvaluator` |
-| **Rust API** | No | No | Yes — native crate on crates.io |
-| **CLI** | No | No | Yes — `coco` (Python) + `coco-eval` (Rust) |
-| **Results export** | No | No | Yes — JSON with params + metrics + per-class |
-| **Memory at scale** | Exceeds physical RAM on O365 | Exceeds physical RAM on O365 | Completes within physical RAM ([details](#objects365-scale-benchmark)) |
-| **Python versions** | 3.9+ | 3.7+ | 3.9+ |
-| **License** | BSD | Apache 2.0 | MIT |
+Five libraries evaluate COCO-format detections from Python; three of them are
+Rust engines. Versions: pycocotools 2.0.11, faster-coco-eval 1.7.2,
+ultrafast-pycocotools 0.1.11, vernier 0.5.4, hotcoco 1.1 (this tree).
+
+| Feature | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
+|---------|-------------|------------------|-----------------------|---------|---------|
+| **Installation** | Prebuilt wheels | Prebuilt wheels | Prebuilt wheels | Prebuilt wheels | Prebuilt wheels — `pip install` just works |
+| **Metric parity** | Reference | Exact | `precision`/`recall`/`scores` bit-identical on x86-64; segm differs on arm64 (see [Segmentation](#segmentation)) | Bit-identical in `parity_mode="strict"` on x86-64; segm differs on arm64 | `precision`/`recall`/`scores` bit-identical on x86-64 and arm64; summary metrics within 3.7e-14 |
+| **LVIS evaluation** | No | Yes — via `lvis_style=True` flag | Yes — via `lvis_style=True` flag | Yes — federated AP | Yes — 13 metrics, `LVISeval` class, `init_as_lvis()` |
+| **Open Images, oriented boxes** | No | No | No | No | Yes — Challenge protocol with group-of; OBB IoU |
+| **Panoptic, semantic** | No | No | No | Yes — PQ, mIoU | Planned |
+| **TIDE error analysis** | No | No | No | Yes | Yes — 6 error types, ΔAP per type |
+| **Confusion matrix** | No | No | Yes | Yes | Yes — cross-category, configurable threshold |
+| **Calibration** | No | No | No | Yes — ECE/MCE | Yes — ECE/MCE, reliability curve |
+| **F-scores** | No | No | No | No | Yes — F-beta at any β |
+| **Per-class AP** | Manual only | Yes — via `extended_metrics` | Yes — `per_category_stats()` | Yes — `per_class` table | Built-in via `get_results(per_class=True)` |
+| **Model comparison** | No | No | No | No | Yes — bootstrap CIs per metric |
+| **Dataset operations** | No | No | No | No | Yes — filter, merge, split, sample, stats |
+| **Format conversion** | No | No | No | No | Yes — COCO ↔ YOLO, VOC, CVAT, DOTA, Open Images CSV |
+| **Dataset browser** | No | No | No | No | Yes — `coco explore` |
+| **PyTorch integration** | Via torchvision | Yes — TorchVision compatible | `init_as_pycocotools()` shim | DLPack tensors; `patch_pycocotools()` | Yes — `CocoDetection`, `CocoEvaluator` |
+| **Rust API** | No | No | No | Yes — crate on crates.io | Yes — native crate on crates.io |
+| **CLI** | No | No | No | Yes — `vernier` binary | Yes — `coco` (Python) + `coco-eval` (Rust) |
+| **Results export** | No | No | `stats_as_dict` | JSON via CLI | Yes — JSON with params + metrics + per-class |
+| **Memory at scale** | Exceeds physical RAM on O365 | Exceeds physical RAM on O365 | Completes (their measurement) | Completes (their measurement) | Completes within physical RAM ([details](#objects365-scale-benchmark)) |
+| **Python versions** | 3.9+ | 3.7+ | 3.8+ | 3.10+ | 3.9+ |
+| **License** | BSD | Apache 2.0 | BSD-2 | MIT or Apache 2.0 | MIT |
 
 ## Speed benchmarks
 
 **Hardware:** Apple M1 MacBook Air — 8 cores (4 performance + 4 efficiency), 8 GB RAM
 **Dataset:** COCO val2017 — 5,000 images
 **Detections:** 36,781 synthetic — see [Methodology](#methodology)
-**Timing:** Wall clock time — per-cell median of 3 runs, at both 1× and 10×, captured
-back to back in one session (2026-09-25). Absolute times drift between captures on this
-machine, so compare them only within a table; the speedup ratios are not affected.
-**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, hotcoco `main` at 773db52
-(1.0.1 plus the `accumulate()` changes listed under `[Unreleased]`)
+**Timing:** Wall clock time — per-cell median of 3 runs, each in a fresh process, at
+both 1× and 10×, captured back to back in one session (2026-09-26). Absolute times
+drift between captures on this machine, so compare them only within a table; the
+speedup ratios are not affected. Peak memory is each process's own resident set.
+**Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, ultrafast-pycocotools 0.1.11,
+vernier 0.5.4, hotcoco `main` at a1c3090 (1.1 development: the lean `evaluate()` and
+the `accumulate()` changes listed under `[Unreleased]`)
 
 ### Results (1x detections)
 
 <figure markdown>
-![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed.png#only-light)
-![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the three libraries](assets/benchmark-speed-dark.png#only-dark)
+![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the five libraries](assets/benchmark-speed.png#only-light)
+![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the five libraries](assets/benchmark-speed-dark.png#only-dark)
 <figcaption>The axis is linear, not logarithmic — hotcoco's bar really is that small next
 to pycocotools'. Chart drawn with <code>hotcoco.plot</code>.</figcaption>
 </figure>
 
-| Eval Type | pycocotools | faster-coco-eval | hotcoco |
-|-----------|-------------|------------------|-----------|
-| bbox      | 5.28s | 1.20s (4.3×) | **0.13s (39.4×)** |
-| segm      | 5.88s | 2.98s (2.0×) | **0.28s (20.8×)** |
-| keypoints | 2.30s | 1.65s (1.4×) | **0.12s (19.2×)** |
+| Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
+|-----------|-------------|------------------|-----------------------|---------|---------|
+| bbox      | 5.22s | 1.32s (3.9×) | 0.08s (64.9×) | 0.20s (26.0×) | **0.11s (46.0×)** |
+| segm      | 5.98s | 2.97s (2.0×) | 0.18s (32.8×) | 0.57s (10.5×) | **0.14s (42.3×)** |
+| keypoints | 2.29s | 1.58s (1.4×) | 0.11s (20.1×) | 0.16s (14.2×) | **0.12s (19.3×)** |
 
 Speedups in parentheses are vs pycocotools.
+
+Peak resident memory, same runs (MB):
+
+| Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
+|-----------|-------------|------------------|-----------------------|---------|---------|
+| bbox      | 694 | 627 | 92 | 173 | 320 |
+| segm      | 717 | 710 | 113 | 200 | 363 |
+| keypoints | 322 | 306 | 107 | 146 | 355 |
+
+The three Rust engines are in one speed class — within about 2× of each other on
+every row, and 20–65× ahead of pycocotools. hotcoco is fastest on segm and within
+0.03s of ultrafast-pycocotools on bbox and keypoints. On memory it sits between
+the two: ultrafast-pycocotools and vernier parse detections straight into columnar
+arrays, while hotcoco still materializes one annotation record per detection, which
+is where its remaining peak comes from.
 
 ### Results (10x detections)
 
 Scaling detections by 10x (~368,000) to test behavior under higher load:
 
-| Eval Type | pycocotools | faster-coco-eval | hotcoco |
-|-----------|-------------|------------------|-----------|
-| bbox      | 21.45s | 4.08s (5.3×) | **0.59s (36.2×)** |
-| segm      | 25.40s | 8.33s (3.0×) | **1.61s (15.7×)** |
-| keypoints | 10.89s | 8.19s (1.3×) | **1.40s (7.6×)** |
+| Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
+|-----------|-------------|------------------|-----------------------|---------|---------|
+| bbox      | 22.72s | 4.18s (5.4×) | 0.28s (80.3×) | 0.89s (25.5×) | **0.42s (53.8×)** |
+| segm      | 26.54s | 8.38s (3.2×) | 0.68s (39.3×) | 1.76s (15.1×) | **0.70s (37.7×)** |
+| keypoints | 9.51s | 8.04s (1.2×) | 0.67s (14.2×) | 0.93s (10.3×) | **0.91s (10.4×)** |
+
+Peak resident memory, same runs (MB):
+
+| Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
+|-----------|-------------|------------------|-----------------------|---------|---------|
+| bbox      | 1694 | 1114 | 193 | 558 | 856 |
+| segm      | 1517 | 1372 | 375 | 860 | 1184 |
+| keypoints | 1211 | 1221 | 471 | 704 | 2092 |
+
+At this scale the per-detection record shows: hotcoco's keypoints peak is the
+highest in the table, because each of the 368,000 synthetic detections carries a
+51-value keypoint list that is parsed into its own heap vector before evaluation
+starts. That load path is the open item for 1.1.
 
 Absolute times stay under 2s at 368,000 detections. hotcoco's relative advantage is
-narrower here than in the 1× table — 8–36× rather than 19–39× — because per-call
+narrower here than in the 1× table — 10–54× rather than 19–46× — because per-call
 overhead, where it gains most, is a smaller share of the total once there is this
 much work to do.
 
@@ -71,18 +110,18 @@ parsing and index building — `COCO()` + `loadRes`) and **eval** (`evaluate` +
 `accumulate` + `summarize`). Splitting them shows where each library spends its
 time (single run, same synthetic detections as the 1× table):
 
-| Eval type | Phase | pycocotools | faster-coco-eval | hotcoco |
-|-----------|-------|-------------|------------------|---------|
-| bbox      | load  | 0.36s | 0.33s (1.1×) | **0.07s (5.2×)** |
-|           | eval  | 4.57s | 0.98s (4.7×) | **0.06s (77.4×)** |
-| segm      | load  | 0.43s | 0.42s (1.0×) | **0.14s (3.2×)** |
-|           | eval  | 5.46s | 2.57s (2.1×) | **0.15s (37.2×)** |
-| keypoints | load  | 0.52s | 0.54s (1.0×) | **0.09s (5.6×)** |
-|           | eval  | 1.81s | 1.09s (1.7×) | **0.03s (70.0×)** |
-| bbox, bbox-only GT | load | 0.17s | 0.12s (1.4×) | **0.04s (4.3×)** |
-|           | eval  | 4.53s | 1.02s (4.4×) | **0.05s (88.8×)** |
+| Eval type | Phase | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
+|-----------|-------|-------------|------------------|-----------------------|---------|---------|
+| bbox      | load  | 0.31s | 0.32s (1.0×) | 0.06s (5.5×) | 0.09s (3.6×) | **0.07s (4.4×)** |
+|           | eval  | 4.62s | 1.04s (4.4×) | 0.03s (183.3×) | 0.12s (38.3×) | **0.05s (101.0×)** |
+| segm      | load  | 0.33s | 0.33s (1.0×) | 0.06s (5.3×) | 0.09s (3.9×) | **0.08s (3.9×)** |
+|           | eval  | 5.51s | 2.62s (2.1×) | 0.11s (48.8×) | 0.48s (11.4×) | **0.05s (102.4×)** |
+| keypoints | load  | 0.49s | 0.49s (1.0×) | 0.07s (7.1×) | 0.05s (10.5×) | **0.10s (5.0×)** |
+|           | eval  | 1.81s | 1.12s (1.6×) | 0.05s (39.2×) | 0.11s (15.9×) | **0.02s (75.2×)** |
+| bbox, bbox-only GT | load | 0.16s | 0.16s (1.0×) | 0.04s (4.5×) | 0.02s (7.1×) | **0.03s (5.0×)** |
+|           | eval  | 4.53s | 0.96s (4.7×) | 0.02s (187.2×) | 0.12s (38.3×) | **0.04s (106.7×)** |
 
-The evaluation engine itself is 37–89× faster than pycocotools; the end-to-end
+The evaluation engine itself is 75–107× faster than pycocotools; the end-to-end
 headline is lower because JSON parsing is a much larger share of hotcoco's total
 than of anyone else's.
 
@@ -166,7 +205,11 @@ rasterization, where the reference's C compiler contracts `s*t+ys` into a single
 fused multiply-add on arm64 but not on x86-64, whose PyPI wheels target a baseline
 without the instruction. hotcoco mirrors that choice per architecture, so the
 comparison is exact on either kind of machine. Masks can differ by a boundary pixel
-between the two architectures — as pycocotools' own do.
+between the two architectures — as pycocotools' own do. The other two Rust
+evaluators do not mirror the contraction: on Apple Silicon, ultrafast-pycocotools
+0.1.11 and vernier 0.5.4 differ from the arm64 pycocotools wheel in 283 cells of the
+segm precision tensor on these detections, by up to 0.72 per cell and 1e-5 in AP
+(measured 2026-09-25); on x86-64 all three agree.
 
 ### Keypoints
 
