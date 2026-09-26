@@ -1725,7 +1725,7 @@ impl PyCOCOeval {
     }
 
     fn accumulate(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.inner.eval_imgs().is_empty() {
+        if !self.inner.evaluated() {
             warn_user(
                 py,
                 "hotcoco: accumulate() called before evaluate(). \

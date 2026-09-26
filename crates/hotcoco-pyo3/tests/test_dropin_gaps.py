@@ -429,7 +429,11 @@ class TestIssue5BytesCounts:
         ev.evaluate()
         ev.accumulate()
         ev.summarize()
-        assert ev.stats[0] == 1.0
+        # A lone true positive's AP is what ``metrics.average_precision`` says
+        # it is (pycocotools' guard term puts it an ulp under 1.0), to within
+        # the summary mean's rounding.
+        lone_tp = hotcoco.metrics.average_precision([1.0], [True], 1)
+        assert ev.stats[0] == pytest.approx(lone_tp, abs=np.finfo(float).eps)
 
 
 class TestIssue5MaskEncodeDtype:

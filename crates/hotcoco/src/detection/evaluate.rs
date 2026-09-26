@@ -223,75 +223,135 @@ impl COCOeval {
 
         // Evaluate each (image, category, area_range) combination in parallel,
         // over sparse_pairs × area_ranges rather than the full
-        // cat_ids × area_ranges × img_ids product.
-        //
+        // cat_ids × area_ranges × img_ids product. The inputs are snapshotted so
+        // `eval_imgs()` can rebuild the full records later from exactly what
+        // this run saw, whatever `params` is set to in between.
+        let inputs = EvalInputs {
+            params: self.params.clone(),
+            sparse_pairs,
+            not_exhaustive,
+        };
+        self.cells = self.evaluate_pairs_lean(&inputs);
+        self.eval_imgs = std::sync::OnceLock::new();
+        self.default_eval_imgs = std::sync::OnceLock::new();
+        self.eval_inputs = Some(inputs);
+    }
+
+    /// Run `f` with the per-cell context for `params`, reading the IoU cache
+    /// `evaluate()` filled. The second argument is the detection cap.
+    fn with_cell_context<R>(
+        &self,
+        params: &crate::params::Params,
+        f: impl FnOnce(&EvalImgContext<'_>, usize) -> R,
+    ) -> R {
         // Empty `max_dets` is degraded, not panicked on: `Params::max_det()`
         // owns the fallback cap (100), matching how every other degenerate
         // configuration on this path (missing area label, absent threshold)
         // degrades to the `-1.0` sentinel downstream instead of aborting —
         // `evaluate()` has no `Result` channel, and its siblings do not panic.
-        let max_det = self.params.max_det();
+        let max_det = params.max_det();
 
         // pycocotools searches from `min(t, 1-1e-10)`, not from `t`. Inert below
         // 1.0, so the default 0.50:0.95 sweep is untouched; at t == 1.0 it admits
         // near-identical pairs, which is the drop-in behavior. Resolved once here
         // and shared — see `EvalImgContext::match_floors`.
-        let match_floors: Vec<f64> = self
-            .params
+        let match_floors: Vec<f64> = params
             .iou_thrs
             .iter()
             .map(|&t| crate::primitives::greedy::coco_match_floor(t))
             .collect();
 
-        // Build shared context (borrows self after self.ious is fully populated).
         let ctx = EvalImgContext {
             coco_gt: &self.coco_gt,
             coco_dt: &self.coco_dt,
-            params: &self.params,
+            params,
             ious: &self.ious,
             eval_mode: self.eval_mode,
             match_floors: &match_floors,
         };
+        f(&ctx, max_det)
+    }
 
-        // Fan out over pairs, not (pair, area range) cells: `gather_pair` resolves
-        // everything the ranges share once per pair. Cells are written in place,
-        // one `area_ranges.len()` chunk per pair — collect-then-flatten would move
-        // ~800 MB of `EvalImg`s single-threaded on Objects365 (measured 2.0 s vs
-        // 1.5 s). Every pair gets its full chunk, including empty gathers, so
-        // `eval_imgs` keeps exactly the length, order, and `None` positions that
-        // `accumulate`'s grouping walk and the public `eval_imgs()` accessor read.
-        let is_lvis = self.eval_mode == EvalMode::Lvis;
-        let area_ranges = &ctx.params.area_ranges;
+    /// LVIS: whether `cat_id` is not exhaustively annotated on `img_id`.
+    fn not_exhaustive_cat(&self, inputs: &EvalInputs, img_id: u64, cat_id: u64) -> bool {
+        self.eval_mode == EvalMode::Lvis
+            && inputs
+                .not_exhaustive
+                .get(&img_id)
+                .is_some_and(|s| s.contains(&cat_id))
+    }
 
-        // `par_iter().map(..).collect()`, not `resize_with`: rayon's indexed
-        // collect writes straight into the vector's uninitialized capacity across
-        // all threads, while a sequential fill single-threads the first touch of
-        // every page in that ~800 MB buffer. Measured at 270 ms on Objects365 —
-        // more than the fan-out below saves.
-        let mut eval_imgs: Vec<Option<super::matching::EvalImg>> = (0..sparse_pairs.len()
-            * area_ranges.len())
+    /// The per-pair walk of `evaluate()`: every gathered pair under every area
+    /// range, as the lean records `accumulate()` reads, one per pair in
+    /// `sparse_pairs` order. Fans out over pairs, not (pair, area range)
+    /// cells, so `gather_pair` resolves what the ranges share once.
+    fn evaluate_pairs_lean(&self, inputs: &EvalInputs) -> Vec<Option<super::matching::PairRecord>> {
+        self.with_cell_context(&inputs.params, |ctx, max_det| {
+            inputs
+                .sparse_pairs
+                .par_iter()
+                .map(|&(img_id, cat_id)| {
+                    super::matching::evaluate_pair_lean(
+                        ctx,
+                        img_id,
+                        cat_id,
+                        max_det,
+                        self.not_exhaustive_cat(inputs, img_id, cat_id),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The same walk producing full [`EvalImg`](super::matching::EvalImg)s
+    /// for the area ranges at `area_idxs` (indices into
+    /// `inputs.params.area_ranges`): one `area_idxs.len()` chunk per pair,
+    /// empty gathers included, so length, order, and `None` positions never
+    /// depend on the data. Cells are written in place — collect-then-flatten
+    /// moved ~800 MB of `EvalImg`s single-threaded on Objects365 (measured
+    /// 2.0 s vs 1.5 s), and the parallel `None` fill spreads the first touch of
+    /// that buffer across threads (270 ms sequential).
+    pub(super) fn evaluate_pairs_full(
+        &self,
+        inputs: &EvalInputs,
+        area_idxs: &[usize],
+    ) -> Vec<Option<super::matching::EvalImg>> {
+        let n = area_idxs.len();
+        let mut out: Vec<Option<super::matching::EvalImg>> = (0..inputs.sparse_pairs.len() * n)
             .into_par_iter()
             .map(|_| None)
             .collect();
-
-        eval_imgs
-            .par_chunks_mut(area_ranges.len())
-            .zip(sparse_pairs.par_iter())
-            .for_each(|(chunk, &(img_id, cat_id))| {
-                let Some(pair) = super::matching::gather_pair(&ctx, img_id, cat_id, max_det) else {
-                    return;
-                };
-                let not_exhaustive_cat = is_lvis
-                    && not_exhaustive
-                        .get(&img_id)
-                        .is_some_and(|s| s.contains(&cat_id));
-
-                for (slot, ar) in chunk.iter_mut().zip(area_ranges) {
-                    *slot =
-                        super::matching::evaluate_cell(&ctx, &pair, ar.range, not_exhaustive_cat);
-                }
-            });
-
-        self.eval_imgs = eval_imgs;
+        if n == 0 {
+            return out;
+        }
+        self.with_cell_context(&inputs.params, |ctx, max_det| {
+            out.par_chunks_mut(n)
+                .zip(inputs.sparse_pairs.par_iter())
+                .for_each(|(chunk, &(img_id, cat_id))| {
+                    super::matching::evaluate_pair_full(
+                        ctx,
+                        img_id,
+                        cat_id,
+                        max_det,
+                        self.not_exhaustive_cat(inputs, img_id, cat_id),
+                        area_idxs,
+                        chunk,
+                    );
+                });
+        });
+        out
     }
+}
+
+/// What one `evaluate()` run saw, kept so [`COCOeval::eval_imgs`] can rebuild
+/// the full per-image records from the same inputs on demand.
+pub(super) struct EvalInputs {
+    /// `params` as resolved for the run — the copy `eval_imgs()` reads, so a
+    /// `max_dets` or `img_ids` edited afterwards for `accumulate()` cannot
+    /// change what the records describe.
+    pub(super) params: crate::params::Params,
+    /// The (image, category) pairs visited, in visit order.
+    pub(super) sparse_pairs: Vec<(u64, u64)>,
+    /// LVIS: image → categories not exhaustively annotated there.
+    pub(super) not_exhaustive: HashMap<u64, HashSet<u64>>,
 }

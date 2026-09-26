@@ -5934,6 +5934,66 @@ fn tide_fp_types_partition_the_false_positives() {
     }
 }
 
+/// pycocotools' `evaluateImg` skips a cell only when the raw ground-truth and
+/// detection lists are *both* empty. A cell with detections but no ground
+/// truth survives even when the area range ignores every detection: it has
+/// nothing to match, but its detections still occupy ranks in the score order
+/// `accumulate()` samples `scores` from. Two images, one category, the small
+/// range: image 2's lone large detection at 0.9 must sit at rank 0, so the
+/// score sampled at recall 0 is 0.9 — not image 1's 0.5 true positive.
+#[test]
+fn test_gt_less_all_ignored_cell_still_fills_score_ranks() {
+    let categories = vec![cat(1, "object")];
+    let gt_ds = dataset(
+        vec![img(1), img(2)],
+        categories.clone(),
+        vec![ann(1, [0.0, 0.0, 10.0, 10.0])],
+    );
+    let dt_ds = dataset(
+        vec![img(1), img(2)],
+        categories,
+        vec![
+            det(1, [0.0, 0.0, 10.0, 10.0], 0.5),
+            det(2, [0.0, 0.0, 100.0, 100.0], 0.9).in_img(2),
+        ],
+    );
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt_ds),
+        COCO::from_dataset(dt_ds),
+        IouType::Bbox,
+    );
+    ev.evaluate();
+
+    let small_idx = ev
+        .params
+        .area_range_idx("small")
+        .expect("bbox params define a small range");
+    let small = ev.params.area_ranges[small_idx].range;
+    let cell = ev
+        .eval_imgs()
+        .iter()
+        .flatten()
+        .find(|e| e.image_id == 2 && e.area_rng == small)
+        .expect(
+            "a GT-less cell with every detection area-ignored is kept, as pycocotools keeps it",
+        );
+    assert!(cell.gt_ids.is_empty());
+    assert_eq!(cell.dt_ids, vec![2]);
+    assert!(
+        cell.dt_ignore.row(0).iter().all(|&ignored| ignored),
+        "the large detection is area-ignored under small"
+    );
+
+    ev.accumulate();
+    let eval = ev.accumulated().unwrap();
+    let m_100 = ev.params.max_dets.iter().position(|&m| m == 100).unwrap();
+    let at_recall_zero = eval.precision_idx(0, 0, 0, small_idx, m_100);
+    assert_eq!(
+        eval.scores[at_recall_zero], 0.9,
+        "rank 0 belongs to the ignored detection, as in pycocotools"
+    );
+}
+
 /// `max_dets` order must not change any number.
 ///
 /// Before `Params::max_det()` owned the cap, `evaluate()` stamped eval_imgs

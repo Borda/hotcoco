@@ -5,7 +5,7 @@
 | Feature | pycocotools | faster-coco-eval | hotcoco |
 |---------|-------------|------------------|---------|
 | **Installation** | Prebuilt wheels available | Prebuilt wheels available | Prebuilt wheels — `pip install` just works |
-| **Metric parity** | Reference | Exact | All metrics exact to float precision (≤3.7e-14) |
+| **Metric parity** | Reference | Exact | `precision`/`recall`/`scores` arrays bit-identical; summary metrics within 3.7e-14 |
 | **LVIS evaluation** | No | Yes — via `lvis_style=True` flag | Yes — 13 metrics, `LVISeval` class, `init_as_lvis()` |
 | **TIDE error analysis** | No | No | Yes — 6 error types, ΔAP per type |
 | **Confusion matrix** | No | No | Yes — cross-category, configurable threshold |
@@ -116,8 +116,12 @@ Peak RAM is the peak working set (physical memory). Committed includes swap — 
 [ppwwyyxx/cocoapi](https://github.com/ppwwyyxx/cocoapi), the same inputs pycocotools uses in its own
 tests.
 
-**Every metric agrees to within 3.7e-14** — floating-point noise, the last few
-bits a `f64` can represent. The diffs in the following tables are raw measured differences, not rounded.
+**The `precision`, `recall`, and `scores` arrays are bit-identical to pycocotools'**
+on all three evaluation types — every cell, checked with an integer compare of the
+raw `f64` bits. The summary metrics below agree to within 3.7e-14: they are means over
+those identical arrays, and numpy's `mean` sums pairwise while hotcoco sums
+sequentially, so the last bit or two of the mean can differ. The diffs in the
+following tables are raw measured differences, not rounded.
 
 ### Bounding box
 

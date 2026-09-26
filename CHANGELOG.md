@@ -16,6 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`evaluate()` keeps a lean record per cell; `evalImgs` are built on first
+  access.** `accumulate()` reads exactly three things per detection — its
+  score, and a matched bit and an ignore bit per IoU threshold — so that is
+  what `evaluate()` now stores: one score list per (image, category) pair and
+  two bit-packed matrices per area range, about 20 bytes per detection. The
+  full per-image records (`evalImgs`: every id, both sides of the match, one
+  copy of the scores per area range, about 460 bytes per detection) are no
+  longer built during `evaluate()`. They are materialized, once, the first
+  time something reads them — the `evalImgs` attribute, `tide_errors()`,
+  `calibration()`, `image_diagnostics()` — from a snapshot of the inputs that
+  `evaluate()` saw, so they describe that run whatever `params` was set to
+  afterwards. Nothing in the API changes and no flag is needed; the cost moves
+  to a second matching pass paid only by callers that read the records, and
+  the in-crate analyses (`tide_errors()`, `calibration()`,
+  `image_diagnostics()`) materialize only the `"all"` range they read. On a
+  500,000-detection val2017 bbox run, `evaluate()` goes from 0.37 s to
+  0.15 s and `accumulate()` from 0.13 s to 0.08 s; peak resident memory for
+  load + evaluate + accumulate + summarize drops from 1.1 GB to 0.9 GB. Every
+  `precision`, `recall`, and `scores` value is bit-identical to before.
+
 - **`accumulate()` sorts each (category, area range) once, not once per
   `maxDets` entry.** pycocotools concatenates every image's `dtScores[0:maxDet]`
   and mergesorts the result for each cap. The three sorted sequences are the same
@@ -187,6 +207,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   workloads; that cost is unaddressed here.
 
 ### Fixed
+
+- **`eval["precision"]`, `eval["recall"]`, and `eval["scores"]` are bit-identical
+  to pycocotools' arrays.** They agreed to an ulp before; two small things kept
+  them from being the same bits, and neither ever moved a headline metric.
+  - `precision` carried `tp / (tp + fp)` where pycocotools computes
+    `tp / (fp + tp + np.spacing(1))`. The guard term only matters at
+    `tp + fp == 1`, where it puts a lone leading true positive at `1 - 2^-52`
+    instead of `1.0`; on COCO val2017 bbox that is ~7,600 cells of the
+    precision tensor, each one ulp off. `metrics::counts` now keeps the term,
+    so a single perfect match reports AP an ulp or two under 1.0 — the value
+    pycocotools reports for it.
+  - `evaluate()` dropped an (image, category, area range) cell that had
+    detections but no ground truth when the area range ignored every
+    detection. pycocotools keeps that cell: its `evaluateImg` skips only when
+    the raw ground-truth and detection lists are both empty. The dropped
+    detections match nothing and move no counter, but they still occupy ranks
+    in the score order `accumulate()` samples `scores` from, so the score
+    reported at a recall threshold could come from a later detection than the
+    reference's. The cell is now kept, `evalImgs` carries it, and
+    `test_rank_filler_and_epsilon_guard_match_pycocotools_bit_for_bit` pins
+    both fixes against pycocotools on a two-image dataset built to show them.
+
+  The three arrays are checked bit-for-bit against pycocotools on COCO
+  val2017 (bbox, segm, keypoints) and on a 500,000-detection synthetic run.
+  The summary `stats` still differ from pycocotools by up to 3.6e-14: numpy's
+  `mean` is a pairwise sum, and that reduction order is not reproduced yet.
 
 ## [1.0.1] - 2026-09-12
 
