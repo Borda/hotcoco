@@ -428,3 +428,87 @@ fn load_timing_val2017() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #5: a category record without `name` (pycocotools tolerates it,
+// TorchMetrics emits it) loads with the `cat_<id>` placeholder, from both
+// the JSON loader and `from_dataset`, and the load is flagged.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn category_without_name_loads_with_placeholder() {
+    let json = r#"{"images":[{"id":1,"height":4,"width":4}],
+                   "categories":[{"id":7},{"id":8,"name":"dog"}],
+                   "annotations":[]}"#;
+    let coco = load_json(json).unwrap();
+    assert_eq!(coco.get_cat(7).unwrap().name, "cat_7");
+    assert_eq!(coco.get_cat(8).unwrap().name, "dog");
+    assert_eq!(coco.cat_name(7), "cat_7", "cat_name and the record agree");
+    assert_eq!(
+        coco.cat_name(99),
+        "cat_99",
+        "unknown id uses the same placeholder"
+    );
+    assert_eq!(coco.load_warnings().len(), 1);
+    assert!(coco.load_warnings()[0].contains("without a name"));
+
+    let mut ds = gt_dataset();
+    ds.categories.push(Category {
+        id: 3,
+        ..Default::default()
+    });
+    let coco = COCO::from_dataset(ds);
+    assert_eq!(coco.get_cat(3).unwrap().name, "cat_3");
+}
+
+// ---------------------------------------------------------------------------
+// Integral floats spell ints in a JSON written through pandas or numpy, and
+// pycocotools accepts them because `1.0 == 1`. The loader applies the same
+// rule as the Python dict path; fractional and negative values still fail.
+// ---------------------------------------------------------------------------
+
+fn load_json(json: &str) -> hotcoco::error::Result<COCO> {
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(json.as_bytes()).unwrap();
+    COCO::new(f.path())
+}
+
+#[test]
+fn json_integral_floats_are_ints() {
+    let coco = load_json(
+        r#"{"images":[{"id":1.0,"height":4.0,"width":4.0,"license":2.0},{"id":2}],
+            "categories":[{"id":1.0,"name":"a"}],
+            "annotations":[{"id":1.0,"image_id":1.0,"category_id":1.0,"bbox":[0,0,1,1],
+                            "area":1,"iscrowd":1.0,"is_group_of":1,"num_keypoints":3.0}]}"#,
+    )
+    .unwrap();
+    let img = coco.get_img(1).unwrap();
+    assert_eq!((img.height, img.width, img.license), (4, 4, Some(2)));
+    let bare = coco.get_img(2).unwrap();
+    assert_eq!(
+        (bare.height, bare.width),
+        (0, 0),
+        "size is optional, as on the dict path"
+    );
+    let ann = coco.get_ann(1).unwrap();
+    assert_eq!((ann.image_id, ann.category_id), (1, 1));
+    assert!(ann.iscrowd, "iscrowd 1.0 is true");
+    assert_eq!(
+        ann.is_group_of,
+        Some(true),
+        "is_group_of 1 is true, as on the dict path"
+    );
+    assert_eq!(ann.num_keypoints, Some(3));
+    assert_eq!(coco.get_cat(1).unwrap().name, "a");
+
+    for bad in [r#"{"id":1.5}"#, r#"{"id":-1}"#, r#"{"id":"1"}"#] {
+        let json = format!(r#"{{"images":[{bad}],"categories":[],"annotations":[]}}"#);
+        assert!(load_json(&json).is_err(), "{bad} must not load");
+    }
+    let fractional_flag = r#"{"images":[{"id":1}],"categories":[],
+        "annotations":[{"id":1,"image_id":1,"category_id":1,"iscrowd":0.5}]}"#;
+    assert!(
+        load_json(fractional_flag).is_err(),
+        "iscrowd 0.5 is not a flag"
+    );
+}

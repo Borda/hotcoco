@@ -177,7 +177,7 @@ jobs:
       - name: Differential parity vs pycocotools
         run: |
           source .venv/bin/activate
-          pytest scripts/test_parity.py -q
+          pytest scripts/test_parity.py crates/hotcoco-pyo3/tests -q
 
       - name: Differential parity vs lvis-api
         run: |

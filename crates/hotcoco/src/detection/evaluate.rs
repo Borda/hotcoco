@@ -78,6 +78,28 @@ impl COCOeval {
         pairs
     }
 
+    /// Every GT/DT annotation id living in a `sparse_pairs` cell where *both*
+    /// sides are non-empty — the only cells that ever reach the segm kernel
+    /// inside [`Self::compute_iou_static`]; a cell with only GT or only DT
+    /// returns early there without reading a mask. `sparse_pairs` itself is
+    /// the union (GT-only ∪ DT-only ∪ both, with the LVIS `neg_cats`
+    /// carve-out for DT-only) — narrower than "every id in scope", but still
+    /// wider than what segm mask conversion needs, so this filters it once
+    /// more down to the both-non-empty subset for [`super::iou::SegmRles::prepare`].
+    fn segm_cell_ann_ids(&self, sparse_pairs: &[(u64, u64)]) -> (Vec<u64>, Vec<u64>) {
+        let mut gt_ids = Vec::new();
+        let mut dt_ids = Vec::new();
+        for &(img_id, cat_id) in sparse_pairs {
+            let gt = Self::get_anns_static(&self.coco_gt, &self.params, img_id, cat_id);
+            let dt = Self::get_anns_static(&self.coco_dt, &self.params, img_id, cat_id);
+            if !gt.is_empty() && !dt.is_empty() {
+                gt_ids.extend_from_slice(gt);
+                dt_ids.extend_from_slice(dt);
+            }
+        }
+        (gt_ids, dt_ids)
+    }
+
     /// Run per-image evaluation.
     ///
     /// # Open Images replaces `coco_gt` (and possibly `coco_dt`)
@@ -160,13 +182,18 @@ impl COCOeval {
 
         let sparse_pairs = self.collect_sparse_pairs(&cat_ids, &neg_cats);
 
-        // Segm only: convert every in-scope mask to RLE once, up front —
-        // pycocotools' `_prepare` step. The per-cell IoU computation below and
-        // the cross-category matrices in `confusion_matrix`/`tide` all read
-        // this instead of re-rasterizing polygons per call site.
+        // Segm only: convert every mask that a both-non-empty cell will
+        // actually read, once, up front — pycocotools' `_prepare` step,
+        // narrowed to the cells `evaluate()` itself will touch (see
+        // `segm_cell_ann_ids`). The cross-category matrices in
+        // `confusion_matrix`/`tide` still read through the same cache and
+        // fall back to converting on the spot on a miss — see
+        // `SegmRles::gt_rle_or_convert`/`dt_rle_or_convert`.
         use crate::primitives::sim::SimKind;
-        self.segm_rles = (SimKind::from(self.params.iou_type) == SimKind::Mask)
-            .then(|| super::iou::SegmRles::prepare(&self.coco_gt, &self.coco_dt, &self.params));
+        self.segm_rles = (SimKind::from(self.params.iou_type) == SimKind::Mask).then(|| {
+            let (gt_ids, dt_ids) = self.segm_cell_ann_ids(&sparse_pairs);
+            super::iou::SegmRles::prepare(&self.coco_gt, &self.coco_dt, &gt_ids, &dt_ids)
+        });
 
         // Compute IoUs only for pairs where both GT and DT are non-empty.
         // Pairs with only GT or only DT produce empty IoU matrices — skip storing them.

@@ -154,6 +154,108 @@ fn iou_of(a: [f64; 4], b: [f64; 4]) -> f64 {
     if union > 0.0 { inter / union } else { 0.0 }
 }
 
+/// A fixed 64-bit linear congruential generator.
+///
+/// Fixtures whose ties carry the test use this rather than `rand`: its output
+/// cannot move with a `rand` release, and `scripts/test_parity.py` runs the
+/// same generator, so the Python and Rust copies of a fixture stay identical.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) as u32
+    }
+
+    /// Two-decimal scores: 100 distinct values over ~500 detections.
+    fn score(&mut self) -> f64 {
+        f64::from(self.next() % 100) / 100.0
+    }
+}
+
+/// Ground truth and detections built so that tie order decides the answer.
+///
+/// 12 images × 3 categories, 14 detections per (image, category) cell, scores
+/// quantized to two decimals so equal scores span images, plus one hand-built
+/// cross-image tie: a TP in image 1 and an FP in image 2 both scoring exactly
+/// 0.70. Category 3 has no ground truth, so the `-1.0` early return runs
+/// alongside the real curves. Every cell holds more detections than a `maxDets`
+/// cap of 10, so per-image truncation fires. Same data, same generator, and
+/// same seed as `_tie_heavy_dataset` in `scripts/test_parity.py`, which proves
+/// the arrays it yields equal pycocotools'; the tests here add invariants on
+/// top of that.
+fn tie_heavy_datasets() -> (Dataset, Dataset) {
+    const DETS_PER_CELL: usize = 14;
+    const SIZES: [f64; 3] = [20.0, 50.0, 120.0]; // small, medium, large by COCO area
+    let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+
+    let images: Vec<Image> = (1..=12).map(img).collect();
+    let categories = vec![cat(1, "a"), cat(2, "b"), cat(3, "no-gt")];
+    let mut gts = Vec::new();
+    let mut dts = Vec::new();
+    let (mut gt_id, mut dt_id) = (1u64, 1u64);
+    for image_id in 1..=12u64 {
+        for cat_id in 1..=3u64 {
+            let n_gt = if cat_id == 3 {
+                0
+            } else {
+                ((image_id + cat_id) % 4) as usize
+            };
+            for j in 0..n_gt {
+                let size = SIZES[(j + cat_id as usize) % 3];
+                let gt_box = [
+                    20.0 + 130.0 * j as f64,
+                    20.0 + 150.0 * cat_id as f64,
+                    size,
+                    size,
+                ];
+                gts.push(ann(gt_id, gt_box).in_img(image_id).in_cat(cat_id));
+                gt_id += 1;
+                // Two pixels off the box: IoU well above 0.5 at every size, so
+                // it is the cell's TP candidate.
+                let tp_box = [gt_box[0] + 2.0, gt_box[1] + 2.0, size, size];
+                assert!(iou_of(gt_box, tp_box) > 0.5);
+                dts.push(
+                    det(dt_id, tp_box, rng.score())
+                        .in_img(image_id)
+                        .in_cat(cat_id),
+                );
+                dt_id += 1;
+            }
+            for _ in n_gt..DETS_PER_CELL {
+                let size = SIZES[(rng.next() % 3) as usize];
+                // Far from every GT row (y >= 480 + size <= 640).
+                let fp_box = [f64::from(rng.next() % 500), 480.0, size, size];
+                dts.push(
+                    det(dt_id, fp_box, rng.score())
+                        .in_img(image_id)
+                        .in_cat(cat_id),
+                );
+                dt_id += 1;
+            }
+        }
+    }
+    // The hand-built tie: image 1 / category 1 has three GT boxes
+    // (`(1 + 1) % 4`); the first is `[20, 170, 50, 50]`.
+    let tie_gt = [20.0, 170.0, 50.0, 50.0];
+    assert!(
+        gts.iter()
+            .any(|g| g.image_id == 1 && g.category_id == 1 && g.bbox == Some(tie_gt))
+    );
+    let tie_tp = [22.0, 172.0, 50.0, 50.0];
+    assert!(iou_of(tie_gt, tie_tp) > 0.5);
+    dts.push(det(dt_id, tie_tp, 0.70).in_img(1));
+    dts.push(det(dt_id + 1, [300.0, 480.0, 50.0, 50.0], 0.70).in_img(2));
+
+    (
+        dataset(images.clone(), categories.clone(), gts),
+        dataset(images, categories, dts),
+    )
+}
+
 /// Intersection-over-area of `a` — `inter / area(a)`, where `a` is the detection.
 ///
 /// This is the measure COCO uses for crowd regions and Open Images uses for
@@ -5428,6 +5530,96 @@ fn evaluation_is_independent_of_thread_count() {
     }
 }
 
+/// `accumulate()`'s arrays must be independent of the rayon thread count,
+/// bitwise, on a dataset where the order of tied detections decides the answer.
+///
+/// `evaluation_is_independent_of_thread_count` above checks the twelve summary
+/// numbers on a small fixture. This one checks every `precision`, `recall`,
+/// `scores`, and `ap_all_points` entry, plus a filtered re-accumulation through
+/// `slice_by`, on a dataset built to have equal scores across images and
+/// categories with a true positive on one side of a tie and a false positive on
+/// the other. The bucketing that feeds the stable score sort is built in
+/// parallel runs whose boundaries move with the thread count; a run concatenated
+/// out of order swaps tied detections between images and moves a precision
+/// value. `tie_heavy_datasets` supplies the ties.
+#[test]
+fn accumulate_arrays_are_independent_of_thread_count() {
+    let (gt_ds, dt_ds) = tie_heavy_datasets();
+    let slices: HashMap<String, Vec<u64>> = HashMap::from([
+        (
+            "odd".to_string(),
+            (1..=12u64).filter(|i| i % 2 == 1).collect(),
+        ),
+        ("first-third".to_string(), (1..=4u64).collect()),
+    ]);
+
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool");
+        pool.install(|| {
+            let coco_gt = COCO::from_dataset(gt_ds.clone());
+            let coco_dt = COCO::from_dataset(dt_ds.clone());
+            let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+            ev.params.max_dets = vec![1, 5, 100];
+            ev.evaluate();
+            ev.accumulate();
+            let sliced = ev.slice_by(slices.clone()).expect("slice_by");
+            (
+                ev.accumulated().expect("accumulate sets eval").clone(),
+                sliced.slices,
+            )
+        })
+    };
+
+    let assert_bits_eq = |name: &str, threads: usize, a: &[f64], b: &[f64]| {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "{name}: length differs at {threads} threads"
+        );
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            // Bitwise, not approximate: the claim is determinism.
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{name}[{i}] differs between 1 thread ({x}) and {threads} threads ({y})"
+            );
+        }
+    };
+
+    let (single, single_slices) = run(1);
+    // Precondition: the arrays carry real curves, not only sentinels.
+    assert!(single.precision.iter().any(|&p| p > 0.0 && p < 1.0));
+    for threads in [2usize, 3, 5, 8, 16] {
+        let (many, many_slices) = run(threads);
+        assert_bits_eq("precision", threads, &single.precision, &many.precision);
+        assert_bits_eq("recall", threads, &single.recall, &many.recall);
+        assert_bits_eq("scores", threads, &single.scores, &many.scores);
+        assert_bits_eq(
+            "ap_all_points",
+            threads,
+            &single.ap_all_points,
+            &many.ap_all_points,
+        );
+        assert_eq!(single_slices.len(), many_slices.len());
+        for (sa, sb) in single_slices.iter().zip(&many_slices) {
+            assert_eq!(sa.name, sb.name);
+            assert_eq!(sa.metrics.len(), sb.metrics.len());
+            for ((ka, va), (kb, vb)) in sa.metrics.iter().zip(&sb.metrics) {
+                assert_eq!(ka, kb);
+                assert_eq!(
+                    va.to_bits(),
+                    vb.to_bits(),
+                    "slice {} metric {ka} differs between 1 thread ({va}) and {threads} threads ({vb})",
+                    sa.name
+                );
+            }
+        }
+    }
+}
+
 /// `tide_errors` must be independent of the rayon thread count, bitwise, even
 /// with tied detection scores spanning multiple images and categories.
 ///
@@ -5574,6 +5766,93 @@ fn nan_detection_score_is_rejected() {
     );
 }
 
+/// `load_res_anns` warns once per mismatch kind, not once per offending
+/// annotation.
+///
+/// Regression for the single-pass rewrite that probes the GT's own `imgs`/
+/// `cats` index maps directly instead of rebuilding a fresh `HashSet` of GT
+/// ids on every call: a fused loop that forgets to gate each check on
+/// "already warned" would push one warning per mismatched detection instead
+/// of one per kind, and would report the last offender instead of the first.
+#[test]
+fn load_res_anns_warns_once_per_mismatch_kind() {
+    let gt = dataset(
+        vec![img(1), img(2)],
+        vec![cat(1, "person"), cat(2, "car")],
+        vec![],
+    );
+    let coco_gt = COCO::from_dataset(gt);
+
+    let dets = vec![
+        det(1, [0.0, 0.0, 10.0, 10.0], 0.9).in_img(99).in_cat(1),
+        det(2, [0.0, 0.0, 10.0, 10.0], 0.8).in_img(98).in_cat(1),
+        det(3, [0.0, 0.0, 10.0, 10.0], 0.7).in_img(1).in_cat(77),
+        det(4, [0.0, 0.0, 10.0, 10.0], 0.6).in_img(1).in_cat(76),
+    ];
+
+    let coco_dt = coco_gt
+        .load_res_anns(dets)
+        .expect("mismatched ids should warn, not error");
+    let warnings = coco_dt.load_warnings();
+
+    let img_warnings: Vec<_> = warnings.iter().filter(|w| w.contains("image_id")).collect();
+    let cat_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.contains("category_id"))
+        .collect();
+
+    assert_eq!(
+        img_warnings.len(),
+        1,
+        "expected exactly one image_id mismatch warning, got: {warnings:?}"
+    );
+    assert_eq!(
+        cat_warnings.len(),
+        1,
+        "expected exactly one category_id mismatch warning, got: {warnings:?}"
+    );
+    assert!(
+        img_warnings[0].contains("99"),
+        "should name the first mismatched image_id (99), got: {}",
+        img_warnings[0]
+    );
+    assert!(
+        cat_warnings[0].contains("77"),
+        "should name the first mismatched category_id (77), got: {}",
+        cat_warnings[0]
+    );
+}
+
+/// A GT with no categories at all must never emit a category_id mismatch
+/// warning, whatever `category_id` the results carry.
+///
+/// Regression for the `has_cats` gate on the fused validation loop: without
+/// it, an empty GT category list would warn on every detection, since every
+/// `category_id` is "not in the GT dataset" when the GT declares none.
+#[test]
+fn load_res_anns_skips_category_check_when_gt_has_no_categories() {
+    let gt = dataset(vec![img(1)], vec![], vec![]);
+    let coco_gt = COCO::from_dataset(gt);
+
+    let dets = vec![
+        det(1, [0.0, 0.0, 10.0, 10.0], 0.9).in_cat(1),
+        det(2, [0.0, 0.0, 10.0, 10.0], 0.8).in_cat(2),
+    ];
+
+    let coco_dt = coco_gt
+        .load_res_anns(dets)
+        .expect("no-category GT should still load results");
+    let cat_warnings: Vec<_> = coco_dt
+        .load_warnings()
+        .iter()
+        .filter(|w| w.contains("category_id"))
+        .collect();
+    assert!(
+        cat_warnings.is_empty(),
+        "GT with no categories must not warn about category_id, got: {cat_warnings:?}"
+    );
+}
+
 /// The five FP error types partition every unmatched, non-ignored detection.
 ///
 /// `classify_fp` is total — it returns one of Cls/Loc/Both/Dupe/Bkg for every
@@ -5706,6 +5985,194 @@ fn test_max_dets_order_is_irrelevant() {
         diag_unsorted.images.len(),
         "diagnostics coverage must not depend on max_dets order"
     );
+}
+
+/// One shared score order per `(category, area)` must reproduce every per-cap
+/// accumulation exactly.
+///
+/// `accumulate()` gathers each cell once at the largest cap, sorts once, and
+/// derives each M slot by a stable filter on the detection's rank inside its
+/// cell. The claim is that this equals pycocotools' per-`maxDet` recipe —
+/// concatenate `dtScores[0:maxDet]`, mergesort — bit for bit, ties included. A
+/// fresh single-cap run never takes the filter branch (its cap *is* the cap),
+/// so it is an independent oracle for the filtered slices of a multi-cap run.
+///
+/// Ties are the whole burden — an unstable filter or a reversed tie-break moves
+/// a precision value — and `tie_heavy_datasets` supplies them. Its cells hold
+/// more detections than the middle cap, so both truncation and the filter fire.
+#[test]
+fn test_accumulate_shared_order_equals_per_cap_runs() {
+    let (gt_ds, dt_ds) = tie_heavy_datasets();
+
+    // `acc_max_dets` re-assigns the caps between `evaluate()` and
+    // `accumulate()` — pycocotools' `accumulate(p)` idiom, which leaves cells
+    // holding more detections than the current cap.
+    let run = |max_dets: Vec<usize>, acc_max_dets: Option<Vec<usize>>| {
+        let coco_gt = COCO::from_dataset(gt_ds.clone());
+        let coco_dt = COCO::from_dataset(dt_ds.clone());
+        let mut ev = COCOeval::new(coco_gt, coco_dt, IouType::Bbox);
+        ev.params.max_dets = max_dets;
+        ev.evaluate();
+        if let Some(md) = acc_max_dets {
+            ev.params.max_dets = md;
+        }
+        ev.accumulate();
+        ev.accumulated().expect("accumulate sets eval").clone()
+    };
+
+    // Bit equality of one M slot against another, over all four arrays.
+    fn assert_slot_eq(
+        x: &hotcoco::AccumulatedEval,
+        mx: usize,
+        y: &hotcoco::AccumulatedEval,
+        my: usize,
+        what: &str,
+    ) {
+        let (sx, sy) = (&x.shape, &y.shape);
+        assert_eq!(
+            (sx.t, sx.r, sx.k, sx.a),
+            (sy.t, sy.r, sy.k, sy.a),
+            "{what}: shape"
+        );
+        for t in 0..sx.t {
+            for k in 0..sx.k {
+                for a in 0..sx.a {
+                    let (i, j) = (x.recall_idx(t, k, a, mx), y.recall_idx(t, k, a, my));
+                    assert_eq!(
+                        x.recall[i].to_bits(),
+                        y.recall[j].to_bits(),
+                        "{what}: recall t={t} k={k} a={a}"
+                    );
+                    assert_eq!(
+                        x.ap_all_points[i].to_bits(),
+                        y.ap_all_points[j].to_bits(),
+                        "{what}: ap_all_points t={t} k={k} a={a}"
+                    );
+                    for r in 0..sx.r {
+                        let (i, j) = (
+                            x.precision_idx(t, r, k, a, mx),
+                            y.precision_idx(t, r, k, a, my),
+                        );
+                        assert_eq!(
+                            x.precision[i].to_bits(),
+                            y.precision[j].to_bits(),
+                            "{what}: precision t={t} r={r} k={k} a={a}"
+                        );
+                        assert_eq!(
+                            x.scores[i].to_bits(),
+                            y.scores[j].to_bits(),
+                            "{what}: scores t={t} r={r} k={k} a={a}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let fresh_1 = run(vec![1], None);
+    let fresh_10 = run(vec![10], None);
+    let fresh_100 = run(vec![100], None);
+    let multi = run(vec![1, 10, 100], None);
+
+    // The caps must be distinguishable, or the filtered slices prove nothing.
+    assert!(
+        fresh_1
+            .precision
+            .iter()
+            .zip(&fresh_10.precision)
+            .any(|(p, q)| p.to_bits() != q.to_bits()),
+        "cap 1 and cap 10 must yield different curves"
+    );
+    assert!(
+        fresh_10.precision.iter().any(|&p| p > 0.0 && p < 1.0),
+        "curves must be non-trivial"
+    );
+
+    // Filtered slices (m < cap) against the unfiltered oracle.
+    assert_slot_eq(&multi, 0, &fresh_1, 0, "[1,10,100] m=1 vs fresh [1]");
+    assert_slot_eq(&multi, 1, &fresh_10, 0, "[1,10,100] m=10 vs fresh [10]");
+    assert_slot_eq(&multi, 2, &fresh_100, 0, "[1,10,100] m=100 vs fresh [100]");
+
+    // Caller order on the M axis is preserved, slot by slot.
+    let permuted = run(vec![100, 1, 10], None);
+    assert_slot_eq(
+        &permuted,
+        0,
+        &multi,
+        2,
+        "[100,1,10] m=100 vs [1,10,100] m=100",
+    );
+    assert_slot_eq(&permuted, 1, &fresh_1, 0, "[100,1,10] m=1 vs fresh [1]");
+    assert_slot_eq(&permuted, 2, &fresh_10, 0, "[100,1,10] m=10 vs fresh [10]");
+
+    // Caps lowered after `evaluate()`: the gather truncates the stored cells to
+    // the current cap, then the filter derives the smaller slot.
+    let lowered = run(vec![1, 10, 100], Some(vec![10, 1]));
+    assert_slot_eq(
+        &lowered,
+        0,
+        &fresh_10,
+        0,
+        "evaluate [1,10,100] accumulate [10,1] m=10 vs fresh [10]",
+    );
+    assert_slot_eq(
+        &lowered,
+        1,
+        &fresh_1,
+        0,
+        "evaluate [1,10,100] accumulate [10,1] m=1 vs fresh [1]",
+    );
+
+    // The image filter rides the same identity: a filtered accumulation is a
+    // stable filter of the grouping's one order, so a slice's numbers must equal
+    // a from-scratch evaluation of just those images — tie order included, since
+    // the 0.70 TP (image 1) and FP (image 2) land in different halves.
+    let mut ev = COCOeval::new(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Bbox,
+    );
+    ev.evaluate();
+    let odd: Vec<u64> = (1..=12).filter(|i| i % 2 == 1).collect();
+    let even: Vec<u64> = (1..=12).filter(|i| i % 2 == 0).collect();
+    let sliced = ev
+        .slice_by(
+            vec![
+                ("odd".to_string(), odd.clone()),
+                ("even".to_string(), even.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("slice_by on an evaluated COCOeval");
+    for (name, ids) in [("odd", odd), ("even", even)] {
+        let slice = sliced
+            .slices
+            .iter()
+            .find(|s| s.name == name)
+            .expect("slice present");
+        let mut fresh = COCOeval::new(
+            COCO::from_dataset(gt_ds.clone()),
+            COCO::from_dataset(dt_ds.clone()),
+            IouType::Bbox,
+        );
+        fresh.params.img_ids = ids;
+        fresh.run();
+        let expected = fresh.get_results(None, false);
+        assert_eq!(
+            slice.metrics.len(),
+            expected.len(),
+            "{name}: metric key sets"
+        );
+        for (key, &val) in &slice.metrics {
+            assert_eq!(
+                val.to_bits(),
+                expected[key].to_bits(),
+                "{name} {key}: slice {val} vs fresh subset {}",
+                expected[key]
+            );
+        }
+    }
 }
 
 /// GT annotations feed the matcher in JSON array order, exactly as pycocotools

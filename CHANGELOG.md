@@ -9,8 +9,201 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`metrics::counts::precision_recall_curve_of_order_into`** — the interpolated
+  precision-recall curve straight from ranked match flags, without the
+  cumulative TP/FP arrays `precision_recall_curve_into` reads. Same values, same
+  emission order; `accumulate()` now runs on it (below).
+
+### Changed
+
+- **`accumulate()` sorts each (category, area range) once, not once per
+  `maxDets` entry.** pycocotools concatenates every image's `dtScores[0:maxDet]`
+  and mergesorts the result for each cap. The three sorted sequences are the same
+  sequence: a stable sort of the concatenation truncated at the largest cap,
+  filtered to detections whose rank inside their image is below the smaller cap,
+  is the stable sort of the smaller-cap concatenation — filtering keeps relative
+  order, and ties break on concatenation position, which the filter also keeps.
+  So the gather and the sort run once per (category, area range) and each
+  `maxDets` slot is a filter of that order. On a 1.5M-detection RF-DETR-shaped
+  workload (300 detections per image, `maxDets=[1, 10, 300]`) `accumulate()` is
+  22–24% faster at 1, 2, and 16 threads, and end-to-end evaluate + accumulate +
+  summarize 10–14%. Every `precision`, `recall`, and `scores` value is
+  bit-identical to before, including under cross-image score ties, an unsorted
+  `maxDets`, and `maxDets` lowered between `evaluate()` and `accumulate()`; a new
+  Rust test pins each of those against fresh single-cap runs.
+- **`accumulate()` computes each precision-recall curve in one pass over the
+  ranked detections instead of four array round trips.** The previous kernel
+  wrote cumulative TP and FP arrays, then recall and precision arrays, then
+  read them back for the envelope and the recall-threshold scan. The new one
+  keeps integer counters, computes precision only at true-positive ranks — the
+  only ranks the VOC envelope can take its maximum from, and the only ranks a
+  recall threshold can first be met at — and samples the thresholds while
+  scanning. `accumulate()` is 34–37% faster and `compare()` (one accumulation
+  per bootstrap resample) 37% faster on a 1.5M-detection, 300-per-image
+  workload at 1 and 2 threads; end-to-end 18–25%. Every `precision`, `recall`,
+  and `scores` value is bit-identical to before; Open Images keeps the
+  cumulative arrays, which its all-points AP needs. The identity is checked by
+  `metrics::counts::tests::fused_curve_matches_cumulative_then_interpolate_bit_for_bit`
+  against the previous two-function path, including unsorted, duplicated, and
+  `NaN` recall thresholds.
+- **`accumulate()` buckets its evaluated cells in parallel, with one hash lookup
+  per (image, category) pair instead of three per cell.** Before the
+  precision-recall work starts, `accumulate()` groups every evaluated cell by
+  category and area range. That walk was sequential and did three hash lookups
+  per cell — category id, area-range key, image id — over ~1.5M 360-byte cells
+  on an RF-DETR-shaped run (5,000 images × 300 detections, `maxDets=[1, 10,
+  300]`), which made it 69 ms of the 189 ms `accumulate()` took on 16 threads:
+  the one serial step left. The walk is now cut into a few runs per thread that
+  are concatenated in order, the area range is matched by a bit-exact scan of
+  the handful of ranges, and the category and image lookups are memoized on the
+  id of the previous cell, which `evaluate()`'s layout makes a hit on almost
+  every cell. Same workload, same machine: grouping 69 → 32 / 18 / 6 ms and
+  `accumulate()` 1.49 → 1.45 s (≈ −3%, noise-level) / 0.80 → 0.75 s (−7%) /
+  0.207 → 0.136 s (**−34%**) at 1 / 2 / 16 threads. `precision`, `recall`,
+  `scores`, and `stats` are bit-identical to before on ten configurations,
+  including `maxDets` reassigned between `evaluate()` and `accumulate()`. A
+  `params` reconfigured between the two — categories or area ranges dropped,
+  reordered, or listed twice — resolves every cell exactly as the sequential
+  walk did; `detection::accumulate::tests` checks that against the old walk
+  under several run boundaries, and
+  `accumulate_arrays_are_independent_of_thread_count` checks every output
+  array and a `slice_by` re-accumulation bitwise across 1 to 16 threads on a
+  dataset with tied scores across images.
+- **`COCO::create_index` reserves its (image, category) index for the number of
+  distinct pairs it will hold, not the number of annotations, and derives the
+  category-to-images index from those pairs instead of pushing once per
+  annotation.** `img_cat_to_anns` holds one entry per distinct `(img, cat)`
+  pair — on a 1.5M-annotation, 300-per-image RF-DETR-shaped workload that is
+  ~400K pairs, so reserving for the annotation count left most of the table's
+  capacity unused. `cat_to_imgs` is now built from those already-unique pair
+  keys after the annotation loop (~400K pushes) instead of once per annotation
+  (~1.5M), then sorted into the same shape as before. All six index maps
+  (`anns`, `imgs`, `cats`, `img_to_anns`, `cat_to_imgs`, `img_cat_to_anns`) —
+  all private — also switched from the standard library's `HashMap` (SipHash)
+  to `rustc_hash::FxHashMap`, which is faster on the integer and integer-pair
+  keys these indices use throughout. `rustc-hash` was already in the dependency
+  graph transitively (via `numpy`); this makes it a direct dependency of
+  `hotcoco` (MIT/Apache-2.0). FxHash is not resistant to adversarially chosen
+  keys, an accepted trade-off for a local library indexing ids the caller
+  already chose to load — map iteration order was confirmed to never reach any
+  observable output before making the swap (every iteration site feeds a sort).
+  On the same RF-DETR-shaped workload, `gt.loadRes(ndarray)` is 34% faster and
+  the `COCOeval` constructor 49% faster (both call `create_index`); end-to-end
+  20% faster. `precision`, `recall`, `scores`, and `stats` are bit-identical to
+  before across ten configurations, including `maxDets` reassigned between
+  `evaluate()` and `accumulate()`. `coco::tests::test_cat_to_imgs_derived_from_pair_keys`
+  pins `cat_to_imgs`'s membership and deduplication and `get_ann_ids_for_img_cat`'s
+  dataset-order contract, and fails if the two index maps are conflated or the
+  order guarantee is dropped.
+- **`COCOeval`'s constructor copies an already-indexed `COCO` instead of rebuilding the index
+  from scratch, for both the ground-truth and detection side.** `PyCOCOeval::new` used to clone
+  only the raw dataset and call `COCO::from_dataset`, which rehashes every annotation, image, and
+  category id into fresh index maps — even though the `COCO` object passed in already carries a
+  built index that is always kept in sync with its dataset (every write path — the `dataset`
+  setter, dataset-derived constructors — rebuilds the whole object, so the cached index can never
+  go stale). `COCO` now derives `Clone`, and the constructor copies it directly. On a
+  1.5M-annotation RF-DETR-shaped workload the `COCOeval` constructor is 74% faster and the
+  evaluator's whole `compute()`-shaped call sequence 11% faster end-to-end; peak RSS is unchanged
+  — the copy is still a full one, so nothing is saved on memory, only on the redundant rehash.
+  One side effect: `create_index()` prints non-fatal warnings (duplicate annotation ids, unnamed
+  categories) to stderr as it runs, so the previous rebuild-per-constructor re-printed a source
+  dataset's warnings on every `COCOeval()` call; the copy carries the already-collected warnings
+  instead of regenerating them, so the reprint is gone. `precision`, `recall`, `scores`, and
+  `stats` are bit-identical to before across ten configurations, including `maxDets` reassigned
+  between `evaluate()` and `accumulate()`. `coco::tests::test_clone_is_a_faithful_reindex` pins
+  that the clone's six index maps and warnings match a fresh rebuild and that the copy is an
+  independent snapshot, and fails if a future hand-written `Clone` impl drops a field.
+- **`load_res_anns` validates, derives geometry, and assigns ids in one pass
+  over the detections instead of five, and checks GT membership against the
+  index this `COCO` already built instead of rebuilding a `HashSet` of GT ids
+  on every call.** The image-id and category-id mismatch checks used to scan
+  the whole detection list independently of the NaN-score check and the
+  geometry/id loops that follow; they now run together, still warning at most
+  once per mismatch kind (naming the first offender) and still rejecting a NaN
+  score outright. `derive_from_bbox`'s rectangular polygon, the unconditional
+  detection ids, and the mismatch warnings are all unchanged in content — only
+  how many times the detection list is walked to produce them. Both the
+  in-memory dict path and the numpy `loadRes(ndarray)` fast path share this
+  function, so both benefit from one fix. On a 1.5M-detection RF-DETR-shaped
+  workload `loadRes` itself is 16–19% faster, a reproducible win (the two
+  builds' measured ranges across five repeats don't overlap); the end-to-end
+  effect is not distinguishable from run-to-run noise on this workload, since
+  `loadRes` is a smaller share of the total than the constructor and evaluation
+  phases. `precision`, `recall`, `scores`, and `stats` are bit-identical to
+  before across ten configurations. One behavior note for direct Rust callers
+  only (the Python binding is unaffected): the mismatch checks now read the
+  same index that every other query method already depends on being current,
+  rather than the raw dataset — a caller that mutates `.dataset` in place
+  without calling `create_index()` was already getting a stale index from
+  every other method, and now gets it here too, which brings this method in
+  line with the rest of the type. Two new tests,
+  `load_res_anns_warns_once_per_mismatch_kind` and
+  `load_res_anns_skips_category_check_when_gt_has_no_categories`, pin the
+  once-per-kind warning behavior and the no-categories edge case, and fail if
+  either guard is dropped.
+- **Segmentation `evaluate()` converts masks to RLE only for detections and
+  ground truth that share a category with something on the other side.**
+  `SegmRles::prepare` used to rasterize every mask in scope up front, mirroring
+  pycocotools' `_prepare`; `evaluate()` already skips computing an IoU matrix
+  for an `(image, category)` cell with only ground truth or only detections
+  (that cell's IoU is empty by construction), so those masks were converted for
+  nothing. A DETR-shaped result set spreads detections across every category
+  per image while each image's ground truth covers only a handful, so most of
+  that conversion was waste: on a 1.5M-detection, 80-category RF-DETR-shaped
+  workload, 90.7% of detections sit in a category with no matching ground truth
+  in their image. `evaluate()` on a segmentation run is 58–60% faster at both 2
+  and 16 threads (peak RSS during that phase down ~2.5 GB), with
+  `precision`/`recall`/`scores`/`stats` bit-identical to before on 4
+  configurations spanning two workload sizes and `maxDets` settings, and the
+  existing 10-configuration bbox baseline unaffected (bbox never builds this
+  cache). `confusion_matrix()`/`tide()` still read the same cache after
+  `evaluate()`; a detection this change excludes from it now falls back to
+  converting its mask on the spot instead of hitting a pre-built entry — a cost
+  that moves from `evaluate()` to whichever of those calls needs it, computed
+  at most once per image per call, and repeated on a second such call, since
+  neither extends the cache. Bounding-box evaluation is untouched — this cache
+  is built only for `iouType="segm"`. A new test,
+  `segm_rle_cache_skips_dt_only_cells`, pins that a detection with no matching
+  ground-truth category is excluded from the cache and fails if that gate is
+  dropped.
+- **Decoding a Python dict into a dataset interns its field-name keys instead of
+  allocating a new string per key per record.** `COCO(dict)`, `loadRes(list of
+  dicts)`, and the RLE/segmentation decoders looked up each field with a bare
+  string literal, and `PyDict.get_item` allocates a fresh `PyString` for that on
+  every call; decoding an RF-DETR-shaped annotation list calls this once per
+  field per detection — millions of throwaway strings for a fixed set of ~10
+  field names. Those lookups now go through `pyo3::intern!`, which builds each
+  literal's `PyString` once per process and reuses it. `COCO(dict)` construction
+  is 18–20% faster across three shapes (a small dict, a 1.5M-annotation
+  segmentation dict, and a bounding-box-only dict), with no numeric or
+  structural change to the decoded dataset. A new test,
+  `TestKnownKeysRoundTrip`, round-trips every known field of an annotation,
+  image, and category through `COCO(dict)` and fails if any interned key
+  literal drifts from the field it names, whether the field is required
+  (raises instead of decoding) or optional (silently dropped instead of
+  decoding) — both failure shapes are pinned by injection. A separate
+  reprofile found that `extra`-field extraction, not covered by this change,
+  now costs roughly half of what remains of dict decoding on the same
+  workloads; that cost is unaddressed here.
+
+### Fixed
+
+## [1.0.1] - 2026-09-12
+
+### Added
+
 - **`coco --version`** prints the installed hotcoco version. `coco-eval --version`
   already did.
+- **`scripts/fuzz_dropin.py`, run as `just fuzz-dropin`** — a drop-in spelling
+  fuzzer. `fuzz_parity.py` round-trips every dataset through JSON files, so it
+  can never see a `bytes` RLE `counts`, a numpy scalar id, a tuple bbox, or a
+  missing optional key. This one builds a dataset in memory, evaluates it under
+  57 spellings pycocotools treats as equivalent, and fails on any spelling that
+  changes the stats or the `precision`/`recall`/`scores` arrays. Loud gaps and
+  places where both implementations drift together are summarized, not failed.
+- **`crates/hotcoco-pyo3/tests` runs in `just test` and in CI.** The binding
+  regression tests (drop-in gaps, mask parity, integrations) gated nothing
+  before; only `scripts/` was collected.
 
 ### Changed
 
@@ -18,14 +211,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Python lint CI selects the same Ruff hooks for linting and formatting checks.
   The Ruff version is pinned only in `.pre-commit-config.yaml`; the separate
   development dependency is removed.
+- **A category without `name` loads.** pycocotools tolerates the omission and
+  TorchMetrics emits bare `{"id": i}` records. The record gets the display name
+  `cat_<id>` — the same placeholder `COCO::cat_name` already used for an unknown
+  id — and the load is flagged in `load_warnings`.
+- **Integral floats are accepted for integer fields**, from a JSON file and from
+  a dict alike — `image_id: 1.0` is how a JSON written through pandas or numpy
+  reads back, and pycocotools accepts it because `1.0 == 1`. A fractional or
+  negative value still raises, naming the value; one that does not fit the
+  field is an `OverflowError`. Image `height`/`width` are optional in a file, as
+  they already were in a dict.
+- **`iscrowd`, `is_group_of`, `params.useCats`, and the mask functions'
+  `iscrowd` argument share one flag reader**, from a JSON file and from a dict
+  alike: `bool`, any int, or an integral float. pycocotools' own default is the
+  int `useCats = 1`, Open Images spells `IsGroupOf` as `0`/`1`, and each site
+  previously accepted a different subset.
+- **`keypoints` may be an `(N, 3)` array** as well as the flat COCO list.
 
 ### Fixed
 
 - **`mask.encode` accepts `bool` masks.** Any one-byte integer or boolean dtype
-  is viewed as `uint8` instead of rejected, so the arrays torch-side code stores
-  (TorchMetrics keeps masks as `bool`) encode without a cast. A wider dtype, or a
+  is read as `uint8` instead of rejected, so the arrays torch-side code stores
+  (TorchMetrics keeps masks as `bool`) encode without a cast, and any memory
+  layout works — C-order, Fortran-order, or a sliced view. A wider dtype, or a
   non-array input, now raises a `TypeError` naming the dtype and the fix rather
-  than `'ndarray' object is not an instance of 'ndarray'`.
+  than `'ndarray' object is not an instance of 'ndarray'`. Reported in
+  [#5](https://github.com/derekallman/hotcoco/issues/5), fixed in
+  [#7](https://github.com/derekallman/hotcoco/pull/7) by @Borda.
 - **RLE `counts` as `bytes` loads correctly.** `mask.encode()` returns `counts`
   as a `bytes` object, matching pycocotools, but the dataset loader decoded only
   the `str` form. A `bytes` object is a Python sequence of ints, so it extracted
@@ -35,7 +247,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wherever a `segmentation` dict is parsed, in the `COCO` constructor and in
   `load_res()` alike, and a `counts` value that is not `str`, `bytes`, or a list
   of ints raises `TypeError` naming the type it got instead of producing an empty
-  mask.
+  mask. Reported in [#5](https://github.com/derekallman/hotcoco/issues/5),
+  fixed in [#6](https://github.com/derekallman/hotcoco/pull/6) by @Borda.
+- **`COCOeval.summarize()` prints its table again.** The 1.0 binding computed
+  the lines and dropped them; `stats` was populated and every documented
+  example showed a table that never appeared. The lines now go through Python's
+  `sys.stdout`, so `contextlib.redirect_stdout` and notebook capture work.
+- **A keypoint ground truth without `num_keypoints` is scored, not ignored.**
+  The missing field was read as 0, which is the "no labeled keypoints" ignore
+  rule, so a file that omits it evaluated as a dataset with nothing to match.
+  `num_keypoints` is now derived from the visibility flags when absent (the
+  Rust `Annotation::num_visible_keypoints` is the one reader). Found by the new
+  `scripts/fuzz_dropin.py`, which evaluates one dataset under many in-memory
+  spellings — bytes counts, numpy scalars, tuples, missing optional keys — and
+  fails on any spelling that changes the numbers.
+- **The non-default-parameter warning fires once, not twice.** `summarize()`
+  raised it as a Python `UserWarning` and the Rust core also wrote it to fd 2.
+  The Rust `COCOeval::summarize_lines` now prints nothing; `summarize()` owns
+  the stderr copy.
 
 ## [1.0.0] - 2026-09-02
 
@@ -206,7 +435,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report, and `ev.results()` in Python - the artifacts users archive and come
   back to. Previously the marker existed only on `EvalReport`, which nothing that
   writes a file uses, so comparability died with the process.
-
 
 - **`hotcoco.metrics` and `hotcoco.primitives` — the functional layer.** Metric
   functions you can call on plain arrays, with no evaluator, no dataset, and no COCO

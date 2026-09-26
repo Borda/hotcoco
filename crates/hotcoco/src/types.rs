@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Top-level COCO dataset structure.
@@ -37,12 +39,17 @@ pub struct Info {
 /// A single image in the dataset.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Image {
+    #[serde(deserialize_with = "deserialize_uint")]
     pub id: u64,
     #[serde(default)]
     pub file_name: String,
+    /// Optional on load, as on the Python dict path: box-only evaluation
+    /// never reads it, and TorchMetrics emits bare `{"id": i}` records.
+    #[serde(default, deserialize_with = "deserialize_uint")]
     pub height: u32,
+    #[serde(default, deserialize_with = "deserialize_uint")]
     pub width: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_uint")]
     pub license: Option<u64>,
     #[serde(default)]
     pub coco_url: Option<String>,
@@ -66,9 +73,11 @@ pub struct Image {
 /// A single object annotation (ground truth or detection result).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Annotation {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_uint")]
     pub id: u64,
+    #[serde(deserialize_with = "deserialize_uint")]
     pub image_id: u64,
+    #[serde(deserialize_with = "deserialize_uint")]
     pub category_id: u64,
     #[serde(default)]
     pub bbox: Option<[f64; 4]>,
@@ -76,11 +85,14 @@ pub struct Annotation {
     pub area: Option<f64>,
     #[serde(default)]
     pub segmentation: Option<Segmentation>,
-    #[serde(default, deserialize_with = "deserialize_iscrowd")]
+    #[serde(default, deserialize_with = "deserialize_flag")]
     pub iscrowd: bool,
     #[serde(default)]
     pub keypoints: Option<Vec<f64>>,
-    #[serde(default)]
+    /// Count of labeled keypoints (visibility `> 0`). Optional in the wild;
+    /// read it through [`Annotation::num_visible_keypoints`], which derives it
+    /// from `keypoints` when absent instead of treating absence as zero.
+    #[serde(default, deserialize_with = "deserialize_opt_uint")]
     pub num_keypoints: Option<u32>,
     /// Oriented bounding box as `[cx, cy, w, h, angle]` where angle is in radians.
     /// Used for rotated detection evaluation (aerial imagery, document analysis, scene text).
@@ -91,7 +103,7 @@ pub struct Annotation {
     pub score: Option<f64>,
     /// Open Images group-of flag. When true, the annotation represents a group of objects
     /// rather than a single instance. Distinct from `iscrowd` — different matching semantics.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_flag")]
     pub is_group_of: Option<bool>,
     /// Keys not in the COCO schema, preserved verbatim so
     /// load → filter/split/merge → save round-trips user metadata
@@ -100,23 +112,143 @@ pub struct Annotation {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Deserialize `iscrowd` from either a boolean or an integer (0/1).
+impl Annotation {
+    /// The number of labeled keypoints: `num_keypoints` when the record has
+    /// it, otherwise the count of `(x, y, v)` triplets in `keypoints` with
+    /// `v > 0`, which is what the field means.
+    ///
+    /// The only reader the keypoint ignore rule goes through. Reading the
+    /// raw field with a zero default marked every ground truth in a file
+    /// that omits `num_keypoints` as ignored, and keypoint AP came out of a
+    /// dataset with no scorable objects — plausible numbers, wrong ones.
+    pub fn num_visible_keypoints(&self) -> u32 {
+        match (self.num_keypoints, &self.keypoints) {
+            (Some(n), _) => n,
+            (None, Some(k)) => k.chunks_exact(3).filter(|t| t[2] > 0.0).count() as u32,
+            (None, None) => 0,
+        }
+    }
+}
+
+/// A 0/1 flag read from JSON: `true`/`false`, any integer, or an integral
+/// float.
 ///
-/// COCO JSON files use both representations, so both are accepted.
-fn deserialize_iscrowd<'de, D>(deserializer: D) -> Result<bool, D::Error>
+/// COCO files spell `iscrowd` as both `0`/`1` and `true`/`false`; a file
+/// written through pandas spells it `0.0`. The Python dict path applies the
+/// same rule in the bindings' `extract_flag`. A fractional float is an error
+/// naming the value, not "truthy".
+struct Flag(bool);
+
+impl<'de> Deserialize<'de> for Flag {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FlagVisitor;
+
+        impl Visitor<'_> for FlagVisitor {
+            type Value = Flag;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a bool or a 0/1 flag")
+            }
+
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Flag, E> {
+                Ok(Flag(v))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Flag, E> {
+                Ok(Flag(v != 0))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Flag, E> {
+                Ok(Flag(v != 0))
+            }
+
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Flag, E> {
+                if v.fract() == 0.0 {
+                    Ok(Flag(v != 0.0))
+                } else {
+                    Err(E::custom(format!("expected a bool or 0/1 flag, got {v}")))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(FlagVisitor)
+    }
+}
+
+fn deserialize_flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Flag::deserialize(deserializer).map(|f| f.0)
+}
+
+fn deserialize_opt_flag<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    Option::<Flag>::deserialize(deserializer).map(|o| o.map(|f| f.0))
+}
+
+/// A non-negative integer read from JSON that may be spelled as an integral
+/// float.
+///
+/// `"image_id": 1.0` is how a JSON written through pandas or a numpy-backed
+/// encoder reads back, and pycocotools accepts it because `1.0 == 1`. A
+/// fractional or negative value is still an error naming the value. The
+/// Python dict path applies the same rule in the bindings' `extract_int`.
+/// A streaming visitor rather than `#[serde(untagged)]`, for the reason the
+/// [`Segmentation`] deserializer gives: ids are the most numerous scalars in
+/// a file and must not be buffered.
+struct Uint<T>(T);
+
+impl<'de, T: TryFrom<u64>> Deserialize<'de> for Uint<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UintVisitor<T>(PhantomData<T>);
+
+        impl<T: TryFrom<u64>> Visitor<'_> for UintVisitor<T> {
+            type Value = Uint<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a non-negative integer")
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Uint<T>, E> {
+                T::try_from(v)
+                    .map(Uint)
+                    .map_err(|_| E::custom(format!("integer {v} is out of range for this field")))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Uint<T>, E> {
+                u64::try_from(v)
+                    .map_err(|_| E::custom(format!("expected a non-negative integer, got {v}")))
+                    .and_then(|u| self.visit_u64(u))
+            }
+
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Uint<T>, E> {
+                if v.fract() == 0.0 && v >= 0.0 && v <= u64::MAX as f64 {
+                    self.visit_u64(v as u64)
+                } else {
+                    Err(E::custom(format!(
+                        "expected a non-negative integer, got {v}"
+                    )))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(UintVisitor(PhantomData))
+    }
+}
+
+fn deserialize_uint<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
+    T: TryFrom<u64>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum IsCrowd {
-        Bool(bool),
-        Int(u8),
-    }
-    match IsCrowd::deserialize(deserializer)? {
-        IsCrowd::Bool(b) => Ok(b),
-        IsCrowd::Int(i) => Ok(i != 0),
-    }
+    Uint::deserialize(deserializer).map(|u| u.0)
+}
+
+fn deserialize_opt_uint<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: TryFrom<u64>,
+{
+    Option::<Uint<T>>::deserialize(deserializer).map(|o| o.map(|u| u.0))
 }
 
 /// Segmentation mask in one of three COCO formats.
@@ -231,7 +363,12 @@ impl<'de> Deserialize<'de> for Segmentation {
 /// An object category, such as "person" or "car".
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Category {
+    #[serde(deserialize_with = "deserialize_uint")]
     pub id: u64,
+    /// Display name. A category loaded without one gets the
+    /// [`placeholder_cat_name`](crate::COCO::placeholder_cat_name) at index
+    /// time, so this is never empty on an indexed dataset.
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub supercategory: Option<String>,
