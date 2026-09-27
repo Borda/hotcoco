@@ -346,8 +346,8 @@ impl COCOeval {
             dt_ids,
             gt_ids,
             eval_mode,
-            |id| coco_dt.get_ann(id)?.obb,
-            |ann, _id| ann.obb,
+            |id| coco_dt.get_ann(id)?.obb.as_deref().copied(),
+            |ann, _id| ann.obb.as_deref().copied(),
             sim::obb_iou,
         )
     }

@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "hotcoco"
 version = "1.0.1"
-description = "Perception evaluation toolkit — pycocotools-compatible detection metrics in pure Rust, up to 81× faster"
+description = "Perception evaluation toolkit — pycocotools-compatible detection metrics in pure Rust, up to 79× faster"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "Derek Allman", email = "derek.allman@yahoo.com" }]

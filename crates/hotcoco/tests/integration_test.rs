@@ -2032,7 +2032,7 @@ fn bbox_of(a: &Annotation) -> [f64; 4] {
 }
 
 fn obb_of(a: &Annotation) -> [f64; 5] {
-    a.obb.expect("annotation should carry an obb")
+    *a.obb.as_deref().expect("annotation should carry an obb")
 }
 
 #[test]
@@ -4699,7 +4699,7 @@ fn test_obb_eval_basic() {
             category_id: 1,
             bbox: Some([90.0, 90.0, 220.0, 120.0]),
             area: Some(20000.0),
-            obb: Some([200.0, 150.0, 200.0, 100.0, 0.3]),
+            obb: Some(Box::new([200.0, 150.0, 200.0, 100.0, 0.3])),
             ..Default::default()
         }],
         categories: vec![cat(1, "vehicle")],
@@ -4715,7 +4715,7 @@ fn test_obb_eval_basic() {
             category_id: 1,
             bbox: Some([90.0, 90.0, 220.0, 120.0]),
             area: Some(20000.0),
-            obb: Some([200.0, 150.0, 200.0, 100.0, 0.3]),
+            obb: Some(Box::new([200.0, 150.0, 200.0, 100.0, 0.3])),
             score: Some(0.99),
             ..Default::default()
         }],
@@ -4753,7 +4753,7 @@ fn test_obb_eval_no_overlap() {
             category_id: 1,
             bbox: Some([0.0, 0.0, 50.0, 50.0]),
             area: Some(2500.0),
-            obb: Some([25.0, 25.0, 50.0, 50.0, 0.0]),
+            obb: Some(Box::new([25.0, 25.0, 50.0, 50.0, 0.0])),
             ..Default::default()
         }],
         categories: vec![cat(1, "vehicle")],
@@ -4769,7 +4769,7 @@ fn test_obb_eval_no_overlap() {
             category_id: 1,
             bbox: Some([700.0, 500.0, 50.0, 50.0]),
             area: Some(2500.0),
-            obb: Some([725.0, 525.0, 50.0, 50.0, 0.0]),
+            obb: Some(Box::new([725.0, 525.0, 50.0, 50.0, 0.0])),
             score: Some(0.9),
             ..Default::default()
         }],
@@ -4808,7 +4808,7 @@ fn test_dota_round_trip_integration() {
             category_id: 1,
             bbox: Some([90.0, 90.0, 220.0, 120.0]),
             area: Some(20000.0),
-            obb: Some([200.0, 150.0, 200.0, 100.0, 0.0]),
+            obb: Some(Box::new([200.0, 150.0, 200.0, 100.0, 0.0])),
             ..Default::default()
         }],
         categories: vec![cat(1, "vehicle")],

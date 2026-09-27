@@ -279,14 +279,8 @@ pub fn annotation_to_py(py: Python<'_>, ann: &Annotation) -> PyResult<Py<PyAny>>
 
 pub fn segmentation_to_py(py: Python<'_>, seg: &Segmentation) -> PyResult<Py<PyAny>> {
     match seg {
-        Segmentation::Polygon(polys) => {
-            let inner_lists: Vec<Bound<'_, PyList>> = polys
-                .iter()
-                .map(|p| PyList::new(py, p.iter()))
-                .collect::<PyResult<_>>()?;
-            let list = PyList::new(py, inner_lists)?;
-            Ok(list.into_any().unbind())
-        }
+        Segmentation::Polygon(polys) => polygons_to_py(py, polys),
+        Segmentation::Rect(bbox) => polygons_to_py(py, &[Segmentation::rect_corners(bbox)]),
         Segmentation::CompressedRle { size, counts } => {
             let dict = PyDict::new(py);
             dict.set_item("size", vec![size[0], size[1]])?;
@@ -300,6 +294,14 @@ pub fn segmentation_to_py(py: Python<'_>, seg: &Segmentation) -> PyResult<Py<PyA
             Ok(dict.into_any().unbind())
         }
     }
+}
+
+fn polygons_to_py<P: AsRef<[f64]>>(py: Python<'_>, polys: &[P]) -> PyResult<Py<PyAny>> {
+    let inner_lists: Vec<Bound<'_, PyList>> = polys
+        .iter()
+        .map(|p| PyList::new(py, p.as_ref()))
+        .collect::<PyResult<_>>()?;
+    Ok(PyList::new(py, inner_lists)?.into_any().unbind())
 }
 
 pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
@@ -341,7 +343,7 @@ pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
         iscrowd,
         keypoints,
         num_keypoints,
-        obb,
+        obb: obb.map(Box::new),
         score,
         is_group_of,
         extra,

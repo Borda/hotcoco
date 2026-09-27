@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Top-level COCO dataset structure.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -96,8 +97,10 @@ pub struct Annotation {
     pub num_keypoints: Option<u32>,
     /// Oriented bounding box as `[cx, cy, w, h, angle]` where angle is in radians.
     /// Used for rotated detection evaluation (aerial imagery, document analysis, scene text).
+    ///
+    /// Boxed: every record pays for this field and few carry one.
     #[serde(default)]
-    pub obb: Option<[f64; 5]>,
+    pub obb: Option<Box<[f64; 5]>>,
     /// Detection score (present only in result annotations).
     #[serde(default)]
     pub score: Option<f64>,
@@ -266,10 +269,42 @@ where
 pub enum Segmentation {
     /// Polygon format: list of polygons, each a flat list of [x, y, x, y, ...] coordinates.
     Polygon(Vec<Vec<f64>>),
+    /// The four-corner polygon of a box, stored as the box `[x, y, w, h]`.
+    ///
+    /// What `load_res` gives a box result that came without a segmentation, as
+    /// pycocotools' `loadRes` does. Wherever a polygon list is expected — JSON,
+    /// Python, CVAT export, rasterization — it is the single polygon
+    /// [`Segmentation::rect_corners`] returns; [`Segmentation::polygons`] reads
+    /// either variant. Storing the box keeps a box result off the heap.
+    #[serde(serialize_with = "serialize_rect")]
+    Rect([f64; 4]),
     /// Compressed RLE format (as stored in COCO JSON results).
     CompressedRle { size: [u32; 2], counts: String },
     /// Uncompressed RLE format.
     UncompressedRle { size: [u32; 2], counts: Vec<u32> },
+}
+
+impl Segmentation {
+    /// The polygon list of a `Polygon` or `Rect` segmentation; `None` for an RLE.
+    pub fn polygons(&self) -> Option<Cow<'_, [Vec<f64>]>> {
+        match self {
+            Segmentation::Polygon(polys) => Some(Cow::Borrowed(polys)),
+            Segmentation::Rect(bbox) => Some(Cow::Owned(vec![Self::rect_corners(bbox).to_vec()])),
+            Segmentation::CompressedRle { .. } | Segmentation::UncompressedRle { .. } => None,
+        }
+    }
+
+    /// The corners of a `[x, y, w, h]` box as one flat polygon, in the order
+    /// pycocotools' `loadRes` writes them.
+    pub fn rect_corners(bbox: &[f64; 4]) -> [f64; 8] {
+        let [x1, y1, bw, bh] = *bbox;
+        let (x2, y2) = (x1 + bw, y1 + bh);
+        [x1, y1, x1, y2, x2, y2, x2, y1]
+    }
+}
+
+fn serialize_rect<S: Serializer>(bbox: &[f64; 4], serializer: S) -> Result<S::Ok, S::Error> {
+    [Segmentation::rect_corners(bbox)].serialize(serializer)
 }
 
 impl<'de> Deserialize<'de> for Segmentation {
@@ -444,5 +479,49 @@ impl Rle {
             );
         }
         Ok(Self { h, w, counts })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// The record is what every detection costs: 208 bytes with `obb` boxed
+    /// (248 inline), and `Rect` must fit the enum without growing it.
+    #[test]
+    fn record_layout_stays_slim() {
+        assert!(std::mem::size_of::<Annotation>() <= 208);
+        assert_eq!(
+            std::mem::size_of::<Segmentation>(),
+            std::mem::size_of::<Option<Segmentation>>()
+        );
+        assert!(std::mem::size_of::<Segmentation>() <= 40);
+    }
+
+    #[test]
+    fn a_rect_reads_and_writes_as_the_polygon_load_res_used_to_build() {
+        let bbox = [10.5, 20.25, 30.0, 40.125];
+        let rect = Segmentation::Rect(bbox);
+        let corners = vec![10.5, 20.25, 10.5, 60.375, 40.5, 60.375, 40.5, 20.25];
+        let poly = Segmentation::Polygon(vec![corners.clone()]);
+
+        assert_eq!(rect.polygons().unwrap().as_ref(), &[corners]);
+        assert_eq!(
+            serde_json::to_string(&rect).unwrap(),
+            serde_json::to_string(&poly).unwrap()
+        );
+        assert!(matches!(
+            serde_json::from_str::<Segmentation>(&serde_json::to_string(&rect).unwrap()).unwrap(),
+            Segmentation::Polygon(p) if p.len() == 1 && p[0].len() == 8
+        ));
+        assert!(
+            Segmentation::CompressedRle {
+                size: [1, 1],
+                counts: String::new()
+            }
+            .polygons()
+            .is_none()
+        );
     }
 }

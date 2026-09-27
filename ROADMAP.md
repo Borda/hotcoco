@@ -44,12 +44,8 @@ enough to verify against exists, the same bar every other family clears.
 ## Rust API cleanups
 
 Rust-visible breaks ship in minor releases while the crate has no dependents
-outside this repository; each one is named in the CHANGELOG. These wait for
-their own design work, not for a major version.
-
-- **A slimmer annotation record** — `Annotation` is 248 bytes plus a heap
-  vector per polygon or keypoint list; a columnar detection store changes the
-  public `Dataset` shape.
+outside this repository; each one is named in the CHANGELOG. Nothing is queued
+at the moment.
 
 ## Not tied to a release
 

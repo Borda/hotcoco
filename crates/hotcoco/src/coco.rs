@@ -511,11 +511,7 @@ impl COCO {
         };
         ann.area = Some(bbox[2] * bbox[3]);
         if ann.segmentation.is_none() {
-            let (x1, y1, bw, bh) = (bbox[0], bbox[1], bbox[2], bbox[3]);
-            let (x2, y2) = (x1 + bw, y1 + bh);
-            ann.segmentation = Some(Segmentation::Polygon(vec![vec![
-                x1, y1, x1, y2, x2, y2, x2, y1,
-            ]]));
+            ann.segmentation = Some(Segmentation::Rect(bbox));
         }
     }
 
@@ -570,11 +566,11 @@ impl COCO {
 
     /// Area from the rotated box, and its axis-aligned envelope as the bbox.
     fn derive_from_obb(ann: &mut Annotation) {
-        let Some(obb) = ann.obb else {
+        let Some(obb) = ann.obb.as_deref() else {
             return;
         };
         ann.area = Some(obb[2] * obb[3]);
-        ann.bbox = Some(crate::geometry::obb_to_aabb(&obb));
+        ann.bbox = Some(crate::geometry::obb_to_aabb(obb));
     }
 
     /// Convert an annotation's segmentation to RLE.
@@ -585,6 +581,9 @@ impl COCO {
 
         match &ann.segmentation {
             Some(Segmentation::Polygon(polys)) => mask::fr_polys(polys, h, w).ok(),
+            Some(Segmentation::Rect(bbox)) => {
+                mask::fr_poly(&Segmentation::rect_corners(bbox), h, w).ok()
+            }
             Some(Segmentation::CompressedRle { size, counts }) => {
                 mask::rle_from_string(counts, size[0], size[1]).ok()
             }
@@ -988,6 +987,37 @@ mod tests {
         assert!(coco.get_ann(4).is_none());
         assert_eq!(coco.imgs.len(), 2);
         assert_eq!(coco.cats.len(), 2);
+    }
+
+    /// A box result's segmentation is the box itself; it must rasterize to
+    /// the same RLE as the four-corner polygon pycocotools' `loadRes` builds.
+    #[test]
+    fn a_box_result_masks_like_its_corner_polygon() {
+        let gt = COCO::from_dataset(make_test_dataset());
+        let bbox = [10.5, 20.25, 30.0, 40.125];
+        let res = gt
+            .load_res_anns(vec![Annotation {
+                image_id: 1,
+                category_id: 1,
+                bbox: Some(bbox),
+                score: Some(0.9),
+                ..Default::default()
+            }])
+            .unwrap();
+        let ann = res.get_ann(1).unwrap();
+        assert!(matches!(ann.segmentation, Some(Segmentation::Rect(b)) if b == bbox));
+        assert_eq!(ann.area, Some(bbox[2] * bbox[3]));
+
+        let polygon = Annotation {
+            segmentation: Some(Segmentation::Polygon(vec![
+                Segmentation::rect_corners(&bbox).to_vec(),
+            ])),
+            ..ann.clone()
+        };
+        assert_eq!(
+            res.ann_to_rle(ann).unwrap(),
+            res.ann_to_rle(&polygon).unwrap()
+        );
     }
 
     /// `cat_to_imgs` must be derived from the distinct `(img, cat)` pairs, not

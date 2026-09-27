@@ -16,6 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`accumulate()` writes its output arrays in place.** Each (category, area
+  range) work item staged its writes as index-value lists sized for the whole
+  M × T × R slab, about 96 KB per item, and a serial merge copied them into
+  the arrays afterwards: on COCO's 320 items that peaked at 48 MB for 16 MB
+  of output. Items now stage on a per-thread buffer and apply their slab under
+  a lock taken once per item. The peak is 19 MB, the phase is a few
+  milliseconds faster, and every bootstrap resample in `compare()` and every
+  `slice_by()` call pays the smaller cost too. Values are unchanged.
+
+- **A box result's segmentation is the box.** `load_res` gives every box
+  result that came without a segmentation the four-corner polygon pycocotools'
+  `loadRes` builds; it was stored as two heap vectors per detection. The new
+  `Segmentation::Rect([x, y, w, h])` holds it inline and reads as that polygon
+  everywhere: JSON, Python dicts, CVAT export, and rasterization, where the RLE
+  is identical. `mask::fr_polys` now rasterizes a single polygon directly
+  instead of through a one-element merge that copied the result, which every
+  single-polygon ground truth paid. `Annotation::obb` is boxed (`Option<Box<[f64; 5]>>`), which
+  takes the record from 248 to 208 bytes. Beyond the ground truth, `load_res`
+  keeps 22 MB instead of 29 MB on val2017's bbox results and 229 MB instead
+  of 313 MB at ten times that count. Rust code matching `Segmentation::Polygon`
+  to read a result's polygon should call `Segmentation::polygons()`, which
+  returns the list for either variant.
+
 - **The annotation index is flat.** `COCO` answered "which annotations does
   this image, or this (image, category) pair, hold" from hash maps holding
   one heap vector per key — about 285k vectors for a 500k-detection results

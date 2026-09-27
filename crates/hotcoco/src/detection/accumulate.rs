@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, PoisonError};
 
 use rayon::prelude::*;
 
@@ -312,36 +313,41 @@ pub(super) fn accumulate_impl(
     // passes over the cell list collapsed into one, and the `num_gt == 0`
     // short-circuit now skips all three M slots together.
     //
-    // The output stays disjoint per `m`, so the merge below is unchanged and no
-    // floating-point sum is reassociated.
-    let work_items: Vec<(usize, usize)> = (0..k)
-        .flat_map(|k_idx| (0..a).map(move |a_idx| (k_idx, a_idx)))
-        .collect();
+    // Each item's output cells are disjoint from every other item's, so no
+    // floating-point sum is reassociated and the items can write the output
+    // arrays in place: each stages its writes on its thread, then takes the
+    // lock once to apply them.
 
-    /// Intermediate results from a single (category, area_range) work item.
-    /// Each field is a list of (flat_index, value) pairs to write into the output arrays.
+    /// One item's `(k, a)` slab of every output, staged on its thread until
+    /// the item is done.
     #[derive(Default)]
-    struct AccResult {
-        /// Whether this work item had ground truth, and therefore needs the 0.0
-        /// zero-fill applied across every M slot in the merge. The merge writes
-        /// the zeros before the real writes, which overwrite them — same
-        /// indices, same order. (Per-item, not per-slot: `num_gt` does not
-        /// depend on the max-det cap, so all M slots fill together.)
-        filled: bool,
-        precision_writes: Vec<(usize, f64)>,
-        /// `(flat_index, max_recall, all_points_ap)`. The AP rides along with the
-        /// recall it was computed from rather than in a parallel vector, so the two
-        /// cannot be written at different indices or one forgotten on an early
-        /// return. Carries `-1.0` when the mode does not want it.
-        recall_writes: Vec<(usize, f64, f64)>,
-        scores_writes: Vec<(usize, f64)>,
+    struct Staged {
+        /// `[M x T x R]`.
+        precision: Vec<f64>,
+        /// `[M x T x R]`.
+        scores: Vec<f64>,
+        /// `[M x T]` of `(max recall, all-points AP)`. The AP rides along with
+        /// the recall it was computed from, so the two cannot be written at
+        /// different indices or one forgotten on an early return.
+        recall: Vec<(f64, f64)>,
     }
 
     let shape = EvalShape { t, r, k, a, m };
+    let total = t * r * k * a * m;
+    let total_recall = t * k * a * m;
+    let outputs = Mutex::new(AccumulatedEval {
+        precision: vec![-1.0; total],
+        recall: vec![-1.0; total_recall],
+        ap_all_points: vec![-1.0; total_recall],
+        scores: vec![-1.0; total],
+        shape,
+    });
 
-    let results: Vec<AccResult> = work_items
-        .par_iter()
-        .map(|&(k_idx, a_idx)| {
+    // Items are indexed as `grouped` is: `k_idx * a + a_idx`.
+    (0..k * a)
+        .into_par_iter()
+        .for_each_init(Staged::default, |staged, item| {
+            let (k_idx, a_idx) = (item / a, item % a);
             // Materialized once for every `m`, rather than filtered per `m`.
             let evals: Vec<CellRef> = grouping
                 .cell(k_idx, a_idx)
@@ -357,15 +363,20 @@ pub(super) fn accumulate_impl(
                 .map(|e| e.area().num_gt_in_denominator as usize)
                 .sum();
             if num_gt == 0 {
-                return AccResult::default();
+                return;
             }
-
-            let mut out = AccResult {
-                filled: true,
-                precision_writes: Vec::with_capacity(m * t * r),
-                recall_writes: Vec::with_capacity(m * t),
-                scores_writes: Vec::with_capacity(m * t * r),
-            };
+            // Precision and scores start at 0.0 (distinct from -1.0, "no data")
+            // wherever ground truth exists, so a category with GT but no matches
+            // shows 0 AP rather than "missing" and dropping out of the mean. Only
+            // recall thresholds reached by detections are overwritten below;
+            // unreachable ones stay at 0.0. Per item, not per `m`: `num_gt` does
+            // not depend on the max-det cap.
+            staged.precision.clear();
+            staged.precision.resize(m * t * r, 0.0);
+            staged.scores.clear();
+            staged.scores.resize(m * t * r, 0.0);
+            staged.recall.clear();
+            staged.recall.resize(m * t, (-1.0, -1.0));
 
             // One gather and one sort per work item, shared by every `m`.
             //
@@ -438,10 +449,9 @@ pub(super) fn accumulate_impl(
                     // "missing". The metric *is* computable here and the answer is that
                     // nothing was found; reporting "not computed" would drop the
                     // category from the mean and quietly raise mAP.
+                    let ap = if want_all_points { 0.0 } else { -1.0 };
                     for t_idx in 0..t {
-                        let recall_idx = shape.recall_idx(t_idx, k_idx, a_idx, m_idx);
-                        let ap = if want_all_points { 0.0 } else { -1.0 };
-                        out.recall_writes.push((recall_idx, 0.0, ap));
+                        staged.recall[m_idx * t + t_idx] = (0.0, ap);
                     }
                     continue;
                 }
@@ -487,68 +497,38 @@ pub(super) fn accumulate_impl(
                             );
                         (final_recall, -1.0)
                     };
-                    let recall_idx = shape.recall_idx(t_idx, k_idx, a_idx, m_idx);
-                    out.recall_writes
-                        .push((recall_idx, final_recall, all_points_ap));
-
+                    staged.recall[m_idx * t + t_idx] = (final_recall, all_points_ap);
                     for &(r_idx, pr_val, rc_ptr) in &curve {
-                        let p_idx = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
-                        out.precision_writes.push((p_idx, pr_val));
-                        out.scores_writes.push((p_idx, all_dt_scores[inds[rc_ptr]]));
+                        let i = (m_idx * t + t_idx) * r + r_idx;
+                        staged.precision[i] = pr_val;
+                        staged.scores[i] = all_dt_scores[inds[rc_ptr]];
                     }
                 }
             }
 
-            out
-        })
-        .collect();
-
-    // Merge results into output arrays
-    let total = t * r * k * a * m;
-    let mut precision = vec![-1.0f64; total];
-    let mut scores = vec![-1.0f64; total];
-    let total_recall = t * k * a * m;
-    let mut recall = vec![-1.0f64; total_recall];
-    let mut ap_all_points = vec![-1.0f64; total_recall];
-
-    // `work_items` and `results` are index-parallel: rayon's indexed `collect`
-    // preserves order, which is what lets the zero-fill recover each result's
-    // (k, a) coordinates without carrying them in the struct.
-    for (&(k_idx, a_idx), result) in work_items.iter().zip(results) {
-        // Initialize precision and scores to 0.0 (distinct from -1.0, which means
-        // "no data"). This ensures categories with GT but no matches show 0 AP,
-        // not "missing". Only recall thresholds reached by actual detections get
-        // overwritten below — unreachable thresholds stay at 0.0.
-        if result.filled {
-            for m_idx in 0..m {
-                for t_idx in 0..t {
-                    for r_idx in 0..r {
-                        let p_idx = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx);
-                        precision[p_idx] = 0.0;
-                        scores[p_idx] = 0.0;
+            // The M slots of an output cell are contiguous, so the slab lands
+            // as `m`-runs of each `(t, r)`.
+            // A poisoned lock means another item panicked, which rayon propagates.
+            let mut out = outputs.lock().unwrap_or_else(PoisonError::into_inner);
+            for t_idx in 0..t {
+                for r_idx in 0..r {
+                    let base = shape.precision_idx(t_idx, r_idx, k_idx, a_idx, 0);
+                    for m_idx in 0..m {
+                        let i = (m_idx * t + t_idx) * r + r_idx;
+                        out.precision[base + m_idx] = staged.precision[i];
+                        out.scores[base + m_idx] = staged.scores[i];
                     }
                 }
+                let base = shape.recall_idx(t_idx, k_idx, a_idx, 0);
+                for m_idx in 0..m {
+                    let (recall, ap) = staged.recall[m_idx * t + t_idx];
+                    out.recall[base + m_idx] = recall;
+                    out.ap_all_points[base + m_idx] = ap;
+                }
             }
-        }
-        for (idx, val) in result.precision_writes {
-            precision[idx] = val;
-        }
-        for (idx, rec, ap) in result.recall_writes {
-            recall[idx] = rec;
-            ap_all_points[idx] = ap;
-        }
-        for (idx, val) in result.scores_writes {
-            scores[idx] = val;
-        }
-    }
+        });
 
-    AccumulatedEval {
-        precision,
-        recall,
-        ap_all_points,
-        scores,
-        shape,
-    }
+    outputs.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl COCOeval {
