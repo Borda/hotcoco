@@ -69,8 +69,9 @@ Annotation dicts carry the same keys — `id`, `image_id`, `category_id`, `bbox`
 
 ## Getters return copies — assign back to apply
 
-The data lives in Rust, so `ev.params`, `coco.dataset`, `ev.coco_gt`, and
-`ev.coco_dt` return **copies** on each access. Attribute assignment
+The data lives in Rust, so `coco.dataset` returns a **copy** on each access, and
+`ev.coco_gt` and `ev.coco_dt` return a new object that shares the evaluator's
+data without copying it. Attribute assignment
 (`ev.params.cat_ids = [...]`) works — the setter routes the change back to Rust —
 but mutating a *container inside* a copy is a no-op:
 

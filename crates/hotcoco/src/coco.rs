@@ -1173,9 +1173,9 @@ mod tests {
             ..Default::default()
         });
 
-        let a = COCO::from_dataset(dataset.clone()); // what a `PyCOCO` holds
-        let mut b = a.clone(); // what the ctor now takes instead of rebuilding
-        let c = COCO::from_dataset(dataset); // what the ctor used to build
+        let a = COCO::from_dataset(dataset.clone());
+        let mut b = a.clone();
+        let c = COCO::from_dataset(dataset);
 
         assert_eq!(b.anns, c.anns);
         assert_eq!(b.imgs, c.imgs);

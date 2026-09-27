@@ -48,6 +48,7 @@ pub use tide::TideErrors;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::coco::COCO;
 use crate::detection::hierarchy::Hierarchy;
@@ -88,8 +89,8 @@ use mode::FreqGroups;
 /// # }
 /// ```
 pub struct COCOeval {
-    pub coco_gt: COCO,
-    pub coco_dt: COCO,
+    coco_gt: Arc<COCO>,
+    coco_dt: Arc<COCO>,
     pub params: Params,
     /// The full per-image records, built on first access — see
     /// [`eval_imgs`](Self::eval_imgs). Reset by every `evaluate()`.
@@ -123,15 +124,15 @@ impl COCOeval {
     /// differ in is a parameter here; everything else is the same empty
     /// pre-`evaluate()` state, so a field added later is initialized once.
     fn with_mode(
-        coco_gt: COCO,
-        coco_dt: COCO,
+        coco_gt: impl Into<Arc<COCO>>,
+        coco_dt: impl Into<Arc<COCO>>,
         params: Params,
         eval_mode: EvalMode,
         hierarchy: Option<Hierarchy>,
     ) -> Self {
         COCOeval {
-            coco_gt,
-            coco_dt,
+            coco_gt: coco_gt.into(),
+            coco_dt: coco_dt.into(),
             params,
             eval_imgs: std::sync::OnceLock::new(),
             default_eval_imgs: std::sync::OnceLock::new(),
@@ -148,7 +149,11 @@ impl COCOeval {
     }
 
     /// Create a new COCOeval from ground truth and detection COCO objects.
-    pub fn new(coco_gt: COCO, coco_dt: COCO, iou_type: IouType) -> Self {
+    pub fn new(
+        coco_gt: impl Into<Arc<COCO>>,
+        coco_dt: impl Into<Arc<COCO>>,
+        iou_type: IouType,
+    ) -> Self {
         Self::with_mode(
             coco_gt,
             coco_dt,
@@ -156,6 +161,18 @@ impl COCOeval {
             EvalMode::Coco,
             None,
         )
+    }
+
+    /// The ground-truth dataset this evaluator reads. The evaluator never
+    /// writes through it; Open Images [`evaluate`](Self::evaluate) replaces it
+    /// with an expanded copy.
+    pub fn coco_gt(&self) -> &Arc<COCO> {
+        &self.coco_gt
+    }
+
+    /// The detection dataset this evaluator reads — see [`coco_gt`](Self::coco_gt).
+    pub fn coco_dt(&self) -> &Arc<COCO> {
+        &self.coco_dt
     }
 
     /// Per-image evaluation results (sparse — indexed by image position).
@@ -296,7 +313,11 @@ impl COCOeval {
     ///
     /// Produces 13 metrics: AP, AP50, AP75, APs, APm, APl, APr (rare), APc (common),
     /// APf (frequent), AR@300, ARs@300, ARm@300, ARl@300.
-    pub fn new_lvis(coco_gt: COCO, coco_dt: COCO, iou_type: IouType) -> Self {
+    pub fn new_lvis(
+        coco_gt: impl Into<Arc<COCO>>,
+        coco_dt: impl Into<Arc<COCO>>,
+        iou_type: IouType,
+    ) -> Self {
         let mut params = Params::new(iou_type);
         params.max_dets = vec![300];
 
@@ -319,7 +340,11 @@ impl COCOeval {
     /// `max_dets=100`. If a [`Hierarchy`] is provided, GT annotations are expanded
     /// up the hierarchy during `evaluate()`. Set `params.expand_dt = true` to
     /// also expand detections.
-    pub fn new_oid(coco_gt: COCO, coco_dt: COCO, hierarchy: Option<Hierarchy>) -> Self {
+    pub fn new_oid(
+        coco_gt: impl Into<Arc<COCO>>,
+        coco_dt: impl Into<Arc<COCO>>,
+        hierarchy: Option<Hierarchy>,
+    ) -> Self {
         let mut params = Params::new(IouType::Bbox);
         params.iou_thrs = vec![0.5];
         params.area_ranges = vec![crate::AreaRange {

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
@@ -104,29 +105,31 @@ impl COCOeval {
     ///
     /// # Open Images replaces `coco_gt` (and possibly `coco_dt`)
     ///
-    /// In [`EvalMode::OpenImages`], this method **overwrites the public
-    /// `coco_gt` field** — and, when `params.expand_dt` is set, `coco_dt` —
+    /// In [`EvalMode::OpenImages`], this method **overwrites the
+    /// `coco_gt` handle** — and, when `params.expand_dt` is set, `coco_dt` —
     /// with hierarchy-expanded copies: every annotation is duplicated at each
     /// ancestor category and virtual categories are added for hierarchy-only
-    /// nodes (see [`super::expand::expand_annotations`]). Any read of those
-    /// fields after `evaluate()` sees the expanded datasets, not the ones the
-    /// evaluator was constructed with. The expansion deduplicates, so calling
+    /// nodes (see [`super::expand::expand_annotations`]). Any read through
+    /// [`coco_gt`](Self::coco_gt) after `evaluate()` sees the expanded dataset,
+    /// not the one the evaluator was constructed with; the caller's own handle
+    /// to the original is untouched. The expansion deduplicates, so calling
     /// `evaluate()` again does not expand further. The eval paths must see the
-    /// expanded data through the same fields the analysis surfaces read (TIDE,
-    /// diagnostics, category names), which is why the originals are replaced
+    /// expanded data through the same handles the analysis surfaces read (TIDE,
+    /// diagnostics, category names), which is why the handles are replaced
     /// rather than shadowed by private copies.
     pub fn evaluate(&mut self) {
         // OID: expand GT (and optionally DT) using hierarchy — this replaces
-        // the public `coco_gt`/`coco_dt` fields; see the method docs above.
+        // the `coco_gt`/`coco_dt` handles; see the method docs above.
         if self.eval_mode == EvalMode::OpenImages {
             let hierarchy = self.hierarchy.clone().unwrap_or_else(|| {
                 crate::detection::hierarchy::Hierarchy::from_categories(
                     &self.coco_gt.dataset.categories,
                 )
             });
-            self.coco_gt = super::expand::expand_annotations(&self.coco_gt, &hierarchy);
+            self.coco_gt = Arc::new(super::expand::expand_annotations(&self.coco_gt, &hierarchy));
             if self.params.expand_dt {
-                self.coco_dt = super::expand::expand_annotations(&self.coco_dt, &hierarchy);
+                self.coco_dt =
+                    Arc::new(super::expand::expand_annotations(&self.coco_dt, &hierarchy));
             }
             self.hierarchy = Some(hierarchy);
         }

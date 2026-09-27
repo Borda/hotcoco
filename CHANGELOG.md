@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`COCOeval` shares its datasets instead of copying them.** The constructor
+  cloned both `COCO` objects (about 250 MB and 0.1s on 500k detections). Both
+  now sit behind an `Arc` that the Python `COCO` object and the evaluator
+  share, so constructing an evaluator or reading `ev.coco_gt` costs nothing.
+  Python behavior is unchanged. In the `scripts/bench.py` tables the peak
+  resident memory of a full run is now 174/186/142 MB (bbox/segm/keypoints,
+  val2017; was 320/363/355 MB at 1.0.1) and 551/788/830 MB at 10× detections
+  (was 856/1184/2092 MB). *Rust API:* `COCOeval::coco_gt` and `coco_dt`
+  are accessors returning `&Arc<COCO>` rather than public fields, and the
+  constructors take `impl Into<Arc<COCO>>`, so existing calls compile
+  unchanged. A Rust-visible break shipped in a minor on purpose: the crate has
+  no dependents outside this repository.
+
 - **JSON loading streams into the records and parses annotations on all
   cores; peak memory is the file plus the records.** `COCO()` and `load_res()`
   read with serde_json (its `float_roundtrip` parser) in place of simd-json,
@@ -31,10 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   derives each result's area and box in parallel, which for segm results is
   an RLE decode per mask (0.91s → 0.40s on 500k masks). On the 500k-detection
   bbox file `load_res()` takes 0.14s instead of 0.33s, and `COCO()` on val2017
-  0.06s instead of 0.08s (M1 Air). In the `scripts/bench.py` tables the peak
-  resident memory of a full run drops from 320/363/355 MB to 224/246/191 MB
-  (bbox/segm/keypoints, val2017) and from 856/1184/2092 MB to 718/967/856 MB at
-  10× detections. `Error::JsonParse` is no longer produced — parse failures are
+  0.06s instead of 0.08s (M1 Air), and the peak resident memory of a full run
+  fell by about a third before the shared-dataset change above took it further.
+  `Error::JsonParse` is no longer produced — parse failures are
   `Error::Json`; removing the variant is a 2.0 item.
 
 - **Python tests live in `tests/`.** Every pytest file — the regression suites

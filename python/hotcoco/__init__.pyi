@@ -212,11 +212,11 @@ class COCOeval:
         ...
     @property
     def coco_gt(self) -> COCO:
-        """A fresh copy on every access — mutations never reach the evaluator."""
+        """A new object sharing the evaluator's data — assignments never reach the evaluator."""
         ...
     @property
     def coco_dt(self) -> COCO:
-        """A fresh copy on every access — mutations never reach the evaluator."""
+        """A new object sharing the evaluator's data — assignments never reach the evaluator."""
         ...
     @property
     def eval_imgs(self) -> list[dict[str, Any] | None]: ...

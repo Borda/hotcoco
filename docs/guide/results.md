@@ -287,7 +287,7 @@ For direct access to the raw precision arrays, for example to compute AP at a no
 
     if let Some(acc) = ev.accumulated() {
         for (k, &cat_id) in ev.params.cat_ids.iter().enumerate() {
-            if let Some(cat) = ev.coco_gt.get_cat(cat_id) {
+            if let Some(cat) = ev.coco_gt().get_cat(cat_id) {
                 // Mean precision across IoU thresholds and recall points
                 // for category k, area=all (0), maxDets=100 (2)
                 let mut sum = 0.0;

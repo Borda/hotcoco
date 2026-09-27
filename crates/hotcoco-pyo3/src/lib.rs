@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use numpy::{PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
@@ -140,9 +141,12 @@ use convert::{
 /// this dataset. It is used by `browse()` and `coco explore` to locate
 /// image files. Propagated automatically through `filter`, `split`,
 /// `sample`, and `load_res`.
+// Clone shares the dataset: `COCO` is plain data with no interior mutability,
+// so wrappers over one `Arc` cannot observe each other by construction.
 #[pyclass(name = "COCO", subclass, from_py_object)]
+#[derive(Clone)]
 struct PyCOCO {
-    inner: hotcoco_core::COCO,
+    inner: Arc<hotcoco_core::COCO>,
     /// Root directory for image files. Used by `browse()` and `coco explore`.
     /// Set at construction time or assign directly: ``coco.image_dir = "/data/images"``.
     #[pyo3(get, set)]
@@ -151,15 +155,15 @@ struct PyCOCO {
 
 /// Constructors, kept out of `#[pymethods]` so they stay Rust-only.
 ///
-/// Every `PyCOCO` in this file comes from one of these three. The distinction
-/// they encode is whether the new object inherits `image_dir`: a dataset derived
+/// The distinction they encode is whether the new object inherits
+/// `image_dir`: a dataset derived
 /// from this one sits in the same image directory, while one built from a
 /// foreign format or merged from several sources does not.
 impl PyCOCO {
     /// A dataset derived from this one — same images, so same `image_dir`.
     fn derived(&self, inner: hotcoco_core::COCO) -> PyCOCO {
         PyCOCO {
-            inner,
+            inner: Arc::new(inner),
             image_dir: self.image_dir.clone(),
         }
     }
@@ -170,19 +174,18 @@ impl PyCOCO {
     }
 
     /// A dataset with no image directory to inherit: a conversion from a foreign
-    /// format, a merge whose inputs came from different directories, or a view
-    /// onto an evaluator's own copy.
+    /// format, or a merge whose inputs came from different directories.
     fn without_image_dir(dataset: hotcoco_core::Dataset) -> PyCOCO {
+        Self::shared(hotcoco_core::COCO::from_dataset(dataset))
+    }
+
+    /// No image directory either; takes a `COCO` to own or an `Arc` to share,
+    /// which is how the evaluator's datasets are handed out without a copy.
+    fn shared(inner: impl Into<Arc<hotcoco_core::COCO>>) -> PyCOCO {
         PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(dataset),
+            inner: inner.into(),
             image_dir: None,
         }
-    }
-}
-
-impl Clone for PyCOCO {
-    fn clone(&self) -> Self {
-        self.derived_from(self.inner.dataset.clone())
     }
 }
 
@@ -209,7 +212,10 @@ impl PyCOCO {
             }
             None => hotcoco_core::COCO::from_dataset(hotcoco_core::Dataset::default()),
         };
-        Ok(PyCOCO { inner, image_dir })
+        Ok(PyCOCO {
+            inner: Arc::new(inner),
+            image_dir,
+        })
     }
 
     #[pyo3(signature = (img_ids=IdList::default(), cat_ids=IdList::default(), area_rng=None, iscrowd=None))]
@@ -1047,10 +1053,7 @@ impl PyCOCO {
 
         self.inner
             .load_res_anns(anns)
-            .map(|inner| PyCOCO {
-                inner,
-                image_dir: None,
-            })
+            .map(PyCOCO::shared)
             .map_err(to_pyerr)
     }
 
@@ -1061,22 +1064,16 @@ impl PyCOCO {
     /// makes the follow-up `createIndex()` a no-op.
     #[setter]
     fn set_dataset(&mut self, dataset: &Bound<'_, PyDict>) -> PyResult<()> {
-        self.inner = hotcoco_core::COCO::from_dataset(py_to_dataset(dataset)?);
+        self.inner = Arc::new(hotcoco_core::COCO::from_dataset(py_to_dataset(dataset)?));
         Ok(())
     }
 
-    /// Re-index the current dataset — pycocotools semantics. Under the
-    /// assignment flow the `dataset` setter has already indexed, so this is
-    /// a formality kept for the canonical `coco.dataset = d;
-    /// coco.createIndex()` sequence.
-    fn create_index(&mut self) {
-        self.inner.create_index();
-    }
+    /// A no-op — see the ``dataset`` setter, which indexes on assignment. Kept
+    /// for pycocotools' ``coco.dataset = d; coco.createIndex()`` sequence.
+    fn create_index(_slf: PyRef<'_, Self>) {}
 
     #[pyo3(name = "createIndex")]
-    fn create_index_camel(&mut self) {
-        self.create_index();
-    }
+    fn create_index_camel(_slf: PyRef<'_, Self>) {}
 
     /// Warnings collected while loading and indexing this dataset.
     ///
@@ -1682,14 +1679,8 @@ impl PyCOCOeval {
         }
 
         let iou = parse_iou_type(&iou_type)?;
-        // `PyCOCO` keeps `inner`'s index in lockstep with `inner.dataset` — every
-        // write path replaces the whole `COCO` (the `dataset` setter, `derived*`,
-        // `without_image_dir`) — so the evaluator's snapshot can copy the built
-        // index instead of rehashing every id a second time. Still a full copy:
-        // the evaluator owns its data, and OID `evaluate()` overwrites these
-        // fields.
-        let gt = coco_gt.inner.clone();
-        let dt = coco_dt.inner.clone();
+        let gt = Arc::clone(&coco_gt.inner);
+        let dt = Arc::clone(&coco_dt.inner);
 
         let inner = if oid_style {
             if iou != hotcoco_core::IouType::Bbox {
@@ -2118,12 +2109,13 @@ Examples
 
     /// The ground-truth dataset this evaluator was built from.
     ///
-    /// **Each access returns a fresh copy** — two reads give two independent
-    /// objects, and mutating one never reaches the evaluator. To evaluate
-    /// against different ground truth, construct a new ``COCOeval``.
+    /// Each access returns a new object that shares the evaluator's data
+    /// without copying it. Assigning to its ``dataset`` never reaches the
+    /// evaluator; to evaluate against different ground truth, construct a new
+    /// ``COCOeval``.
     #[getter]
     fn coco_gt(&self) -> PyCOCO {
-        PyCOCO::without_image_dir(self.inner.coco_gt.dataset.clone())
+        PyCOCO::shared(Arc::clone(self.inner.coco_gt()))
     }
 
     #[getter(cocoGt)]
@@ -2133,10 +2125,11 @@ Examples
 
     /// The detection dataset this evaluator was built from.
     ///
-    /// **Each access returns a fresh copy** — see ``coco_gt``.
+    /// Each access returns a new object sharing the evaluator's data — see
+    /// ``coco_gt``.
     #[getter]
     fn coco_dt(&self) -> PyCOCO {
-        PyCOCO::without_image_dir(self.inner.coco_dt.dataset.clone())
+        PyCOCO::shared(Arc::clone(self.inner.coco_dt()))
     }
 
     #[getter(cocoDt)]
@@ -2411,7 +2404,7 @@ Example\n\
             py,
             cal.per_category
                 .iter()
-                .map(|(&cat_id, &ece)| (self.inner.coco_gt.cat_name(cat_id), ece)),
+                .map(|(&cat_id, &ece)| (self.inner.coco_gt().cat_name(cat_id), ece)),
         )?;
 
         let dict = PyDict::new(py);
@@ -2437,7 +2430,7 @@ Example\n\
 
         // If slices is callable, group images by return value
         let slice_map: HashMap<String, Vec<u64>> = if slices.is_callable() {
-            let gt_images = &self.inner.coco_gt.dataset.images;
+            let gt_images = &self.inner.coco_gt().dataset.images;
             let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
             for img in gt_images {
                 // The callable sees the *full* image dict — every standard
@@ -2581,7 +2574,7 @@ Example\n\
             // unknown-id fallback so every surface spells it the same way.
             d.set_item(
                 "dt_category",
-                self.inner.coco_gt.cat_name(le.dt_category_id),
+                self.inner.coco_gt().cat_name(le.dt_category_id),
             )?;
             d.set_item("dt_category_id", le.dt_category_id)?;
 
@@ -2590,7 +2583,7 @@ Example\n\
                     d.set_item("gt_id", gt_id)?;
                     let gt_cat_name = le
                         .gt_category_id
-                        .map(|cid| self.inner.coco_gt.cat_name(cid));
+                        .map(|cid| self.inner.coco_gt().cat_name(cid));
                     d.set_item("gt_category", gt_cat_name)?;
                     d.set_item("gt_category_id", le.gt_category_id)?;
                 }
