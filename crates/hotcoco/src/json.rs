@@ -199,7 +199,21 @@ fn parse_chunked(bytes: &[u8], open: usize, chunks: usize) -> Option<(Vec<Annota
         .into_par_iter()
         .map(|i| parse_run(bytes, starts[i], starts.get(i + 1).copied()))
         .collect();
-    let mut out = Vec::new();
+    // Sized exactly: the vector outlives the parse as `Dataset::annotations`,
+    // and growing it by doubling would keep up to a run's worth of slack per
+    // doubling. Runs past the one that ends the array are not part of it.
+    let ends = runs
+        .iter()
+        .position(|run| !matches!(run, Run::Continues(_)))
+        .map_or(runs.len(), |i| i + 1);
+    let total: usize = runs[..ends]
+        .iter()
+        .map(|run| match run {
+            Run::Continues(anns) | Run::Ends(anns, _) => anns.len(),
+            Run::Failed => 0,
+        })
+        .sum();
+    let mut out = Vec::with_capacity(total);
     for run in runs {
         match run {
             Run::Continues(anns) => out.extend(anns),
@@ -449,6 +463,7 @@ mod tests {
         for chunks in 2..=50 {
             let (got, end) = parse_chunked(&bytes, 0, chunks).expect("clean array parses chunked");
             assert_eq!(json(&got), json(&expected), "chunks={chunks}");
+            assert_eq!(got.capacity(), got.len(), "chunks={chunks}");
             assert_eq!(skip_ws(&bytes, end), bytes.len(), "chunks={chunks}");
         }
     }

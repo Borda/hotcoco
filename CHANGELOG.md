@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Loaded vectors are sized to what they hold.** serde cannot size a JSON
+  array before reading it, so every `Vec` grew by doubling and kept the
+  slack: a 51-value keypoint list held 64 slots, val2017's polygons carried
+  8 MB of slack on 14 MB of coordinates plus a four-slot list around nearly
+  every single polygon, and the annotations vector itself, assembled from the
+  parallel parse runs, kept up to a run's worth of slack per doubling. Polygons
+  and keypoints are now read through a per-thread buffer and stored at exact
+  size, and the annotations vector is sized from the runs before they are
+  joined. `COCO()` on val2017 keeps 30 MB instead of 46 MB and parses faster
+  with fewer reallocations; `load_res` keeps 13 MB instead of 22 MB on
+  val2017's bbox results, 125 MB instead of 229 MB at ten times that, and
+  224 MB instead of 307 MB on ten times the segm results. Values are
+  unchanged.
+
 - **`accumulate()` writes its output arrays in place.** Each (category, area
   range) work item staged its writes as index-value lists sized for the whole
   M × T × R slab, about 96 KB per item, and a serial merge copied them into

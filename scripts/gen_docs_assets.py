@@ -61,21 +61,21 @@ DT = VAL2017["bbox"]["dt"]
 # Keep in sync with the "Results (1x detections)" table in docs/benchmarks.md.
 BENCH = {
     "bbox": {
-        "pycocotools": 5.51,
-        "faster-coco-eval": 1.38,
+        "pycocotools": 5.15,
+        "faster-coco-eval": 1.50,
         "ultrafast-pycocotools": 0.08,
-        "vernier": 0.21,
-        "hotcoco": 0.07,
+        "vernier": 0.20,
+        "hotcoco": 0.06,
     },
     "segm": {
-        "pycocotools": 6.36,
-        "faster-coco-eval": 3.05,
-        "ultrafast-pycocotools": 0.18,
+        "pycocotools": 6.03,
+        "faster-coco-eval": 3.34,
+        "ultrafast-pycocotools": 0.19,
         "vernier": 0.58,
-        "hotcoco": 0.09,
+        "hotcoco": 0.08,
     },
     "keypoints": {
-        "pycocotools": 2.34,
+        "pycocotools": 2.37,
         "faster-coco-eval": 1.61,
         "ultrafast-pycocotools": 0.12,
         "vernier": 0.16,
@@ -85,7 +85,7 @@ BENCH = {
 # hotcoco's speedup vs pycocotools, as the table states it: the median of the
 # per-run ratios, not a ratio of the two-decimal times above, which would round
 # a 0.134s median into a larger multiple than was measured.
-BENCH_SPEEDUP = {"bbox": 79.1, "segm": 73.7, "keypoints": 43.3}
+BENCH_SPEEDUP = {"bbox": 82.3, "segm": 78.2, "keypoints": 50.1}
 
 
 def benchmark_chart(out: Path, theme: str) -> None:
