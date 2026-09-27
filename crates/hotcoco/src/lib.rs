@@ -60,6 +60,7 @@
 //! aliases; the crate-root re-exports resolve unchanged. The rename table is in
 //! the [migration guide](https://derekallman.github.io/hotcoco/getting-started/migration/).
 
+mod ann_index;
 pub mod coco;
 pub mod convert;
 pub mod detection;

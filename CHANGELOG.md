@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The annotation index is flat.** `COCO` answered "which annotations does
+  this image, or this (image, category) pair, hold" from hash maps holding
+  one heap vector per key — about 285k vectors for a 500k-detection results
+  file, allocated one by one. The index is now two flat id lists with small
+  range tables: the per-image grouping is built in two counting passes and
+  the per-pair grouping by sorting each image's slice by category in
+  parallel; a lookup is one hash probe on the image plus a binary search
+  over its categories. Results files, whose ids are always `1..=n`, also
+  skip the id-to-position map entirely. Building the index for 500k
+  detections takes about 17 ms instead of 35 ms, and `load_res` keeps about
+  60 MB instead of 103 MB beyond the records themselves. Query results and
+  their order are unchanged.
+
 - **Ground-truth files load without a pass to find the annotations array.**
   The loader walks a dataset object by hand and parses the annotations array in
   place, in parallel, with the run that reaches the closing bracket reporting

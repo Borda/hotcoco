@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
+use crate::ann_index::{AnnIndex, Duplicates, IdIndex};
 use crate::mask;
 use crate::types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
 
@@ -23,25 +24,18 @@ pub struct COCO {
     /// [`load_warnings`](Self::load_warnings).
     warnings: Vec<String>,
     /// ann_id -> index into dataset.annotations
-    anns: FxHashMap<u64, usize>,
+    anns: IdIndex,
     /// img_id -> index into dataset.images
     imgs: FxHashMap<u64, usize>,
     /// cat_id -> index into dataset.categories
     cats: FxHashMap<u64, usize>,
-    /// img_id -> [ann_id, ...]
-    img_to_anns: FxHashMap<u64, Vec<u64>>,
     /// cat_id -> [img_id, ...] (unique)
     /// `pub(crate)` so `quality::stats` can read it — `COCO::stats` lives there,
     /// since dataset statistics are introspection output rather than schema.
     pub(crate) cat_to_imgs: FxHashMap<u64, Vec<u64>>,
-    /// (img_id, cat_id) -> [ann_id, ...] in JSON array order.
-    ///
-    /// Deliberately *not* sorted by id: pycocotools builds `_gts` by iterating
-    /// `dataset['annotations']` once, so array order is what feeds the matcher,
-    /// and the greedy tie-break (`>=`, later GT wins on equal IoU) makes that
-    /// order observable through `evalImgs`. Official COCO files are id-ordered
-    /// anyway; converted or merged files are where the two orders differ.
-    img_cat_to_anns: FxHashMap<(u64, u64), Vec<u64>>,
+    /// Annotation ids by image and by (image, category), in JSON array
+    /// order — see [`AnnIndex`] for why that order is contract.
+    index: AnnIndex,
 }
 
 /// What kind of results a detection file holds, decided from its first
@@ -135,12 +129,11 @@ impl COCO {
         let mut coco = COCO {
             dataset,
             warnings: Vec::new(),
-            anns: FxHashMap::default(),
+            anns: IdIndex::default(),
             imgs: FxHashMap::default(),
             cats: FxHashMap::default(),
-            img_to_anns: FxHashMap::default(),
             cat_to_imgs: FxHashMap::default(),
-            img_cat_to_anns: FxHashMap::default(),
+            index: AnnIndex::default(),
         };
         coco.create_index();
         coco
@@ -156,66 +149,29 @@ impl COCO {
     /// last-write-wins in the id lookup, while per-image lists keep every
     /// occurrence — and reported via [`load_warnings`](Self::load_warnings).
     pub fn create_index(&mut self) {
-        let n_anns = self.dataset.annotations.len();
-        let n_imgs = self.dataset.images.len();
-        let n_cats = self.dataset.categories.len();
-
-        self.anns.clear();
-        self.anns.reserve(n_anns);
-        self.imgs.clear();
-        self.imgs.reserve(n_imgs);
-        self.cats.clear();
-        self.cats.reserve(n_cats);
-        self.img_to_anns.clear();
-        self.img_to_anns.reserve(n_imgs);
-        self.cat_to_imgs.clear();
-        self.cat_to_imgs.reserve(n_cats);
-        self.img_cat_to_anns.clear();
-        // Bounded by distinct (img, cat) pairs, not annotation count — annotations
-        // routinely outnumber pairs by several times (e.g. ~1.5M anns over ~400K
-        // pairs on a dense detection workload), so reserving for `n_anns` leaves
-        // most of the table's capacity unused. This is a hint, not a cap: ids may
-        // reference images/categories absent from `images`/`categories`, and
-        // either list may be empty (bound 0) — the map still grows as needed.
-        self.img_cat_to_anns
-            .reserve(n_anns.min(n_imgs.saturating_mul(n_cats)));
-
-        // Single pass over annotations: build all annotation-derived indices at once
-        let mut dup_ann_ids = 0usize;
-        let mut first_dup: Option<u64> = None;
-        for (i, ann) in self.dataset.annotations.iter().enumerate() {
-            if self.anns.insert(ann.id, i).is_some() {
-                dup_ann_ids += 1;
-                first_dup.get_or_insert(ann.id);
-            }
-            self.img_to_anns
-                .entry(ann.image_id)
-                .or_default()
-                .push(ann.id);
-            self.img_cat_to_anns
-                .entry((ann.image_id, ann.category_id))
-                .or_default()
-                .push(ann.id);
-        }
-        // cat_to_imgs derived from the pair keys just built, not a second push per
-        // annotation: each (img, cat) key is already unique, so this is one push
-        // per distinct pair instead of one per annotation (~400K vs ~1.5M on the
-        // workload above).
-        for &(img_id, cat_id) in self.img_cat_to_anns.keys() {
-            self.cat_to_imgs.entry(cat_id).or_default().push(img_id);
-        }
-        if let Some(id) = first_dup {
+        let (anns, dups) = IdIndex::build(&self.dataset.annotations);
+        self.anns = anns;
+        if let Some(Duplicates { count, first }) = dups {
             // pycocotools parity: the id lookup keeps the last annotation with
             // a given id, while imgToAnns keeps every occurrence — both are
             // preserved here, and the condition is surfaced instead of silent.
             self.warn(format!(
-                "{dup_ann_ids} duplicate annotation id(s) found (first: {id}). Lookups by id \
+                "{count} duplicate annotation id(s) found (first: {first}). Lookups by id \
                  see only the last occurrence; per-image annotation lists keep every \
                  occurrence, so duplicates are double-counted there (pycocotools behaves \
                  the same way). Deduplicate ids to make this dataset unambiguous."
             ));
         }
+        self.index = AnnIndex::build(&self.dataset.annotations);
+        // One push per distinct (image, category) pair, so each image appears
+        // once in a category's list.
+        self.cat_to_imgs =
+            FxHashMap::with_capacity_and_hasher(self.dataset.categories.len(), FxBuildHasher);
+        for (img_id, cat_id) in self.index.pairs() {
+            self.cat_to_imgs.entry(cat_id).or_default().push(img_id);
+        }
 
+        self.imgs = FxHashMap::with_capacity_and_hasher(self.dataset.images.len(), FxBuildHasher);
         for (i, img) in self.dataset.images.iter().enumerate() {
             self.imgs.insert(img.id, i);
         }
@@ -226,20 +182,11 @@ impl COCO {
                 "{unnamed} category record(s) without a name; using cat_<id> as the display name."
             ));
         }
+        self.cats =
+            FxHashMap::with_capacity_and_hasher(self.dataset.categories.len(), FxBuildHasher);
         for (i, cat) in self.dataset.categories.iter().enumerate() {
             self.cats.insert(cat.id, i);
         }
-
-        // Sort cat_to_imgs into the shape callers rely on (get_img_ids binary-searches
-        // it, stats reads its length). Each id is already unique — one push per
-        // distinct (img, cat) pair above — but iteration order over img_cat_to_anns's
-        // keys is unspecified, so the sort is still required for determinism; dedup
-        // stays as a cheap no-op safety net rather than an assumed invariant.
-        for ids in self.cat_to_imgs.values_mut() {
-            ids.sort_unstable();
-            ids.dedup();
-        }
-        // img_cat_to_anns stays in JSON array order — see the field doc.
     }
 
     /// Get annotation IDs matching the given filters.
@@ -272,11 +219,8 @@ impl COCO {
         let mut result: Vec<u64> = if !img_ids.is_empty() {
             img_ids
                 .iter()
-                // Borrowed, not cloned: the index already holds one `Vec` per
-                // image, and cloning it per key allocated and dropped the whole
-                // list again just to walk it.
-                .flat_map(|id| self.img_to_anns.get(id).map_or(&[][..], Vec::as_slice))
-                .filter_map(|id| self.anns.get(id).map(|&i| &self.dataset.annotations[i]))
+                .flat_map(|&id| self.index.for_img(id))
+                .filter_map(|&id| self.get_ann(id))
                 .filter(filter)
                 .map(|ann| ann.id)
                 .collect()
@@ -344,9 +288,7 @@ impl COCO {
 
     /// Load annotations by IDs.
     pub fn load_anns(&self, ids: &[u64]) -> Vec<&Annotation> {
-        ids.iter()
-            .filter_map(|id| self.anns.get(id).map(|&i| &self.dataset.annotations[i]))
-            .collect()
+        ids.iter().filter_map(|&id| self.get_ann(id)).collect()
     }
 
     /// Load categories by IDs.
@@ -365,7 +307,7 @@ impl COCO {
 
     /// Get a single annotation by ID.
     pub fn get_ann(&self, id: u64) -> Option<&Annotation> {
-        self.anns.get(&id).map(|&i| &self.dataset.annotations[i])
+        self.anns.position(id).map(|i| &self.dataset.annotations[i])
     }
 
     /// Get a single image by ID.
@@ -424,18 +366,14 @@ impl COCO {
 
     /// Get annotation IDs for a specific (image, category) pair.
     ///
-    /// Single HashMap lookup — much faster than `get_ann_ids` with filtering.
+    /// One hash probe and a binary search — much faster than `get_ann_ids` with filtering.
     pub fn get_ann_ids_for_img_cat(&self, img_id: u64, cat_id: u64) -> &[u64] {
-        self.img_cat_to_anns
-            .get(&(img_id, cat_id))
-            .map_or(&[], std::vec::Vec::as_slice)
+        self.index.for_img_cat(img_id, cat_id)
     }
 
     /// Get annotation IDs for a specific image.
     pub fn get_ann_ids_for_img(&self, img_id: u64) -> &[u64] {
-        self.img_to_anns
-            .get(&img_id)
-            .map_or(&[], std::vec::Vec::as_slice)
+        self.index.for_img(img_id)
     }
 
     /// Returns (img_id, cat_id) pairs that have at least one annotation.
@@ -443,14 +381,14 @@ impl COCO {
     /// Used by COCOeval to enumerate only non-empty pairs instead of the full
     /// Cartesian product, which is critical for large-scale datasets.
     pub fn nonempty_img_cat_pairs(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.img_cat_to_anns.keys().copied()
+        self.index.pairs()
     }
 
     /// Returns image IDs that have at least one annotation (any category).
     ///
     /// Used by COCOeval when `use_cats = false` (all categories treated as one).
     pub fn nonempty_img_ids(&self) -> impl Iterator<Item = u64> + '_ {
-        self.img_to_anns.keys().copied()
+        self.index.img_ids()
     }
 
     /// Load detection/result annotations into a new COCO object.
@@ -1046,7 +984,8 @@ mod tests {
     #[test]
     fn test_create_index() {
         let coco = COCO::from_dataset(make_test_dataset());
-        assert_eq!(coco.anns.len(), 3);
+        assert!((1..=3).all(|id| coco.get_ann(id).is_some()));
+        assert!(coco.get_ann(4).is_none());
         assert_eq!(coco.imgs.len(), 2);
         assert_eq!(coco.cats.len(), 2);
     }
@@ -1054,7 +993,7 @@ mod tests {
     /// `cat_to_imgs` must be derived from the distinct `(img, cat)` pairs, not
     /// pushed once per annotation — img1/cat1 has three annotations (ids given
     /// out of JSON order) and must collapse to one `cat_to_imgs` entry, while
-    /// `img_cat_to_anns` for that pair must keep every id, in dataset order.
+    /// the pair index for that pair must keep every id, in dataset order.
     #[test]
     fn test_cat_to_imgs_derived_from_pair_keys() {
         let dataset = Dataset {
@@ -1132,7 +1071,7 @@ mod tests {
         assert_eq!(coco.cat_to_imgs.get(&1), Some(&vec![1, 2]));
         assert_eq!(coco.cat_to_imgs.get(&2), Some(&vec![1]));
 
-        // (2) img_cat_to_anns keeps every id, in dataset (JSON array) order —
+        // (2) the pair index keeps every id, in dataset (JSON array) order —
         // not sorted ascending, not deduplicated by anything upstream.
         assert_eq!(
             coco.get_ann_ids_for_img_cat(1, 1),
@@ -1180,9 +1119,8 @@ mod tests {
         assert_eq!(b.anns, c.anns);
         assert_eq!(b.imgs, c.imgs);
         assert_eq!(b.cats, c.cats);
-        assert_eq!(b.img_to_anns, c.img_to_anns);
         assert_eq!(b.cat_to_imgs, c.cat_to_imgs);
-        assert_eq!(b.img_cat_to_anns, c.img_cat_to_anns);
+        assert_eq!(b.index, c.index);
         assert!(
             !c.warnings.is_empty(),
             "fixture must trigger a duplicate-id warning"
@@ -1194,7 +1132,7 @@ mod tests {
         b.dataset.annotations.truncate(1);
         b.create_index();
         assert_eq!(a.anns, c.anns);
-        assert_eq!(a.img_cat_to_anns, c.img_cat_to_anns);
+        assert_eq!(a.index, c.index);
     }
 
     #[test]
