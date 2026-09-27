@@ -14,11 +14,6 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    /// Never produced: the loader reports parse failures as [`Error::Json`].
-    /// Removing the variant is a breaking change, so it waits for 2.0.
-    #[error("invalid JSON: {0}")]
-    JsonParse(#[from] simd_json::Error),
-
     /// Format conversion error (COCO ↔ YOLO).
     #[error(transparent)]
     Convert(#[from] ConvertError),

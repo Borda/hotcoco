@@ -76,7 +76,6 @@ pub(crate) fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
             pyo3::exceptions::PyIOError::new_err(e.to_string())
         }
         Error::Json(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
-        Error::JsonParse(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
         Error::Convert(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
         Error::Other(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
     }

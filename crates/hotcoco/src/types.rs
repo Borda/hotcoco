@@ -258,7 +258,7 @@ where
 /// is hand-written below instead of untagged: untagged buffers the entire value
 /// into serde's internal `Content` tree and then tries each variant against it,
 /// which materializes every polygon coordinate twice — measured as the dominant
-/// cost of loading a polygon-heavy GT file, on serde_json and simd-json alike.
+/// cost of loading a polygon-heavy GT file.
 /// The visitor streams instead: a JSON array is a polygon list, a JSON object
 /// is an RLE whose variant is decided by the type of its `counts` value.
 #[derive(Debug, Clone, Serialize)]

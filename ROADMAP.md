@@ -50,8 +50,6 @@ their own design work, not for a major version.
 - **A slimmer annotation record** — `Annotation` is 248 bytes plus a heap
   vector per polygon or keypoint list; a columnar detection store changes the
   public `Dataset` shape.
-- **Remove `Error::JsonParse`** and the simd-json dependency it keeps alive; the
-  loader has reported through `Error::Json` since 1.1.
 
 ## Not tied to a release
 

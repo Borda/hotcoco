@@ -46,8 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   bbox file `load_res()` takes 0.14s instead of 0.33s, and `COCO()` on val2017
   0.06s instead of 0.08s (M1 Air), and the peak resident memory of a full run
   fell by about a third before the shared-dataset change above took it further.
-  `Error::JsonParse` is no longer produced — parse failures are
-  `Error::Json`; removing the variant is a 2.0 item.
+  Parse failures are `Error::Json`.
 
 - **Python tests live in `tests/`.** Every pytest file — the regression suites
   from `scripts/`, the drop-in and mask suites from `crates/hotcoco-pyo3/tests/`,
@@ -298,6 +297,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `mean` is a pairwise sum, and that reduction order is not reproduced yet.
 
 ### Removed
+
+- **`Error::JsonParse` and the simd-json dependency.** The loader reports
+  every parse failure as `Error::Json`, so the variant could never be
+  constructed; dropping it also drops the ten crates that only simd-json
+  pulled in. Rust code that matched on `JsonParse` matches `Json` instead. A
+  Rust-visible break in a minor, under the same policy as the shared-dataset
+  change above.
 
 - **`scripts/fixture_builder.py` and `scripts/bench_fiftyone.py`.** The first
   had no entry point and no importer; the adversarial corpus it described is
