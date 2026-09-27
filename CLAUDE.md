@@ -5,8 +5,9 @@
 hotcoco is a perception evaluation toolkit — a pure-Rust engine with PyO3 Python
 bindings. Detection is the family that ships today (COCO, LVIS, and Open Images
 protocols over bbox, segm, keypoints, and OBB) and doubles as a drop-in
-[pycocotools](https://github.com/ppwwyyxx/cocoapi) replacement at 19–36× the speed
-on COCO val2017. Panoptic and tracking are planned families on the same engine —
+[pycocotools](https://github.com/ppwwyyxx/cocoapi) replacement, tens of times faster
+on COCO val2017 (`docs/benchmarks.md` owns the current numbers). Panoptic and
+tracking are planned families on the same engine —
 see `plans/PLAN.md` for the ladder, `plans/POSITIONING.md` for how the docs say so.
 
 ### Build and binding mechanics

@@ -65,6 +65,7 @@ pub mod convert;
 pub mod detection;
 pub mod error;
 pub mod geometry;
+mod json;
 pub mod mask;
 pub mod metrics;
 pub mod params;

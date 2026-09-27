@@ -9,13 +9,13 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    /// JSON serialization or deserialization error (serde_json paths: saving,
-    /// report emission).
+    /// JSON parse or serialization error: loading (`COCO::new`,
+    /// `COCO::load_res`), saving, and report emission.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    /// JSON parse error from the simd-json loader — the main dataset-loading
-    /// path (`COCO::new`, `COCO::load_res`).
+    /// Never produced: the loader reports parse failures as [`Error::Json`].
+    /// Removing the variant is a breaking change, so it waits for 2.0.
     #[error("invalid JSON: {0}")]
     JsonParse(#[from] simd_json::Error),
 

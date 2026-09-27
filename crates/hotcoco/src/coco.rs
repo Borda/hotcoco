@@ -2,10 +2,10 @@
 //!
 //! Faithful port of `pycocotools/coco.py`.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::mask;
@@ -83,145 +83,6 @@ impl ResultKind {
     }
 }
 
-/// Normalize non-finite JSON float tokens (`NaN`, `Infinity`, `-Infinity`) to
-/// `null`, matching the leniency of Python's `json` module.
-///
-/// Python emits these bare tokens by default and reads them back, so files
-/// produced by pycocotools / numpy pipelines frequently contain them, even
-/// though they are not valid JSON. serde_json (correctly) rejects them. To load
-/// such files, each non-finite token is rewritten to `null` — which serde also
-/// uses when *serializing* a non-finite `f64` — but only when the token appears
-/// outside a JSON string, so string values that merely contain the substring
-/// `"NaN"`/`"Infinity"` — a file name, say — are left untouched. On `Option<f64>`
-/// fields (`area`, `score`) the `null` deserializes to `None`.
-///
-/// Returns the input unchanged and borrowed (no allocation) when it contains no
-/// such tokens, so the common case pays only a single linear scan. The second
-/// element is the number of tokens rewritten.
-fn sanitize_non_finite(input: &[u8]) -> (Cow<'_, [u8]>, usize) {
-    // Prefilter: if the tokens never occur as substrings *anywhere* — even
-    // inside strings, where they would not count — the scan below cannot
-    // rewrite anything. Two SIMD substring searches cost ~1ms on a 19 MB
-    // file; the byte-at-a-time state machine they skip cost ~24ms, paid on
-    // every load of a clean file, which is nearly every load. ("-Infinity"
-    // contains "Infinity", so two needles cover all three tokens.)
-    if memchr::memmem::find(input, b"NaN").is_none()
-        && memchr::memmem::find(input, b"Infinity").is_none()
-    {
-        return (Cow::Borrowed(input), 0);
-    }
-
-    let n = input.len();
-    let mut out: Option<Vec<u8>> = None;
-    let mut count = 0usize;
-    let mut in_string = false;
-    let mut i = 0;
-
-    while i < n {
-        let b = input[i];
-
-        if in_string {
-            if b == b'\\' {
-                // Copy the backslash and the escaped byte verbatim so an
-                // escaped quote (`\"`) does not toggle the string state.
-                if let Some(o) = out.as_mut() {
-                    o.push(b);
-                    if i + 1 < n {
-                        o.push(input[i + 1]);
-                    }
-                }
-                i += 2;
-                continue;
-            }
-            if b == b'"' {
-                in_string = false;
-            }
-            if let Some(o) = out.as_mut() {
-                o.push(b);
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'"' {
-            in_string = true;
-            if let Some(o) = out.as_mut() {
-                o.push(b);
-            }
-            i += 1;
-            continue;
-        }
-
-        // Outside a string, the only bare identifier-like tokens are
-        // true/false/null and the non-finite floats we rewrite here. Gate the
-        // substring comparisons on the first byte so the common case (digits,
-        // punctuation, whitespace) skips them entirely.
-        let token_len = match b {
-            b'N' if input[i..].starts_with(b"NaN") => Some(3),
-            b'I' if input[i..].starts_with(b"Infinity") => Some(8),
-            b'-' if input[i..].starts_with(b"-Infinity") => Some(9),
-            _ => None,
-        };
-
-        if let Some(len) = token_len {
-            let o = out.get_or_insert_with(|| {
-                let mut v = Vec::with_capacity(n);
-                v.extend_from_slice(&input[..i]);
-                v
-            });
-            o.extend_from_slice(b"null");
-            count += 1;
-            i += len;
-            continue;
-        }
-
-        if let Some(o) = out.as_mut() {
-            o.push(b);
-        }
-        i += 1;
-    }
-
-    match out {
-        Some(v) => (Cow::Owned(v), count),
-        None => (Cow::Borrowed(input), count),
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod sanitize_tests {
-    use super::sanitize_non_finite;
-
-    fn run(s: &str) -> (String, usize) {
-        let (bytes, n) = sanitize_non_finite(s.as_bytes());
-        (String::from_utf8(bytes.into_owned()).unwrap(), n)
-    }
-
-    #[test]
-    fn clean_input_is_borrowed_unchanged() {
-        let input = br#"{"a": [1.0, -2.5], "b": null}"#;
-        let (bytes, n) = sanitize_non_finite(input);
-        assert_eq!(n, 0);
-        assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn rewrites_the_non_finite_family() {
-        let (out, n) = run(r#"{"a": NaN, "b": Infinity, "c": -Infinity, "d": -3.5}"#);
-        assert_eq!(n, 3);
-        // -3.5 (a real negative number) must be preserved, not mangled.
-        assert_eq!(out, r#"{"a": null, "b": null, "c": null, "d": -3.5}"#);
-    }
-
-    #[test]
-    fn leaves_non_finite_substrings_inside_strings_alone() {
-        // Strings containing the tokens — including an escaped quote — untouched.
-        let (out, n) = run(r#"{"name": "NaN and \"Infinity\"", "v": NaN}"#);
-        assert_eq!(n, 1);
-        assert_eq!(out, r#"{"name": "NaN and \"Infinity\"", "v": null}"#);
-    }
-}
-
 /// Inclusive area-range predicate shared by [`COCO::get_ann_ids`] and
 /// [`COCO::filter`] — the one owner of the missing-`area` convention.
 ///
@@ -241,9 +102,7 @@ impl COCO {
     /// annotation ids) are printed to stderr and retained on the returned
     /// object — see [`load_warnings`](Self::load_warnings).
     pub fn new(annotation_file: &Path) -> crate::error::Result<Self> {
-        let raw = std::fs::read(annotation_file)?;
-        let (mut bytes, n_fixed) = Self::sanitize_owned(raw);
-        let dataset: Dataset = simd_json::serde::from_slice(&mut bytes)?;
+        let (dataset, n_fixed) = crate::json::read_dataset(annotation_file)?;
         let mut coco = Self::from_dataset(dataset);
         if n_fixed > 0 {
             coco.warn(format!(
@@ -269,16 +128,6 @@ impl COCO {
     fn warn(&mut self, msg: String) {
         eprintln!("hotcoco: {msg}");
         self.warnings.push(msg);
-    }
-
-    /// [`sanitize_non_finite`] over an owned buffer: hands the original buffer
-    /// back untouched when the input is clean, so the common case pays no copy.
-    /// Owned because `simd_json` parses in place and needs `&mut` bytes.
-    fn sanitize_owned(raw: Vec<u8>) -> (Vec<u8>, usize) {
-        match sanitize_non_finite(&raw) {
-            (Cow::Owned(fixed), n) => (fixed, n),
-            (Cow::Borrowed(_), n) => (raw, n),
-        }
     }
 
     /// Build a COCO object from an already-loaded Dataset.
@@ -610,24 +459,7 @@ impl COCO {
     /// with an `annotations` field. The result COCO object shares the images
     /// and categories from self.
     pub fn load_res(&self, res_file: &Path) -> crate::error::Result<COCO> {
-        let raw = std::fs::read(res_file)?;
-        let (mut bytes, n_fixed) = Self::sanitize_owned(raw);
-
-        // The shape is decided by the first non-whitespace byte rather than by
-        // try-parse-then-fallback: simd-json parses in place (it unescapes
-        // strings into the buffer as it goes), so a failed first attempt would
-        // leave the buffer unusable for a second one.
-        let is_array = bytes
-            .iter()
-            .find(|b| !b.is_ascii_whitespace())
-            .is_some_and(|&b| b == b'[');
-        let anns: Vec<Annotation> = if is_array {
-            simd_json::serde::from_slice(&mut bytes)?
-        } else {
-            let ds: Dataset = simd_json::serde::from_slice(&mut bytes)?;
-            ds.annotations
-        };
-
+        let (anns, n_fixed) = crate::json::read_results(res_file)?;
         let mut res = self.load_res_anns(anns)?;
         if n_fixed > 0 {
             res.warn(format!(
@@ -656,12 +488,10 @@ impl COCO {
         let mut img_mismatch_warned = false;
         let mut cat_mismatch_warned = false;
 
-        // Validate, derive geometry, and assign ids in one pass instead of five —
-        // probing the index maps this `COCO` already built (`self.imgs`/`self.cats`)
-        // rather than rebuilding a fresh `HashSet` of GT ids on every call.
-        // `COCO::from_dataset` below still walks `anns` a second time to build the
-        // result's own index — that walk is `create_index`'s, not this function's,
-        // and is out of scope here (see the plan doc's candidate C).
+        // Validate and assign ids in one pass, probing the index maps this
+        // `COCO` already built (`self.imgs`/`self.cats`) rather than building a
+        // `HashSet` of GT ids per call. `COCO::from_dataset` below walks `anns`
+        // again to build the result's own index; that walk is `create_index`'s.
         for (i, ann) in anns.iter_mut().enumerate() {
             // A NaN score is rejected rather than warned about: it corrupts the
             // whole run, not one annotation. Every ranking path sorts with
@@ -701,7 +531,14 @@ impl COCO {
                 cat_mismatch_warned = true;
             }
 
-            if let Some(kind) = kind {
+            // Assign IDs to result annotations (1-indexed, unconditional like pycocotools)
+            ann.id = (i + 1) as u64;
+        }
+
+        if let Some(kind) = kind {
+            // Per annotation and, for masks, an RLE decode each: the one
+            // expensive step of loading results, so it runs in parallel.
+            anns.par_iter_mut().for_each(|ann| {
                 // Detection results are never crowd regions, whatever the input
                 // file claimed.
                 ann.iscrowd = false;
@@ -711,10 +548,7 @@ impl COCO {
                     ResultKind::Keypoints => Self::derive_from_keypoints(ann),
                     ResultKind::Obb => Self::derive_from_obb(ann),
                 }
-            }
-
-            // Assign IDs to result annotations (1-indexed, unconditional like pycocotools)
-            ann.id = (i + 1) as u64;
+            });
         }
 
         let dataset = Dataset {

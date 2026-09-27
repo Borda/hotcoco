@@ -41,6 +41,17 @@ Promptable concept evaluation in the SAM 3 style: cgF1 for images, pHOTA for
 video. Gated on a feasibility spike — it ships only if a reference oracle solid
 enough to verify against exists, the same bar every other family clears.
 
+## 2.0 — Rust API breaks held back from 1.x
+
+- **`COCOeval` shares its datasets instead of cloning them** — the constructor
+  copies both `COCO`s today (about 250 MB and 0.1s on 500k detections) because
+  `coco_gt`/`coco_dt` are public owned fields; `Arc` there changes their type.
+- **A slimmer annotation record** — `Annotation` is 248 bytes plus a heap
+  vector per polygon or keypoint list; a columnar detection store changes the
+  public `Dataset` shape.
+- **Remove `Error::JsonParse`** and the simd-json dependency it keeps alive; the
+  loader has reported through `Error::Json` since 1.1.
+
 ## Not tied to a release
 
 - **Frozen primitives API** — the similarity kernels, matchers, and count

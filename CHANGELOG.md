@@ -16,6 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **JSON loading streams into the records and parses annotations on all
+  cores; peak memory is the file plus the records.** `COCO()` and `load_res()`
+  read with serde_json (its `float_roundtrip` parser) in place of simd-json,
+  whose tape peaked at about twelve times the file size before a single record
+  existed: +940 MB for a 79 MB bbox results file (500k detections, 134 MB of
+  records), +1.3 GB for a 115 MB keypoint results file, +389 MB for the 19 MB
+  val2017 ground truth. The annotations array is cut at record boundaries and
+  the pieces parsed in parallel, with one serial pass as the fallback when a
+  cut lands inside a string. Every field parses bit-identically to before —
+  checked on val2017 ground truth (polygons) and on bbox, segm (RLE), and
+  keypoint results — and the precision, recall, and score arrays stay
+  bit-identical to pycocotools on all six parity datasets. `load_res()` also
+  derives each result's area and box in parallel, which for segm results is
+  an RLE decode per mask (0.91s → 0.40s on 500k masks). On the 500k-detection
+  bbox file `load_res()` takes 0.14s instead of 0.33s, and `COCO()` on val2017
+  0.06s instead of 0.08s (M1 Air). In the `scripts/bench.py` tables the peak
+  resident memory of a full run drops from 320/363/355 MB to 224/246/191 MB
+  (bbox/segm/keypoints, val2017) and from 856/1184/2092 MB to 718/967/856 MB at
+  10× detections. `Error::JsonParse` is no longer produced — parse failures are
+  `Error::Json`; removing the variant is a 2.0 item.
+
 - **Python tests live in `tests/`.** Every pytest file — the regression suites
   from `scripts/`, the drop-in and mask suites from `crates/hotcoco-pyo3/tests/`,
   and the three fuzzers — now sits in one root `tests/` directory, and
