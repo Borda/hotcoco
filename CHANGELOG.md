@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The file's bytes are gone before its annotations are joined.** The
+  parallel parse produces one vector of records per run and then joins them
+  into one; the file bytes stayed alive through the join, and each run's
+  vector kept the slack it grew by. Runs now shrink to what they hold as they
+  finish and are joined only after the bytes are dropped, so the bytes, the
+  runs, and the joined vector are never alive together. Peak heap while
+  loading ten times val2017's bbox results falls from 292 MB to 208 MB, segm
+  from 486 MB to 378 MB, and the ground truth itself from 59 MB to 47 MB.
+  Values are unchanged.
+
 - **Loaded vectors are sized to what they hold.** serde cannot size a JSON
   array before reading it, so every `Vec` grew by doubling and kept the
   slack: a 51-value keypoint list held 64 slots, val2017's polygons carried
