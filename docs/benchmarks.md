@@ -41,7 +41,7 @@ drift between captures on this machine, so compare them only within a table; the
 speedup ratios are not affected. Peak memory is each process's own resident set.
 **Versions:** pycocotools 2.0.11, faster-coco-eval 1.7.2, ultrafast-pycocotools 0.1.11,
 vernier 0.5.4, hotcoco `main` (1.1 development: the lean `evaluate()`, `accumulate()`, and
-JSON loader and shared-dataset changes listed under `[Unreleased]`)
+JSON loader, in-place ground-truth parse, and shared-dataset changes listed under `[Unreleased]`)
 
 ### Results (1x detections)
 
@@ -54,9 +54,9 @@ to pycocotools'. Chart drawn with <code>hotcoco.plot</code>.</figcaption>
 
 | Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
 |-----------|-------------|------------------|-----------------------|---------|---------|
-| bbox      | 4.87s | 1.33s (3.7×) | 0.08s (60.3×) | 0.20s (24.0×) | **0.09s (52.1×)** |
-| segm      | 5.76s | 2.93s (2.0×) | 0.18s (32.9×) | 0.57s (10.2×) | **0.11s (53.3×)** |
-| keypoints | 2.51s | 1.58s (1.6×) | 0.11s (22.2×) | 0.16s (15.6×) | **0.07s (36.5×)** |
+| bbox      | 5.68s | 1.49s (3.8×) | 0.08s (70.8×) | 0.21s (27.7×) | **0.07s (76.6×)** |
+| segm      | 6.41s | 3.25s (2.0×) | 0.18s (36.0×) | 0.58s (11.0×) | **0.08s (76.2×)** |
+| keypoints | 2.31s | 1.62s (1.4×) | 0.12s (20.0×) | 0.17s (13.9×) | **0.05s (42.6×)** |
 
 Speedups in parentheses are vs pycocotools.
 
@@ -64,13 +64,12 @@ Peak resident memory, same runs (MB):
 
 | Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
 |-----------|-------------|------------------|-----------------------|---------|---------|
-| bbox      | 739 | 627 | 92 | 173 | 174 |
-| segm      | 753 | 710 | 113 | 200 | 186 |
-| keypoints | 265 | 307 | 107 | 146 | 142 |
+| bbox      | 567 | 565 | 92 | 173 | 175 |
+| segm      | 557 | 626 | 114 | 200 | 187 |
+| keypoints | 262 | 285 | 107 | 146 | 152 |
 
-The three Rust engines are in one speed class, 10–60× ahead of pycocotools, and
-hotcoco is fastest on segm and keypoints and within 0.01s of
-ultrafast-pycocotools on bbox. On memory it matches vernier and sits 1.3–1.9×
+The three Rust engines are in one speed class, 11–77× ahead of pycocotools, and
+hotcoco is fastest on every row. On memory it matches vernier and sits 1.4–1.9×
 above ultrafast-pycocotools, which parses detections straight into columnar
 arrays while hotcoco materializes one annotation record per detection.
 
@@ -80,20 +79,20 @@ Scaling detections by 10x (~368,000) to test behavior under higher load:
 
 | Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
 |-----------|-------------|------------------|-----------------------|---------|---------|
-| bbox      | 24.06s | 4.24s (5.7×) | 0.28s (84.5×) | 0.89s (27.0×) | **0.30s (79.7×)** |
-| segm      | 26.21s | 8.37s (3.1×) | 0.66s (39.4×) | 1.73s (15.1×) | **0.42s (62.5×)** |
-| keypoints | 9.55s | 8.06s (1.2×) | 0.68s (14.1×) | 0.95s (10.1×) | **0.33s (28.6×)** |
+| bbox      | 25.10s | 5.68s (4.4×) | 0.28s (88.5×) | 0.96s (26.1×) | **0.30s (82.3×)** |
+| segm      | 27.03s | 8.71s (3.1×) | 0.77s (35.0×) | 1.80s (15.0×) | **0.40s (67.8×)** |
+| keypoints | 9.86s | 8.20s (1.2×) | 0.66s (14.8×) | 0.97s (10.2×) | **0.33s (30.1×)** |
 
 Peak resident memory, same runs (MB):
 
 | Eval Type | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
 |-----------|-------------|------------------|-----------------------|---------|---------|
-| bbox      | 1547 | 1085 | 192 | 558 | 551 |
-| segm      | 1579 | 1413 | 375 | 860 | 788 |
-| keypoints | 1217 | 1253 | 471 | 704 | 830 |
+| bbox      | 1351 | 896 | 192 | 528 | 528 |
+| segm      | 1450 | 1172 | 375 | 704 | 788 |
+| keypoints | 1034 | 1125 | 471 | 704 | 830 |
 
 At this scale the per-detection record shows: hotcoco holds about 250 bytes per
-detection, so its peak is 1.8–2.9× ultrafast-pycocotools' and close to vernier's.
+detection, so its peak is 1.8–2.8× ultrafast-pycocotools' and close to vernier's.
 JSON parsing itself does not add to the peak — the loader streams into the
 records and parses the annotations array on all cores, and the evaluator shares
 the datasets rather than copying them, so the file plus the records is the whole
@@ -111,18 +110,18 @@ time (single run, same synthetic detections as the 1× table):
 
 | Eval type | Phase | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
 |-----------|-------|-------------|------------------|-----------------------|---------|---------|
-| bbox      | load  | 0.31s | 0.31s (1.0×) | 0.06s (5.5×) | 0.09s (3.6×) | **0.06s (5.2×)** |
-|           | eval  | 4.74s | 1.03s (4.6×) | 0.02s (193.4×) | 0.12s (39.5×) | **0.04s (130.8×)** |
-| segm      | load  | 0.34s | 0.33s (1.0×) | 0.06s (5.3×) | 0.09s (3.8×) | **0.07s (4.9×)** |
-|           | eval  | 5.64s | 2.63s (2.1×) | 0.11s (49.8×) | 0.48s (11.7×) | **0.05s (121.0×)** |
-| keypoints | load  | 0.49s | 0.49s (1.0×) | 0.07s (7.2×) | 0.05s (10.5×) | **0.05s (9.2×)** |
-|           | eval  | 1.82s | 1.10s (1.7×) | 0.05s (39.4×) | 0.11s (15.9×) | **0.01s (124.3×)** |
-| bbox, bbox-only GT | load | 0.16s | 0.16s (1.0×) | 0.04s (4.4×) | 0.02s (7.0×) | **0.03s (6.2×)** |
-|           | eval  | 4.51s | 0.97s (4.6×) | 0.03s (179.2×) | 0.12s (38.0×) | **0.04s (127.1×)** |
+| bbox      | load  | 0.31s | 0.31s (1.0×) | 0.06s (5.5×) | 0.08s (3.6×) | **0.03s (9.1×)** |
+|           | eval  | 4.59s | 1.02s (4.5×) | 0.02s (184.8×) | 0.12s (38.8×) | **0.03s (131.5×)** |
+| segm      | load  | 0.33s | 0.33s (1.0×) | 0.06s (5.3×) | 0.09s (3.9×) | **0.04s (8.4×)** |
+|           | eval  | 5.44s | 2.59s (2.1×) | 0.11s (48.1×) | 0.48s (11.4×) | **0.04s (123.0×)** |
+| keypoints | load  | 0.49s | 0.49s (1.0×) | 0.07s (7.2×) | 0.05s (10.7×) | **0.04s (12.4×)** |
+|           | eval  | 1.80s | 1.09s (1.7×) | 0.05s (38.9×) | 0.11s (15.7×) | **0.01s (120.8×)** |
+| bbox, bbox-only GT | load | 0.15s | 0.16s (1.0×) | 0.04s (4.3×) | 0.02s (7.0×) | **0.02s (8.1×)** |
+|           | eval  | 4.48s | 0.96s (4.6×) | 0.03s (178.4×) | 0.12s (38.3×) | **0.04s (123.2×)** |
 
-The evaluation engine itself is 121–131× faster than pycocotools; the end-to-end
-headline is lower because loading, which no library can speed up by more than
-about 10×, is more than half of hotcoco's total.
+The evaluation engine itself is 121–132× faster than pycocotools; the end-to-end
+headline is lower because loading, which no library can speed up by much more
+than 10×, is a large share of hotcoco's total.
 
 The *bbox-only GT* row strips the polygon segmentation the official instances
 files carry on every annotation — about two-thirds of the file bytes, which bbox

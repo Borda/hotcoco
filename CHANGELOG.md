@@ -16,14 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Ground-truth files load without a pass to find the annotations array.**
+  The loader walks a dataset object by hand and parses the annotations array in
+  place, in parallel, with the run that reaches the closing bracket reporting
+  where the array ends; before, serde_json tokenized the whole array once to
+  find that end before any parallel work began, about 40% of `COCO()` time.
+  `COCO()` on val2017 takes 0.02s instead of 0.06s and on val2014 0.18s
+  instead of 0.42s (M1 Air, best of seven). Results files in object form
+  benefit the same way. A shape the walk does not expect — a duplicate key,
+  `"annotations": null` — falls back to the serde derive, which also reports
+  the error for a malformed file.
+
 - **`COCOeval` shares its datasets instead of copying them.** The constructor
   cloned both `COCO` objects (about 250 MB and 0.1s on 500k detections). Both
   now sit behind an `Arc` that the Python `COCO` object and the evaluator
   share, so constructing an evaluator or reading `ev.coco_gt` costs nothing.
-  Python behavior is unchanged. In the `scripts/bench.py` tables the peak
-  resident memory of a full run is now 174/186/142 MB (bbox/segm/keypoints,
-  val2017; was 320/363/355 MB at 1.0.1) and 551/788/830 MB at 10× detections
-  (was 856/1184/2092 MB). *Rust API:* `COCOeval::coco_gt` and `coco_dt`
+  Python behavior is unchanged. Together with the loader change below, the
+  peak resident memory of a full run is about half of 1.0.1's (320/363/355 MB
+  for bbox/segm/keypoints on val2017, 856/1184/2092 MB at 10× detections);
+  `docs/benchmarks.md` carries the current tables. *Rust API:* `COCOeval::coco_gt` and `coco_dt`
   are accessors returning `&Arc<COCO>` rather than public fields, and the
   constructors take `impl Into<Arc<COCO>>`, so existing calls compile
   unchanged. A Rust-visible break shipped in a minor on purpose: the crate has

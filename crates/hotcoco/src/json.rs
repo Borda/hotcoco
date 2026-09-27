@@ -7,13 +7,14 @@
 //! straight into the structs, so the peak is the file plus the records.
 //!
 //! The annotations array is the bulk of any COCO file, so it is parsed in
-//! parallel. The bytes are cut into chunks at guessed record boundaries (a
+//! parallel, in place: a dataset object is walked by hand until the array,
+//! the bytes from there are cut into chunks at guessed record boundaries (a
 //! `{` that follows `},`), each chunk is parsed as a run of records, and the
-//! runs are concatenated in file order. A guess can land inside a string — a
-//! caption containing `},{` — so every run must end exactly where the next
-//! begins and the last must end at the array's `]`. When any run fails, the
-//! whole array is parsed serially, which is also what reports the error for a
-//! file that is genuinely malformed.
+//! run that reaches the array's `]` says where the walk resumes. A guess can
+//! land inside a string — a caption containing `},{` — so every run must end
+//! exactly where the next begins. When that fails, or the file has a shape
+//! the walk does not expect, one serial serde pass takes over and is also
+//! what reports the error for a malformed file.
 //!
 //! Floats are read with serde_json's `float_roundtrip` feature. Its default
 //! parser is best-effort and can land one ULP off, and an `area` one ULP from
@@ -24,9 +25,9 @@ use std::path::Path;
 
 use rayon::prelude::*;
 use serde::Deserialize;
-use serde_json::value::RawValue;
+use serde::de::IgnoredAny;
 
-use crate::types::{Annotation, Category, Dataset, Image, Info, License};
+use crate::types::{Annotation, Dataset};
 
 /// Read and parse a dataset file. The second value is the number of
 /// non-finite float tokens rewritten to `null` on the way in.
@@ -68,47 +69,96 @@ pub(crate) fn results_from_slice(bytes: &[u8]) -> serde_json::Result<Vec<Annotat
     }
 }
 
-/// Parse a COCO dataset object. Keys outside the schema are ignored, and a
-/// `null` or missing `annotations` reads as none.
+/// Parse a COCO dataset object. Keys outside the schema are ignored, a
+/// `null` or missing `annotations` reads as none, and a repeated key keeps
+/// its last value, as Python's `json` does.
 pub(crate) fn dataset_from_slice(bytes: &[u8]) -> serde_json::Result<Dataset> {
-    /// [`Dataset`] with its `annotations` left as raw bytes for
-    /// [`annotations_from_slice`]. The struct literal below keeps the two
-    /// field lists in step: a field added to `Dataset` fails to compile here.
-    #[derive(Deserialize)]
-    struct Split<'a> {
-        #[serde(default)]
-        info: Option<Info>,
-        #[serde(default)]
-        images: Vec<Image>,
-        #[serde(borrow, default)]
-        annotations: Option<&'a RawValue>,
-        #[serde(default)]
-        categories: Vec<Category>,
-        #[serde(default)]
-        licenses: Vec<License>,
+    parse_dataset(bytes).map_or_else(|| serde_json::from_slice(bytes), Ok)
+}
+
+/// The hand walk over a dataset object, or `None` for a shape it does not
+/// expect, which the serde derive then judges. The struct literal at the end
+/// is deliberate: a field added to [`Dataset`] fails to compile here instead
+/// of being silently dropped.
+fn parse_dataset(bytes: &[u8]) -> Option<Dataset> {
+    let (mut info, mut images, mut annotations, mut categories, mut licenses) = Default::default();
+    let mut pos = skip_ws(bytes, 0);
+    if bytes.get(pos) != Some(&b'{') {
+        return None;
     }
-    let split: Split = serde_json::from_slice(bytes)?;
-    Ok(Dataset {
-        info: split.info,
-        images: split.images,
-        annotations: match split.annotations {
-            Some(raw) => annotations_from_slice(raw.get().as_bytes())?,
-            None => Vec::new(),
-        },
-        categories: split.categories,
-        licenses: split.licenses,
+    pos = skip_ws(bytes, pos + 1);
+    if bytes.get(pos) != Some(&b'}') {
+        loop {
+            let (key, next) = value_at::<Cow<str>>(bytes, pos)?;
+            pos = skip_ws(bytes, next);
+            if bytes.get(pos) != Some(&b':') {
+                return None;
+            }
+            pos = skip_ws(bytes, pos + 1);
+            pos = match &*key {
+                "info" => take(bytes, pos, &mut info)?,
+                "images" => take(bytes, pos, &mut images)?,
+                "categories" => take(bytes, pos, &mut categories)?,
+                "licenses" => take(bytes, pos, &mut licenses)?,
+                "annotations" => take_annotations(bytes, pos, &mut annotations)?,
+                _ => value_at::<IgnoredAny>(bytes, pos)?.1,
+            };
+            pos = skip_ws(bytes, pos);
+            match bytes.get(pos) {
+                Some(b',') => pos = skip_ws(bytes, pos + 1),
+                Some(b'}') => break,
+                _ => return None,
+            }
+        }
+    }
+    (skip_ws(bytes, pos + 1) == bytes.len()).then_some(Dataset {
+        info,
+        images,
+        annotations,
+        categories,
+        licenses,
     })
+}
+
+/// Parse the value at `pos` into `slot`; the offset just past it.
+fn take<'de, T: Deserialize<'de>>(bytes: &'de [u8], pos: usize, slot: &mut T) -> Option<usize> {
+    let (value, next) = value_at(bytes, pos)?;
+    *slot = value;
+    Some(next)
+}
+
+/// [`take`] for the annotations array: chunked when it is worth it, serial
+/// otherwise, and `null` reads as none.
+fn take_annotations(bytes: &[u8], pos: usize, slot: &mut Vec<Annotation>) -> Option<usize> {
+    let (anns, next) = parse_chunked(bytes, pos, chunk_count(bytes.len() - pos)).or_else(|| {
+        value_at::<Option<Vec<Annotation>>>(bytes, pos)
+            .map(|(anns, next)| (anns.unwrap_or_default(), next))
+    })?;
+    *slot = anns;
+    Some(next)
+}
+
+/// One JSON value starting at `pos`, and the offset just past it.
+fn value_at<'de, T: Deserialize<'de>>(bytes: &'de [u8], pos: usize) -> Option<(T, usize)> {
+    let mut stream = serde_json::Deserializer::from_slice(bytes.get(pos..)?).into_iter::<T>();
+    let value = stream.next()?.ok()?;
+    Some((value, pos + stream.byte_offset()))
 }
 
 /// Parse a JSON array of annotation records, in parallel when the array is
 /// large enough to be worth cutting up.
 pub(crate) fn annotations_from_slice(bytes: &[u8]) -> serde_json::Result<Vec<Annotation>> {
-    let chunks =
-        (bytes.len() / MIN_CHUNK_BYTES).min(RUNS_PER_THREAD * rayon::current_num_threads());
-    if chunks < 2 {
-        return serde_json::from_slice(bytes);
+    let open = skip_ws(bytes, 0);
+    match parse_chunked(bytes, open, chunk_count(bytes.len())) {
+        Some((anns, end)) if skip_ws(bytes, end) == bytes.len() => Ok(anns),
+        _ => serde_json::from_slice(bytes),
     }
-    parse_chunked(bytes, chunks).map_or_else(|| serde_json::from_slice(bytes), Ok)
+}
+
+/// How many runs to cut `len` bytes of array into: none below one chunk's
+/// worth, and no more than a few per thread.
+fn chunk_count(len: usize) -> usize {
+    (len / MIN_CHUNK_BYTES).min(RUNS_PER_THREAD * rayon::current_num_threads())
 }
 
 /// Below this many bytes per chunk, cutting the array up costs more than the
@@ -119,34 +169,60 @@ const MIN_CHUNK_BYTES: usize = 64 * 1024;
 /// not hold the join.
 const RUNS_PER_THREAD: usize = 4;
 
-/// The chunked parallel parse, or `None` when a chunk boundary guess was
-/// wrong or the input is not an array of objects — never an error, since the
-/// serial parse decides what the error is.
-fn parse_chunked(bytes: &[u8], chunks: usize) -> Option<Vec<Annotation>> {
-    let open = skip_ws(bytes, 0);
-    if bytes.get(open) != Some(&b'[') {
+/// The chunked parallel parse of the array whose `[` is at `open`, and the
+/// offset just past its `]`. `None` when there are fewer than two chunks,
+/// when a chunk boundary guess was wrong, or when the bytes are not an array
+/// of objects.
+///
+/// The array may end before the bytes do (a dataset's `categories` usually
+/// follow it), so the chunk targets are spread over everything after `open`
+/// and the runs that start past the array's end are discarded: the first run
+/// to reach a `]` ends the array, and every run before it must hand over
+/// exactly at the next run's start.
+fn parse_chunked(bytes: &[u8], open: usize, chunks: usize) -> Option<(Vec<Annotation>, usize)> {
+    if chunks < 2 || bytes.get(open) != Some(&b'[') {
         return None;
     }
     let first = skip_ws(bytes, open + 1);
     if bytes.get(first) != Some(&b'{') {
         return None;
     }
+    let span = bytes.len() - open;
     let mut starts: Vec<usize> = std::iter::once(first)
         .chain(
             (1..chunks)
-                .filter_map(|i| record_start(bytes, (bytes.len() / chunks * i).max(first + 1))),
+                .filter_map(|i| record_start(bytes, (open + span / chunks * i).max(first + 1))),
         )
         .collect();
     starts.dedup();
-    let runs = (0..starts.len())
+    let runs: Vec<Run> = (0..starts.len())
         .into_par_iter()
         .map(|i| parse_run(bytes, starts[i], starts.get(i + 1).copied()))
-        .collect::<Option<Vec<_>>>()?;
-    let mut out = Vec::with_capacity(runs.iter().map(Vec::len).sum());
+        .collect();
+    let mut out = Vec::new();
     for run in runs {
-        out.extend(run);
+        match run {
+            Run::Continues(anns) => out.extend(anns),
+            Run::Ends(anns, end) => {
+                out.extend(anns);
+                return Some((out, end));
+            }
+            Run::Failed => return None,
+        }
     }
-    Some(out)
+    None
+}
+
+/// What one run of records turned out to be.
+enum Run {
+    /// Records up to exactly the next run's start.
+    Continues(Vec<Annotation>),
+    /// Records up to the array's `]`, with the offset just past it.
+    Ends(Vec<Annotation>, usize),
+    /// Not records, or records that overran the next run's start: a boundary
+    /// guess inside a string, a run that began past the array, or a
+    /// malformed file.
+    Failed,
 }
 
 /// The first `{` at or after `from` that follows a `}` and a `,`, with JSON
@@ -166,30 +242,30 @@ fn record_start(bytes: &[u8], from: usize) -> Option<usize> {
     }
 }
 
-/// The records from `start` to exactly `end` (the next run's start), or, for
-/// the last run, to the array's `]` followed only by whitespace. `None` when
-/// the bytes do not parse that way, which is how a wrong `start` or `end`
-/// shows up: a run cut inside a string overruns its `end`, and a run that
-/// begins inside one fails to parse.
-fn parse_run(bytes: &[u8], start: usize, end: Option<usize>) -> Option<Vec<Annotation>> {
+/// The records from `start` to exactly `end` (the next run's start) or to
+/// the array's `]`, whichever comes first.
+fn parse_run(bytes: &[u8], start: usize, end: Option<usize>) -> Run {
     let mut out = Vec::new();
     let mut pos = start;
     loop {
-        let mut stream =
-            serde_json::Deserializer::from_slice(&bytes[pos..]).into_iter::<Annotation>();
-        out.push(stream.next()?.ok()?);
-        pos = skip_ws(bytes, pos + stream.byte_offset());
+        let Some((ann, next)) = value_at::<Annotation>(bytes, pos) else {
+            return Run::Failed;
+        };
+        out.push(ann);
+        pos = skip_ws(bytes, next);
         match bytes.get(pos) {
             Some(b',') => {
                 pos = skip_ws(bytes, pos + 1);
                 if end.is_some_and(|end| pos >= end) {
-                    return (Some(pos) == end).then_some(out);
+                    return if Some(pos) == end {
+                        Run::Continues(out)
+                    } else {
+                        Run::Failed
+                    };
                 }
             }
-            Some(b']') if end.is_none() => {
-                return (skip_ws(bytes, pos + 1) == bytes.len()).then_some(out);
-            }
-            _ => return None,
+            Some(b']') => return Run::Ends(out, pos + 1),
+            _ => return Run::Failed,
         }
     }
 }
@@ -370,9 +446,10 @@ mod tests {
     fn chunked_parse_matches_serial_for_every_chunk_count() {
         let bytes = array((0..200).map(|i| record(i, "")), ",\n  ");
         let expected = serial(&bytes);
-        for chunks in 1..=50 {
-            let got = parse_chunked(&bytes, chunks).expect("clean array parses chunked");
+        for chunks in 2..=50 {
+            let (got, end) = parse_chunked(&bytes, 0, chunks).expect("clean array parses chunked");
             assert_eq!(json(&got), json(&expected), "chunks={chunks}");
+            assert_eq!(skip_ws(&bytes, end), bytes.len(), "chunks={chunks}");
         }
     }
 
@@ -394,8 +471,8 @@ mod tests {
         );
         let expected = serial(&bytes);
         assert_eq!(expected.len(), 90);
-        for chunks in 1..=40 {
-            if let Some(got) = parse_chunked(&bytes, chunks) {
+        for chunks in 2..=40 {
+            if let Some((got, _)) = parse_chunked(&bytes, 0, chunks) {
                 assert_eq!(json(&got), json(&expected), "chunks={chunks}");
             }
         }
@@ -410,10 +487,19 @@ mod tests {
         let second = record_start(&bytes, 2).expect("three records have a second start");
         // Cutting the first run one byte before the real boundary must fail,
         // not hand back a record that belongs to the next run.
-        assert!(parse_run(&bytes, skip_ws(&bytes, 1), Some(second - 1)).is_none());
-        let run =
-            parse_run(&bytes, skip_ws(&bytes, 1), Some(second)).expect("exact boundary parses");
+        assert!(matches!(
+            parse_run(&bytes, skip_ws(&bytes, 1), Some(second - 1)),
+            Run::Failed
+        ));
+        let Run::Continues(run) = parse_run(&bytes, skip_ws(&bytes, 1), Some(second)) else {
+            panic!("exact boundary parses");
+        };
         assert_eq!(run.len(), 1);
+        // The last run reports where the array ends, whatever follows it.
+        let Run::Ends(rest, end) = parse_run(&bytes, second, None) else {
+            panic!("last run reaches the closing bracket");
+        };
+        assert_eq!((rest.len(), &bytes[end - 1..end]), (2, &b"]"[..]));
     }
 
     #[test]
@@ -447,11 +533,11 @@ mod tests {
 
     #[test]
     fn non_object_arrays_and_malformed_input_go_serial() {
-        assert!(parse_chunked(b"[]", 4).is_none());
-        assert!(parse_chunked(b"[1, 2]", 4).is_none());
-        assert!(parse_chunked(b"{\"annotations\": []}", 4).is_none());
+        assert!(parse_chunked(b"[]", 0, 4).is_none());
+        assert!(parse_chunked(b"[1, 2]", 0, 4).is_none());
+        assert!(parse_chunked(b"{\"annotations\": []}", 0, 4).is_none());
         let truncated = &array((0..5).map(|i| record(i, "")), ",")[..80];
-        assert!(parse_chunked(truncated, 4).is_none());
+        assert!(parse_chunked(truncated, 0, 4).is_none());
         let err = annotations_from_slice(truncated).expect_err("truncated input fails");
         assert!(err.to_string().contains("line"), "{err}");
     }
@@ -473,5 +559,46 @@ mod tests {
         assert!(ds.annotations.is_empty());
         assert!(dataset_from_slice(br"[1]").is_err());
         assert!(dataset_from_slice(br#"{"images": []} trailing"#).is_err());
+    }
+
+    #[test]
+    fn dataset_walk_parses_annotations_in_place_whatever_follows_them() {
+        // Categories after the annotations, unknown keys before and after,
+        // and enough bytes that chunk targets land inside the categories.
+        let anns: Vec<String> = (0..300).map(|i| record(i, "")).collect();
+        let cats: Vec<String> = (0..2000)
+            .map(|i| format!(r#"{{"id": {i}, "name": "cat{i}", "supercategory": "s"}}"#))
+            .collect();
+        let doc = format!(
+            "{{\n \"info\": {{\"year\": 2026}}, \"extra\": [{{\"a\": 1}}, {{\"b\": 2}}],\n \"images\": [{{\"id\": 1, \"width\": 2, \"height\": 3}}],\n \"annotations\": [\n{}\n],\n \"categories\": [{}],\n \"licenses\": [], \"more\": {{\"x\": [1, 2]}}\n}}\n",
+            anns.join(",\n"),
+            cats.join(", ")
+        );
+        let fast = parse_dataset(doc.as_bytes()).expect("the walk handles this shape");
+        let slow = dataset_from_slice(doc.as_bytes()).expect("the derive parses it too");
+        assert_eq!(json(&fast.annotations), json(&slow.annotations));
+        assert_eq!(fast.annotations.len(), 300);
+        assert_eq!((fast.categories.len(), fast.images.len()), (2000, 1));
+        assert_eq!(fast.info.map(|i| i.year), Some(Some(2026)));
+        // The forced chunking exercises runs that start past the array's end.
+        let open = doc.find("\"annotations\": [").unwrap_or(0) + "\"annotations\": ".len();
+        let (anns, end) = parse_chunked(doc.as_bytes(), open, 64).expect("chunked in place");
+        assert_eq!(anns.len(), 300);
+        assert_eq!(&doc.as_bytes()[end - 1..end], b"]");
+    }
+
+    #[test]
+    fn dataset_walk_defers_unusual_shapes_to_the_derive() {
+        assert!(parse_dataset(br#"{"images": [] trailing"#).is_none());
+        assert!(parse_dataset(br#"["not", "an", "object"]"#).is_none());
+        assert!(parse_dataset(br#"{"images": [}"#).is_none());
+        let ds = parse_dataset(br"{}").expect("empty object");
+        assert!(ds.annotations.is_empty());
+        // The derive reports the error the walk declined to judge.
+        assert!(dataset_from_slice(br#"{"images": [}"#).is_err());
+        // Repeated keys keep the last value, as Python's `json` does.
+        let ds = parse_dataset(br#"{"images": [{"id": 1}], "annotations": null, "images": []}"#)
+            .expect("repeated key");
+        assert!(ds.images.is_empty() && ds.annotations.is_empty());
     }
 }
