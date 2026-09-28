@@ -97,15 +97,15 @@ fmt-check:
 
 # Format Python code
 py-fmt:
-    uv run ruff format python/ scripts/
-
-# Check Python formatting without modifying (CI-safe)
-py-fmt-check:
-    uv run ruff format --check python/ scripts/
+    uv run pre-commit run ruff-format --all-files
 
 # Lint Python code
 py-lint:
-    uv run ruff check python/ scripts/
+    uv run pre-commit run ruff-check --all-files
+
+# Run every pre-commit hook (hygiene, Ruff, typos) over the whole tree, as CI does
+hooks:
+    uv run pre-commit run --all-files
 
 # Verify LVIS metric parity vs lvis-api (synthetic data — no data/ needed)
 parity-lvis: build

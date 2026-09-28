@@ -93,14 +93,11 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      # Pinned so a new ruff release cannot turn a green PR red on its own.
-      # Keep in step with the `ruff` pin in pyproject.toml's [dev] extra; these
-      # are the same checks as `just py-fmt-check` and `just py-lint`.
-      - name: Ruff format check
-        run: uvx ruff@0.15.6 format --check python/ scripts/
-
-      - name: Ruff lint
-        run: uvx ruff@0.15.6 check python/ scripts/
+      # Every hook over the whole tree. The local git hook checks only staged
+      # files, so this is what catches drift that entered some other way.
+      # Hook versions and file scopes are defined in .pre-commit-config.yaml.
+      - name: pre-commit (hygiene, Ruff, typos)
+        run: uvx pre-commit run --all-files --show-diff-on-failure
 
   python:
     name: Python smoke test (${{ matrix.python-version }})
