@@ -415,7 +415,7 @@ def _square_mask(dtype=np.uint8):
 class TestIssue5BytesCounts:
     """The reported symptom: identical masks scoring segm AP 0.0 when `counts` is bytes.
 
-    The round-trip itself is pinned by `scripts/test_parity.py`; this is the
+    The round-trip itself is pinned by `tests/test_parity.py`; this is the
     evaluation-level check that nothing else covers.
     """
 
@@ -437,7 +437,7 @@ class TestIssue5BytesCounts:
 
 
 class TestIssue5MaskEncodeDtype:
-    """What `scripts/test_parity.py` does not pin: sliced views and `int8`."""
+    """What `tests/test_parity.py` does not pin: sliced views and `int8`."""
 
     def test_sliced_view_matches_contiguous(self):
         f_order = _square_mask()
@@ -491,7 +491,7 @@ class TestIssue5SummarizeOutput:
 
 
 # ---------------------------------------------------------------------------
-# Found by scripts/fuzz_dropin.py: spellings pycocotools accepts
+# Found by tests/fuzz_dropin.py: spellings pycocotools accepts
 # ---------------------------------------------------------------------------
 
 

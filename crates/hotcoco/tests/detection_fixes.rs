@@ -335,7 +335,7 @@ fn eval_params_archive_is_self_explaining() {
 }
 
 // ---------------------------------------------------------------------------
-// Found by scripts/fuzz_dropin.py: a keypoint GT without `num_keypoints`
+// Found by tests/fuzz_dropin.py: a keypoint GT without `num_keypoints`
 // read the field as 0 and was ignored — every ground truth in a file that
 // omits the field, so keypoint AP scored a dataset with nothing to match.
 // ---------------------------------------------------------------------------

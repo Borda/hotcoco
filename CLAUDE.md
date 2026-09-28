@@ -16,7 +16,7 @@ see `plans/PLAN.md` for the ladder, `plans/POSITIONING.md` for how the docs say 
 - Python bindings return plain dicts (not wrapped Rust structs) matching pycocotools conventions
 - Mask operations handle numpy row-major <-> Rust column-major transposition in the PyO3 layer
 - `cargo build --workspace` will fail at link time for hotcoco-pyo3 (expected — cdylib needs Python). Use `cargo check` instead, or build via maturin.
-- **Type stubs:** four hand-written files must track the Python API — `python/hotcoco/{__init__,detection,metrics,primitives}.pyi`. Run `uv run pytest scripts/test_stubs.py` for drift, and `uv run pyright` to type-check the shipped package against them. The tests check **names only, never signatures** — review those by hand when changing a signature. For `metrics` they check both directions (stub ⊇ `__all__`, and `__all__` ⊇ the extension module), because a new `#[pyfunction]` that the facade forgets to re-export is otherwise unreachable from Python with the suite green.
+- **Type stubs:** four hand-written files must track the Python API — `python/hotcoco/{__init__,detection,metrics,primitives}.pyi`. Run `uv run pytest tests/test_stubs.py` for drift, and `uv run pyright` to type-check the shipped package against them. The tests check **names only, never signatures** — review those by hand when changing a signature. For `metrics` they check both directions (stub ⊇ `__all__`, and `__all__` ⊇ the extension module), because a new `#[pyfunction]` that the facade forgets to re-export is otherwise unreachable from Python with the suite green.
 
 ### The layered architecture
 
@@ -86,17 +86,18 @@ All COCO evaluation metrics must match pycocotools: 12 for bbox/segm, 10 for key
 - Verified on val2017: keypoints exact, bbox within 0.0001, segm within 0.0002.
 - When in doubt, run differential tests against pycocotools on real COCO data before declaring a task complete.
 - After any change to evaluation logic, run `/parity` — it holds the full verification sequence and the expected tolerances.
-- **Not everything has a *checked* reference.** `scripts/parity.py` covers pycocotools (bbox/segm/keypoints), `parity_lvis.py` covers LVIS, `parity_tide.py` covers tidecv, `parity_mask.py` covers `pycocotools.mask`. Open Images and oriented boxes have **no parity script**, which is why `report()` marks them `Provenance::Extension`.
+- **Not everything has a *checked* reference.** `scripts/parity.py` covers pycocotools (bbox/segm/keypoints) on val2017 and `scripts/parity_tide.py` covers tidecv; both need `data/`. In CI, `tests/test_parity_lvis.py` covers LVIS, `tests/test_mask_parity.py` covers `pycocotools.mask`, and `tests/test_parity_oid.py` covers Open Images against frozen output of the TF Object Detection API. Oriented boxes have **no parity script**, which is why `report()` marks them `Provenance::Extension`; Open Images is `Extension` too, but for a different reason — the Challenge's non-exhaustive image-level-label rule is unimplemented, not uncompared.
 
-  Say *no parity script*, not *no reference implementation* — the distinction matters. Open Images has two reference implementations (the TF Object Detection API, which the official protocol page points to, and FiftyOne). We simply do not compare against them, and a group-of defect went unnoticed for the life of the feature partly because the "no reference exists" framing made a comparison look impossible rather than merely unwritten. Oriented boxes genuinely have no reference protocol, but their IoU kernel is checked against Shapely.
+  Say *no parity script*, not *no reference implementation* — the distinction matters. Open Images had two reference implementations all along (the TF Object Detection API, which the official protocol page points to, and FiftyOne), and a group-of defect went unnoticed for the life of the feature partly because the "no reference exists" framing made a comparison look impossible rather than merely unwritten. Oriented boxes genuinely have no reference protocol, but their IoU kernel is checked against Shapely.
 - **Open Images follows the Challenge protocol**, not V2: a group-of box counts as one ground truth, its best-scoring enclosed detection is a TP, surplus detections are ignored, and an undetected group-of box is a miss. "Inside" is IoA (intersection ÷ *detection* area), the same measure as COCO `iscrowd`. Equivalent to TF `group_of_weight = 1.0`. Both protocols are real — see `docs/guide/lvis-open-images.md` — so name which one before changing anything here.
 
 ## Testing
 
 - For Python binding changes: `just build` as a smoke test, then `just parity` to verify metrics.
-- `just test` runs `cargo test` + fast Python regression tests (`scripts/test_parity.py`) — safe for CI, completes in under 30s.
-- `just fuzz` runs the hypothesis-based fuzzer (`scripts/fuzz_parity.py`) — use to hunt for parity bugs, not in CI. Takes several minutes.
-- `just fuzz-dropin` runs `scripts/fuzz_dropin.py` — one dataset under many in-memory spellings (bytes `counts`, numpy scalars, tuples, missing optional keys) versus pycocotools. `fuzz_parity.py` goes through JSON files and cannot see any of those; this is the fuzzer that finds the issue #5 class. It fails only on a spelling that changes the numbers and prints loud gaps as a summary.
+- **Layout rule:** if pytest collects it, it lives in `tests/`; if you run it with `python`, it lives in `scripts/`. CONTRIBUTING.md's Tests section owns the rest: which file checks which reference, and where the fixtures and shared helpers live.
+- `just test` runs `cargo test` + the whole Python suite (bare `pytest`) — the same set CI runs, no `data/` needed, under 30s.
+- `just fuzz` runs the hypothesis-based fuzzer (`tests/fuzz_parity.py`) — use to hunt for parity bugs, not in CI. Takes several minutes.
+- `just fuzz-dropin` runs `tests/fuzz_dropin.py` — one dataset under many in-memory spellings (bytes `counts`, numpy scalars, tuples, missing optional keys) versus pycocotools. `fuzz_parity.py` goes through JSON files and cannot see any of those; this is the fuzzer that finds the issue #5 class. It fails only on a spelling that changes the numbers and prints loud gaps as a summary.
 - Model: use the fuzzer to *find* bugs, then prove fixes with Rust integration tests in `crates/hotcoco/tests/`.
 
 ### What CI does and does not check
@@ -208,7 +209,7 @@ and the bash hook already invokes it — `pre-commit` on `PATH`, else `uv run`.
 `.pre-commit-config.yaml` holds the trivial hygiene hooks (whitespace, line endings,
 YAML/TOML/JSON syntax) plus `ruff` and `typos`. It is the sole source of Ruff versions
 for local commands and CI; `pyproject.toml` holds Ruff settings only. Vendored and
-generated trees (`external/`, `scripts/fixtures/`, `python/hotcoco/_fonts/`, minified
+generated trees (`external/`, `tests/fixtures/`, `python/hotcoco/_fonts/`, minified
 bundles under `python/hotcoco/static/`) are excluded so the whitespace fixers cannot
 rewrite them. Check the whole tree with `just hooks`.
 

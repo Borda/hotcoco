@@ -20,9 +20,7 @@ Usage:
 """
 
 import argparse
-import contextlib
 import importlib.util
-import io
 import json
 import os
 import random
@@ -34,7 +32,7 @@ import tempfile
 import time
 
 import pycocotools.mask as mask_utils
-from helpers import VAL2017
+from helpers import VAL2017, suppress_output
 
 # Detections are synthesized from the GT, so only the annotation files in
 # `helpers.VAL2017` are used — the result files are not read here.
@@ -213,7 +211,7 @@ def _run_cell(impl, iou_type, gt_path, dt_path):
 
 
 def _child_main(impl, iou_type, gt_path, dt_path):
-    with contextlib.redirect_stdout(io.StringIO()):
+    with suppress_output(stderr=False):
         t_load, t_eval, ap = _run_cell(impl, iou_type, gt_path, dt_path)
     print(json.dumps({"load": t_load, "eval": t_eval, "rss_mb": _peak_rss_mb(), "ap": ap}))
 

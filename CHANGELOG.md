@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Python tests live in `tests/`.** Every pytest file — the regression suites
+  from `scripts/`, the drop-in and mask suites from `crates/hotcoco-pyo3/tests/`,
+  and the three fuzzers — now sits in one root `tests/` directory, and
+  `pyproject.toml` points bare `pytest` at it. `scripts/` keeps only tools you
+  run by hand: real-data parity, benchmarks, downloads, fixture generators.
+  The LVIS, Open Images, and mask parity scripts became pytest files
+  (`test_parity_lvis.py`, `test_parity_oid.py`, and a 200-case randomized
+  section in `test_mask_parity.py`, which replaces the separate mask script),
+  so `just test` and CI run one `pytest` and the same set. The `parity-lvis`,
+  `parity-oid`, `parity-mask`, and `adversarial-all` recipes are gone: each was
+  one pytest file, so run the file. The browse tests, which no runner had
+  listed, run again, and `test_adversarial.py` calls the harness in process
+  instead of spawning it once per fixture.
+
 - **`scripts/bench.py` benchmarks five libraries, one process per cell.**
   ultrafast-pycocotools and vernier join pycocotools and faster-coco-eval as
   baselines (both are dev extras now; a missing one leaves its column blank).
@@ -241,6 +255,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   val2017 (bbox, segm, keypoints) and on a 500,000-detection synthetic run.
   The summary `stats` still differ from pycocotools by up to 3.6e-14: numpy's
   `mean` is a pairwise sum, and that reduction order is not reproduced yet.
+
+### Removed
+
+- **`scripts/fixture_builder.py` and `scripts/bench_fiftyone.py`.** The first
+  had no entry point and no importer; the adversarial corpus it described is
+  tracked in `tests/fixtures/adversarial/`. The second imported a package the
+  project never declared and had no recipe.
 
 ## [1.0.1] - 2026-09-12
 

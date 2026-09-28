@@ -157,7 +157,7 @@ fn iou_of(a: [f64; 4], b: [f64; 4]) -> f64 {
 /// A fixed 64-bit linear congruential generator.
 ///
 /// Fixtures whose ties carry the test use this rather than `rand`: its output
-/// cannot move with a `rand` release, and `scripts/test_parity.py` runs the
+/// cannot move with a `rand` release, and `tests/test_parity.py` runs the
 /// same generator, so the Python and Rust copies of a fixture stay identical.
 struct Lcg(u64);
 
@@ -184,7 +184,7 @@ impl Lcg {
 /// 0.70. Category 3 has no ground truth, so the `-1.0` early return runs
 /// alongside the real curves. Every cell holds more detections than a `maxDets`
 /// cap of 10, so per-image truncation fires. Same data, same generator, and
-/// same seed as `_tie_heavy_dataset` in `scripts/test_parity.py`, which proves
+/// same seed as `_tie_heavy_dataset` in `tests/test_parity.py`, which proves
 /// the arrays it yields equal pycocotools'; the tests here add invariants on
 /// top of that.
 fn tie_heavy_datasets() -> (Dataset, Dataset) {

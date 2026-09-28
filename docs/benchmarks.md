@@ -353,9 +353,9 @@ just bench                                  # speed benchmark (1x)
 uv run python scripts/bench.py --phases     # load/eval phase breakdown
 uv run python scripts/bench.py --scale 10   # 10x stress test
 just parity                                 # metric parity vs pycocotools
-just parity-mask                            # hotcoco.mask vs pycocotools.mask, operation by operation
 just parity-tide                            # TIDE vs tidecv
-just parity-oid                             # Open Images vs the TF Object Detection API
+uv run pytest tests/test_mask_parity.py     # hotcoco.mask vs pycocotools.mask, bit for bit
+uv run pytest tests/test_parity_oid.py      # Open Images vs the TF Object Detection API
 just fuzz                                   # hypothesis fuzzer, ~10,000 generated datasets
 ```
 

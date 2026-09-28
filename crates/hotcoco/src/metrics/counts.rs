@@ -738,7 +738,7 @@ mod tests {
     /// All-points AP, derived by hand rather than recorded from this crate's output.
     ///
     /// Each case is small enough to integrate on paper, which is the point: the
-    /// end-to-end check against TensorFlow lives in `scripts/parity_oid.py`, and
+    /// end-to-end check against TensorFlow lives in `tests/test_parity_oid.py`, and
     /// this pins the arithmetic so a failure there localizes to the reference
     /// rather than to this function.
     #[test]
