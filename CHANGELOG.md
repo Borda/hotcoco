@@ -208,9 +208,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Python formatting and lint recipes use the configured pre-commit Ruff hooks.
-  Python lint CI selects the same Ruff hooks for linting and formatting checks.
-  The Ruff version is pinned only in `.pre-commit-config.yaml`; the separate
-  development dependency is removed.
+  The git hook runs every pre-commit hook on the staged files of each commit, and
+  CI runs them over the whole tree. The Ruff version is pinned only in
+  `.pre-commit-config.yaml`; `pre-commit` replaces `ruff` in the dev extra.
+  `just py-fmt-check` is removed — it had become identical to `just py-fmt`.
 - **A category without `name` loads.** pycocotools tolerates the omission and
   TorchMetrics emits bare `{"id": i}` records. The record gets the display name
   `cat_<id>` — the same placeholder `COCO::cat_name` already used for an unknown

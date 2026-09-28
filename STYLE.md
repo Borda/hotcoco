@@ -139,7 +139,7 @@ single-contributor repo. The checks that do run:
 
 ```bash
 just docs-links                      # internal links, heading anchors, nav coverage
-pre-commit run typos --all-files      # spelling
+uv run pre-commit run typos --all-files  # spelling
 cargo doc --no-deps 2>&1 | grep warning
 ```
 

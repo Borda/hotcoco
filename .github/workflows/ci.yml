@@ -93,12 +93,11 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
+      # Every hook over the whole tree. The local git hook checks only staged
+      # files, so this is what catches drift that entered some other way.
       # Hook versions and file scopes are defined in .pre-commit-config.yaml.
-      - name: Ruff format check
-        run: uvx pre-commit run ruff-format --all-files
-
-      - name: Ruff lint
-        run: uvx pre-commit run ruff-check --all-files
+      - name: pre-commit (hygiene, Ruff, typos)
+        run: uvx pre-commit run --all-files --show-diff-on-failure
 
   python:
     name: Python smoke test (${{ matrix.python-version }})

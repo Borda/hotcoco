@@ -36,6 +36,9 @@ dev = [
     "faster-coco-eval",
     "hypothesis",
     "lvis>=0.5.3",
+    # Runs the hooks in .pre-commit-config.yaml, which pins the Ruff and typos
+    # versions; the git hook and the py-* recipes call it through `uv run`.
+    "pre-commit>=4",
     "psutil",
     "pytest",
     # Reference implementation for the OBB IoU fuzz harness

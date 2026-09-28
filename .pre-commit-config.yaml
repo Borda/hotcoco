@@ -2,8 +2,8 @@
 # Local commands and CI use these same pins to prevent lint version drift.
 #
 # This repo sets `core.hooksPath = .github/hooks`, so `pre-commit install`
-# refuses to run. Use `pre-commit run --all-files`; the custom hook invokes
-# it when Python files are staged. CI selects the Ruff checks from this config.
+# refuses to run. The custom hook runs `pre-commit run` on the staged files of
+# every commit; CI and `just hooks` run every hook over the whole tree.
 # Rust checks (fmt, clippy, cargo test) stay in that hook — they are not
 # duplicated here.
 
@@ -35,7 +35,7 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=1024]
 
-  # Same two checks as `just py-fmt-check` and `just py-lint`; all settings
+  # Same two checks as `just py-fmt` and `just py-lint`; all settings
   # come from [tool.ruff] in pyproject.toml (line-length 120, py39, E/F/I).
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.6
