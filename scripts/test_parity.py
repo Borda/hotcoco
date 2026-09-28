@@ -302,6 +302,37 @@ def _assert_arrays_bit_equal(py_eval, rs_eval, what):
         )
 
 
+def _rank_filler_dataset():
+    """Two images, one category: image 1 has a small GT with a TP at 0.5 and an
+    FP at 0.4; image 2 has no GT and one large detection at 0.9."""
+    images = [{"id": i, "width": 200, "height": 200, "file_name": f"{i}.jpg"} for i in (1, 2)]
+    categories = [{"id": 1, "name": "object"}]
+    anns = [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [0.0, 0.0, 10.0, 10.0], "area": 100.0, "iscrowd": 0}]
+    dts = [
+        _make_bbox_det(1, 1, bbox=[0.0, 0.0, 10.0, 10.0], score=0.5),
+        _make_bbox_det(1, 1, bbox=[50.0, 50.0, 10.0, 10.0], score=0.4),
+        _make_bbox_det(2, 1, bbox=[0.0, 0.0, 100.0, 100.0], score=0.9),
+    ]
+    return _make_minimal_gt("bbox", images=images, categories=categories, annotations=anns), dts
+
+
+def test_rank_filler_and_epsilon_guard_match_pycocotools_bit_for_bit():
+    """Under ``small``, image 2's cell has detections but no GT and every
+    detection is area-ignored; pycocotools keeps the cell (see ``gather_pair``
+    in matching.rs), so the 0.9 fills rank 0 of ``scores``. Image 1's lone
+    leading TP then shows the ``np.spacing(1)`` guard in ``precision``."""
+    gt, dts = _rank_filler_dataset()
+    py_eval, rs_eval = _accumulated_arrays(gt, dts, [1, 10, 100])
+    small = 1  # area-range index: all, small, medium, large
+    # (t=IoU 0.5, r=recall 0, k=cat 1, a=small, m=maxDets 100)
+    assert np.asarray(py_eval["scores"])[0, 0, 0, small, 2] == 0.9, "fixture must put the ignored 0.9 at rank 0"
+    # Under ``small`` the 0.9 is ignored, so the 0.5 TP is a lone leading TP.
+    assert np.asarray(py_eval["precision"])[0, 0, 0, small, 2] == 1.0 - 2.0**-52, (
+        "fixture must expose the epsilon guard"
+    )
+    _assert_arrays_bit_equal(py_eval, rs_eval, "rank filler + epsilon guard")
+
+
 def test_accumulated_arrays_match_pycocotools_bit_for_bit():
     """``precision``, ``recall`` and ``scores`` equal pycocotools' exactly, not
     within a tolerance, on a dataset built to expose ranking order.

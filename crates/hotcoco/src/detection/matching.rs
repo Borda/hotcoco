@@ -49,10 +49,6 @@ pub(super) struct PairCell<'a> {
     gt_anns: Vec<&'a Annotation>,
     /// Index into `gt_anns` -> column in the pair's IoU matrix.
     gt_iou_indices: Vec<usize>,
-    /// Number of GT ids returned before annotation lookup, which can drop
-    /// entries. Only [`evaluate_cell`]'s final skip gate reads it — see the
-    /// comment there for which counts gate the skip.
-    gt_raw_count: usize,
     /// Detections score-descending and truncated to `max_det`.
     dt_anns: Vec<&'a Annotation>,
     /// Position in `dt_anns` -> row in the pair's IoU matrix.
@@ -83,6 +79,8 @@ struct GtView<'a> {
     /// Open Images only; empty otherwise. Guarded by `is_oid` at every use.
     is_group_of_sorted: Vec<bool>,
     num_not_ignored: usize,
+    /// Count of `in_denominator_sorted` — [`EvalImg::num_gt_in_denominator`].
+    num_in_denominator: usize,
 }
 
 impl GtView<'_> {
@@ -117,6 +115,101 @@ impl DtView<'_> {
     }
 }
 
+/// What `accumulate()` reads from one (image, category) pair, and nothing else:
+/// the score list once, and per area range the ground-truth denominator plus a
+/// matched bit and an ignore bit per detection per IoU threshold.
+///
+/// An [`EvalImg`] carries the same cell with every id, the ground-truth side of
+/// the match, and its own copy of the scores — one per area range, ~460 bytes
+/// per detection on COCO's four ranges. This is ~20. `evaluate()` builds these;
+/// `EvalImg`s are built by [`COCOeval::eval_imgs`](super::COCOeval::eval_imgs)
+/// on first access.
+#[derive(Debug, Clone)]
+pub(super) struct PairRecord {
+    pub(super) image_id: u64,
+    pub(super) category_id: u64,
+    /// Score-descending, cut at `max_det` — what `EvalImg::dt_scores` holds.
+    pub(super) dt_scores: Vec<f64>,
+    /// One per `params.area_ranges` entry at evaluate time, in that order.
+    pub(super) areas: Vec<AreaRecord>,
+}
+
+/// One area range of a [`PairRecord`].
+#[derive(Debug, Clone)]
+pub(super) struct AreaRecord {
+    /// [`EvalImg::num_gt_in_denominator`] for the cell.
+    pub(super) num_gt_in_denominator: u32,
+    /// Number of IoU thresholds — the row count of each matrix below.
+    n_thr: u32,
+    /// `EvalImg::dt_matched` then `EvalImg::dt_ignore`, both `n_thr` rows of
+    /// `dt_scores.len()` bits, packed back to back.
+    bits: BitWords,
+}
+
+/// A bit string that stays inline up to 128 bits — enough for every threshold
+/// row of a cell with up to six detections at COCO's ten thresholds, which is
+/// most cells — and spills to the heap past that.
+#[derive(Debug, Clone)]
+enum BitWords {
+    Inline([u64; 2]),
+    Heap(Box<[u64]>),
+}
+
+impl BitWords {
+    fn pack(bits: impl Iterator<Item = bool>, n_bits: usize) -> Self {
+        let n_words = n_bits.div_ceil(64);
+        let mut words = vec![0u64; n_words];
+        for (i, set) in bits.enumerate() {
+            words[i / 64] |= (set as u64) << (i % 64);
+        }
+        match words.as_slice() {
+            [] => BitWords::Inline([0, 0]),
+            &[a] => BitWords::Inline([a, 0]),
+            &[a, b] => BitWords::Inline([a, b]),
+            _ => BitWords::Heap(words.into_boxed_slice()),
+        }
+    }
+
+    fn words(&self) -> &[u64] {
+        match self {
+            BitWords::Inline(w) => w,
+            BitWords::Heap(w) => w,
+        }
+    }
+}
+
+impl AreaRecord {
+    fn new(gt: &GtView<'_>, outcome: &MatchOutcome, n_thr: usize, nd: usize) -> Self {
+        let bits = outcome
+            .dt_matched
+            .iter_rows()
+            .chain(outcome.dt_ignore.iter_rows())
+            .flatten()
+            .copied();
+        AreaRecord {
+            num_gt_in_denominator: gt.num_in_denominator as u32,
+            n_thr: n_thr as u32,
+            bits: BitWords::pack(bits, 2 * n_thr * nd),
+        }
+    }
+
+    fn row(&self, r: usize, nd: usize) -> impl Iterator<Item = bool> + '_ {
+        let words = self.bits.words();
+        let base = r * nd;
+        (base..base + nd).map(move |i| (words[i / 64] >> (i % 64)) & 1 == 1)
+    }
+
+    /// `EvalImg::dt_matched` row `t`; `nd` is the pair's `dt_scores.len()`.
+    pub(super) fn matched(&self, t: usize, nd: usize) -> impl Iterator<Item = bool> + '_ {
+        self.row(t, nd)
+    }
+
+    /// `EvalImg::dt_ignore` row `t`; `nd` is the pair's `dt_scores.len()`.
+    pub(super) fn ignore(&self, t: usize, nd: usize) -> impl Iterator<Item = bool> + '_ {
+        self.row(self.n_thr as usize + t, nd)
+    }
+}
+
 /// Per-threshold match bookkeeping — the payload of an [`EvalImg`].
 struct MatchOutcome {
     dt_matches: ThreshMatrix<u64>,
@@ -143,6 +236,15 @@ pub(super) fn gather_pair<'a>(
 
     let gt_ids = COCOeval::get_anns_static(ctx.coco_gt, ctx.params, img_id, cat_id);
     let dt_ids = COCOeval::get_anns_static(ctx.coco_dt, ctx.params, img_id, cat_id);
+    // pycocotools' `evaluateImg` skips a cell only when `len(gt) == 0 and
+    // len(dt) == 0` on the *raw* per-(image, category) lists — before any area
+    // range ignores anything and before the `max_det` cut — and that is the only
+    // skip here too. Anything narrower is wrong in a way AP never shows: a cell
+    // with detections but no ground truth, every one of them outside the area
+    // range, has nothing to match and moves no counter, yet its detections still
+    // occupy ranks in `accumulate()`'s score order, and the score sampled at a
+    // recall threshold (`eval["scores"]`) is read off that order. Dropping such
+    // cells shifted those samples onto later detections.
     if gt_ids.is_empty() && dt_ids.is_empty() {
         return None;
     }
@@ -177,7 +279,6 @@ pub(super) fn gather_pair<'a>(
         max_det,
         gt_anns,
         gt_iou_indices,
-        gt_raw_count: gt_ids.len(),
         dt_anns,
         dt_iou_indices,
         dt_ids,
@@ -241,6 +342,7 @@ fn partition_gt<'a>(
         Vec::new()
     };
     let num_not_ignored = ignore_sorted.iter().filter(|&&x| !x).count();
+    let num_in_denominator = in_denominator_sorted.iter().filter(|&&x| x).count();
 
     GtView {
         anns,
@@ -248,6 +350,7 @@ fn partition_gt<'a>(
         iou_indices: pair.gt_iou_indices.as_slice(),
         ignore_sorted,
         in_denominator_sorted,
+        num_in_denominator,
         iscrowd_sorted,
         is_group_of_sorted,
         num_not_ignored,
@@ -445,19 +548,20 @@ fn match_cell(
     }
 }
 
-/// Evaluate one area range of an already-gathered image+category pair.
+/// Match one area range of a gathered pair: the partitioned ground truth and
+/// the match outcome, with the LVIS not-exhaustive rule applied.
 ///
 /// `not_exhaustive_cat` — when true (LVIS mode), unmatched detections are ignored
 /// rather than counted as false positives.
 ///
-/// Returns `None` for cells with nothing to report, which is what keeps
-/// `evalImgs` sparse.
-pub(super) fn evaluate_cell(
+/// Every gathered pair yields a cell for every area range; the one skip is in
+/// [`gather_pair`].
+fn match_area<'a>(
     ctx: &EvalImgContext<'_>,
-    pair: &PairCell<'_>,
+    pair: &'a PairCell<'a>,
     area_rng: [f64; 2],
     not_exhaustive_cat: bool,
-) -> Option<EvalImg> {
+) -> (GtView<'a>, MatchOutcome) {
     let is_kp = ctx.params.iou_type == IouType::Keypoints;
     let is_oid = ctx.eval_mode == EvalMode::OpenImages;
 
@@ -466,8 +570,6 @@ pub(super) fn evaluate_cell(
 
     let mut outcome = match_cell(ctx, &gt, &dt, pair.iou_matrix, is_oid);
 
-    // LVIS: on a not-exhaustively-labeled category, unmatched detections are
-    // ignored instead of penalized as false positives.
     if not_exhaustive_cat {
         for t_idx in 0..ctx.params.iou_thrs.len() {
             for di in 0..dt.len() {
@@ -477,34 +579,74 @@ pub(super) fn evaluate_cell(
             }
         }
     }
+    (gt, outcome)
+}
 
-    // Nothing non-ignored on either side means this cell contributes nothing —
-    // but only skip it when there were no ground-truth ids at all, matching the
-    // original condition. The two tests read different counts: `has_content`
-    // reads the *resolved* views (non-ignored GTs, in-range detections after
-    // the score sort and `max_det` cap), while the final gate is the *raw* GT
-    // id count — the ids returned before annotation lookup, `gt_raw_count`.
-    let has_content = gt.num_not_ignored > 0 || dt.area_ignore.iter().any(|&ignored| !ignored);
-    if !has_content && pair.gt_raw_count == 0 {
-        return None;
-    }
-
-    Some(EvalImg {
-        image_id: pair.img_id,
-        category_id: pair.cat_id,
-        area_rng,
-        max_det: pair.max_det,
-        dt_ids: pair.dt_ids.clone(),
-        gt_ids: gt.sorted_ids(),
-        dt_matches: outcome.dt_matches,
-        gt_matches: outcome.gt_matches,
-        dt_matched: outcome.dt_matched,
-        gt_matched: outcome.gt_matched,
-        dt_scores: pair.dt_scores.clone(),
-        gt_ignore: gt.ignore_sorted,
-        gt_in_denominator: gt.in_denominator_sorted,
-        dt_ignore: outcome.dt_ignore,
+/// One pair under every area range, as the lean record `accumulate()` reads.
+/// `None` when the pair has neither ground truth nor detections.
+pub(super) fn evaluate_pair_lean(
+    ctx: &EvalImgContext<'_>,
+    img_id: u64,
+    cat_id: u64,
+    max_det: usize,
+    not_exhaustive_cat: bool,
+) -> Option<PairRecord> {
+    let pair = gather_pair(ctx, img_id, cat_id, max_det)?;
+    let n_thr = ctx.params.iou_thrs.len();
+    let nd = pair.dt_scores.len();
+    let areas = ctx
+        .params
+        .area_ranges
+        .iter()
+        .map(|ar| {
+            let (gt, outcome) = match_area(ctx, &pair, ar.range, not_exhaustive_cat);
+            AreaRecord::new(&gt, &outcome, n_thr, nd)
+        })
+        .collect();
+    Some(PairRecord {
+        image_id: img_id,
+        category_id: cat_id,
+        dt_scores: pair.dt_scores,
+        areas,
     })
+}
+
+/// One pair under the area ranges at `area_idxs` (indices into
+/// `ctx.params.area_ranges`), as full [`EvalImg`]s written into `out` — one
+/// slot per index, left `None` when the pair has neither ground truth nor
+/// detections.
+pub(super) fn evaluate_pair_full(
+    ctx: &EvalImgContext<'_>,
+    img_id: u64,
+    cat_id: u64,
+    max_det: usize,
+    not_exhaustive_cat: bool,
+    area_idxs: &[usize],
+    out: &mut [Option<EvalImg>],
+) {
+    let Some(pair) = gather_pair(ctx, img_id, cat_id, max_det) else {
+        return;
+    };
+    for (slot, &a_idx) in out.iter_mut().zip(area_idxs) {
+        let area_rng = ctx.params.area_ranges[a_idx].range;
+        let (gt, outcome) = match_area(ctx, &pair, area_rng, not_exhaustive_cat);
+        *slot = Some(EvalImg {
+            image_id: pair.img_id,
+            category_id: pair.cat_id,
+            area_rng,
+            max_det: pair.max_det,
+            dt_ids: pair.dt_ids.clone(),
+            gt_ids: gt.sorted_ids(),
+            dt_matches: outcome.dt_matches,
+            gt_matches: outcome.gt_matches,
+            dt_matched: outcome.dt_matched,
+            gt_matched: outcome.gt_matched,
+            dt_scores: pair.dt_scores.clone(),
+            gt_ignore: gt.ignore_sorted,
+            gt_in_denominator: gt.in_denominator_sorted,
+            dt_ignore: outcome.dt_ignore,
+        });
+    }
 }
 
 /// D×G IoU matrix (row-major: dt.len() rows, gt.len() columns).

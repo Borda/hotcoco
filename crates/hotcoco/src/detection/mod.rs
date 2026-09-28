@@ -91,7 +91,18 @@ pub struct COCOeval {
     pub coco_gt: COCO,
     pub coco_dt: COCO,
     pub params: Params,
-    pub(crate) eval_imgs: Vec<Option<EvalImg>>,
+    /// The full per-image records, built on first access — see
+    /// [`eval_imgs`](Self::eval_imgs). Reset by every `evaluate()`.
+    eval_imgs: std::sync::OnceLock<Vec<Option<EvalImg>>>,
+    /// The `"all"` area range's records alone, for the in-crate analyses that
+    /// read only that range (see [`default_cells`](Self::default_cells)) —
+    /// a quarter of [`eval_imgs`](Self::eval_imgs) on COCO's four ranges.
+    default_eval_imgs: std::sync::OnceLock<Vec<Option<EvalImg>>>,
+    /// One per gathered (image, category) pair, in the order `evaluate()` visits
+    /// them — what `accumulate()` reads. Empty until `evaluate()` runs.
+    cells: Vec<Option<matching::PairRecord>>,
+    /// What the last `evaluate()` saw; `None` until it runs.
+    eval_inputs: Option<evaluate::EvalInputs>,
     ious: HashMap<(u64, u64), matching::IouMatrix>,
     /// Per-annotation RLEs for segm runs, rebuilt by each `evaluate()` (like
     /// `ious`) and `None` for every other geometry. See [`iou::SegmRles`].
@@ -122,7 +133,10 @@ impl COCOeval {
             coco_gt,
             coco_dt,
             params,
-            eval_imgs: Vec::new(),
+            eval_imgs: std::sync::OnceLock::new(),
+            default_eval_imgs: std::sync::OnceLock::new(),
+            cells: Vec::new(),
+            eval_inputs: None,
             ious: HashMap::new(),
             segm_rles: None,
             eval: None,
@@ -145,8 +159,27 @@ impl COCOeval {
     }
 
     /// Per-image evaluation results (sparse — indexed by image position).
+    ///
+    /// Empty until [`evaluate`](Self::evaluate) runs. Built on first access and
+    /// cached: `evaluate()` itself keeps only the lean per-cell bits that
+    /// `accumulate()` reads, about 20 bytes per detection, and these full
+    /// records — every id, both sides of the match, about 460 bytes per
+    /// detection — are materialized from the same inputs when something asks
+    /// for them. They describe what `evaluate()` produced, whatever `params`
+    /// has been set to since.
     pub fn eval_imgs(&self) -> &[Option<EvalImg>] {
-        &self.eval_imgs
+        match &self.eval_inputs {
+            None => &[],
+            Some(inputs) => self.eval_imgs.get_or_init(|| {
+                let every_range: Vec<usize> = (0..inputs.params.area_ranges.len()).collect();
+                self.evaluate_pairs_full(inputs, &every_range)
+            }),
+        }
+    }
+
+    /// Whether [`evaluate`](Self::evaluate) has run.
+    pub fn evaluated(&self) -> bool {
+        self.eval_inputs.is_some()
     }
 
     /// Accumulated precision/recall curves (set after `accumulate()`).
@@ -202,7 +235,16 @@ impl COCOeval {
     pub(in crate::detection) fn default_cells(&self) -> impl Iterator<Item = &EvalImg> {
         let area_rng = self.params.all_area_range();
         let max_det = self.params.max_det();
-        self.eval_imgs
+        // The full set if something already built it; otherwise only the
+        // `"all"` range, which is all these analyses read.
+        let cells: &[Option<EvalImg>] = match (&self.eval_inputs, self.eval_imgs.get()) {
+            (None, _) => &[],
+            (Some(_), Some(all)) => all,
+            (Some(inputs), None) => self
+                .default_eval_imgs
+                .get_or_init(|| self.evaluate_pairs_full(inputs, &[inputs.params.all_area_idx()])),
+        };
+        cells
             .iter()
             .flatten()
             .filter(move |e| e.area_rng == area_rng && e.max_det == max_det)

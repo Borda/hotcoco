@@ -87,6 +87,13 @@ After calling `evaluate()`, the `eval_imgs` field contains per-image, per-catego
 
 The keys match pycocotools' `evalImgs`; the full list is in the [`eval_imgs` API reference](../api/cocoeval.md#eval_imgs).
 
+`evaluate()` does not build these records up front. It keeps only what
+`accumulate()` reads, about 20 bytes per detection, and materializes the full
+records the first time something asks for them: this attribute, `tide_errors()`,
+`calibration()`, or `image_diagnostics()`. That first access repeats the matching
+pass, roughly the cost of `evaluate()` itself, and is cached afterwards. The
+records describe the `evaluate()` run, whatever `params` has been changed to since.
+
 ## Precision and recall arrays
 
 After calling `accumulate()`, the full precision/recall curves are available:

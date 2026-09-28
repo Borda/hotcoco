@@ -34,6 +34,11 @@ dev = [
     "maturin>=1.12.6",
     "pycocotools",
     "faster-coco-eval",
+    # The two other Rust evaluators scripts/bench.py compares against. Both are
+    # optional there: a missing one leaves its column blank rather than failing
+    # the run. vernier ships abi3 wheels for 3.10+ only.
+    "ultrafast-pycocotools",
+    "vernier; python_version >= '3.10'",
     "hypothesis",
     "lvis>=0.5.3",
     # Runs the hooks in .pre-commit-config.yaml, which pins the Ruff and typos
