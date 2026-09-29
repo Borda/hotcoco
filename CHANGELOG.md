@@ -110,8 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-polygon ground truth paid. `Annotation::obb` is boxed (`Option<Box<[f64; 5]>>`), which
   takes the record from 248 to 208 bytes. Beyond the ground truth, `load_res`
   keeps 22 MB instead of 29 MB on val2017's bbox results and 229 MB instead
-  of 313 MB at ten times that count. Rust code matching `Segmentation::Polygon`
-  to read a result's polygon should call `Segmentation::polygons()`, which
+  of 313 MB at ten times that count. *Rust API:* `Segmentation` is
+  `#[non_exhaustive]`, so a `match` on it needs a `_` arm; later families add
+  formats without another break. Code matching `Segmentation::Polygon` to
+  read a result's polygon should call `Segmentation::polygons()`, which
   returns the list for either variant.
 
 - **The annotation index is flat.** `COCO` answered "which annotations does

@@ -462,8 +462,14 @@ fn deserialize_exact_opt<'de, D: Deserializer<'de>>(
 /// cost of loading a polygon-heavy GT file.
 /// The visitor streams instead: a JSON array is a polygon list, a JSON object
 /// is an RLE whose variant is decided by the type of its `counts` value.
+///
+/// Marked `#[non_exhaustive]`: later families are expected to add formats
+/// (a panoptic segment, a mask file), and downstream code must not be broken
+/// by that. Match with a `_` arm; [`Segmentation::polygons`] reads whichever
+/// variants are polygons.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum Segmentation {
     /// Polygon format: list of polygons, each a flat list of [x, y, x, y, ...] coordinates.
     Polygon(Vec<Vec<f64>>),

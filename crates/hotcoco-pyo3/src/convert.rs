@@ -286,6 +286,11 @@ pub fn segmentation_to_py(py: Python<'_>, seg: &Segmentation) -> PyResult<Py<PyA
             dict.set_item("counts", counts.clone())?;
             Ok(dict.into_any().unbind())
         }
+        // `Segmentation` is `#[non_exhaustive]`: a format the core adds must
+        // be given a Python shape here, and this arm makes forgetting loud.
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "segmentation format has no Python representation yet: {seg:?}"
+        ))),
     }
 }
 
