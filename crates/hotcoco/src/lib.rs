@@ -103,4 +103,4 @@ pub use quality::{
     CategoryStats, DatasetStats, DatasetSummary, Finding, HealthReport, Layer, SummaryStats,
 };
 pub use report::{EvalReport, Provenance};
-pub use types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
+pub use types::{Annotation, Category, Dataset, Extra, Image, Rle, Segmentation};

@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Unknown keys cost a small vector, not a B-tree.** `Annotation`, `Image`,
+  and `Category` keep keys outside the COCO schema in `extra`, which was a
+  `serde_json::Map`: a B-tree whose first entry allocates a node of about
+  600 bytes, three times the record itself, and detector outputs often carry
+  one unknown key on every detection. `extra` is now `hotcoco::Extra`, a
+  small map over a boxed slice in file order with the same `get`, `insert`,
+  `remove`, `iter`, and `is_empty` calls and conversions to and from
+  `serde_json::Map`. Ten times val2017's bbox results with one unknown key
+  per detection keep 156 MB instead of 448 MB; a clean file keeps 4 MB less
+  from the smaller record, now 200 bytes. Saved files list unknown keys in
+  the order they were read, not sorted. Values are unchanged.
+
 - **The file's bytes are gone before its annotations are joined.** The
   parallel parse produces one vector of records per run and then joins them
   into one; the file bytes stayed alive through the join, and each run's

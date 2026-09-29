@@ -67,8 +67,169 @@ pub struct Image {
     /// Keys not in the COCO schema, preserved verbatim so
     /// load → filter/split/merge → save round-trips user metadata
     /// (pycocotools keeps unknown keys because it stores raw dicts).
-    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(flatten, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+/// The keys of a record that are not in the COCO schema, in file order.
+///
+/// A small map: lookups are linear over what is nearly always nothing or a
+/// handful of entries, and an empty one allocates nothing. A
+/// `serde_json::Map` is a B-tree whose first entry allocates a node of about
+/// 600 bytes, three times the record itself, and detector outputs often
+/// carry one unknown key on every detection.
+#[derive(Clone, Debug, Default)]
+pub struct Extra(Box<[(String, serde_json::Value)]>);
+
+/// Set `key` in `entries`, replacing an existing entry in place; the
+/// previous value, if any.
+fn upsert(
+    entries: &mut Vec<(String, serde_json::Value)>,
+    key: String,
+    value: serde_json::Value,
+) -> Option<serde_json::Value> {
+    match entries.iter_mut().find(|(k, _)| *k == key) {
+        Some(slot) => Some(std::mem::replace(&mut slot.1, value)),
+        None => {
+            entries.reserve_exact(1);
+            entries.push((key, value));
+            None
+        }
+    }
+}
+
+impl Extra {
+    /// No keys.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether there are no keys.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The number of keys.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The value under `key`.
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// The value under `key`, mutably.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut serde_json::Value> {
+        self.0.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// Whether `key` is present.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Set `key` to `value`; the previous value, if any. An existing key
+    /// keeps its position.
+    pub fn insert(
+        &mut self,
+        key: impl Into<String>,
+        value: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let mut entries = Vec::from(std::mem::take(&mut self.0));
+        let previous = upsert(&mut entries, key.into(), value);
+        self.0 = entries.into_boxed_slice();
+        previous
+    }
+
+    /// Remove `key`; its value, if it was present.
+    pub fn remove(&mut self, key: &str) -> Option<serde_json::Value> {
+        let at = self.0.iter().position(|(k, _)| k == key)?;
+        let mut entries = Vec::from(std::mem::take(&mut self.0));
+        let (_, value) = entries.remove(at);
+        self.0 = entries.into_boxed_slice();
+        Some(value)
+    }
+
+    /// The `(key, value)` entries, in file order.
+    pub fn iter(&self) -> std::slice::Iter<'_, (String, serde_json::Value)> {
+        self.0.iter()
+    }
+}
+
+impl PartialEq for Extra {
+    /// Equal as maps: the same keys with the same values, in any order.
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|(k, v)| other.get(k) == Some(v))
+    }
+}
+
+impl<'a> IntoIterator for &'a Extra {
+    type Item = &'a (String, serde_json::Value);
+    type IntoIter = std::slice::Iter<'a, (String, serde_json::Value)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl IntoIterator for Extra {
+    type Item = (String, serde_json::Value);
+    type IntoIter = std::vec::IntoIter<(String, serde_json::Value)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Vec::from(self.0).into_iter()
+    }
+}
+
+impl FromIterator<(String, serde_json::Value)> for Extra {
+    /// A repeated key keeps its last value, as a JSON object does.
+    fn from_iter<I: IntoIterator<Item = (String, serde_json::Value)>>(iter: I) -> Self {
+        let mut entries = Vec::new();
+        for (key, value) in iter {
+            upsert(&mut entries, key, value);
+        }
+        Extra(entries.into_boxed_slice())
+    }
+}
+
+impl From<serde_json::Map<String, serde_json::Value>> for Extra {
+    fn from(map: serde_json::Map<String, serde_json::Value>) -> Self {
+        map.into_iter().collect()
+    }
+}
+
+impl From<Extra> for serde_json::Map<String, serde_json::Value> {
+    fn from(extra: Extra) -> Self {
+        extra.into_iter().collect()
+    }
+}
+
+impl Serialize for Extra {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+impl<'de> Deserialize<'de> for Extra {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ExtraVisitor;
+
+        impl<'de> Visitor<'de> for ExtraVisitor {
+            type Value = Extra;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Extra, A::Error> {
+                std::iter::from_fn(|| map.next_entry::<String, serde_json::Value>().transpose())
+                    .collect()
+            }
+        }
+
+        deserializer.deserialize_map(ExtraVisitor)
+    }
 }
 
 /// A single object annotation (ground truth or detection result).
@@ -111,8 +272,8 @@ pub struct Annotation {
     /// Keys not in the COCO schema, preserved verbatim so
     /// load → filter/split/merge → save round-trips user metadata
     /// (pycocotools keeps unknown keys because it stores raw dicts).
-    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(flatten, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
 }
 
 impl Annotation {
@@ -451,8 +612,8 @@ pub struct Category {
     /// Keys not in the COCO schema, preserved verbatim so
     /// load → filter/split/merge → save round-trips user metadata
     /// (pycocotools keeps unknown keys because it stores raw dicts).
-    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(flatten, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
 }
 
 /// Map `category_id -> name`.
@@ -521,11 +682,12 @@ impl Rle {
 mod tests {
     use super::*;
 
-    /// The record is what every detection costs: 208 bytes with `obb` boxed
-    /// (248 inline), and `Rect` must fit the enum without growing it.
+    /// The record is what every detection costs: 200 bytes with `obb` and
+    /// `extra` behind pointers (248 inline), and `Rect` must fit the enum
+    /// without growing it.
     #[test]
     fn record_layout_stays_slim() {
-        assert!(std::mem::size_of::<Annotation>() <= 208);
+        assert!(std::mem::size_of::<Annotation>() <= 200);
         assert_eq!(
             std::mem::size_of::<Segmentation>(),
             std::mem::size_of::<Option<Segmentation>>()
@@ -557,6 +719,41 @@ mod tests {
             .polygons()
             .is_none()
         );
+    }
+
+    /// Unknown keys survive a load in file order, a repeated key keeps its
+    /// last value, an empty map serializes to nothing, and equality is a
+    /// map's.
+    #[test]
+    fn extra_keys_round_trip_as_a_small_map() {
+        let json = r#"{"image_id": 1, "category_id": 1, "zeta": 1, "alpha": [2], "zeta": "last"}"#;
+        let ann: Annotation = serde_json::from_str(json).unwrap();
+        assert_eq!(ann.extra.len(), 2);
+        assert_eq!(ann.extra.get("zeta"), Some(&serde_json::json!("last")));
+        assert_eq!(
+            ann.extra
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            ["zeta", "alpha"]
+        );
+        let out = serde_json::to_value(&ann).unwrap();
+        assert_eq!(out["zeta"], "last");
+        assert_eq!(out["alpha"], serde_json::json!([2]));
+
+        let mut other = Extra::new();
+        other.insert("alpha", serde_json::json!([2]));
+        other.insert("zeta", serde_json::json!("last"));
+        assert_eq!(ann.extra, other);
+        assert_eq!(other.remove("alpha"), Some(serde_json::json!([2])));
+        assert_ne!(ann.extra, other);
+        other.remove("zeta");
+        assert!(other.is_empty());
+
+        let plain: Annotation =
+            serde_json::from_str(r#"{"image_id": 1, "category_id": 1}"#).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("extra"));
+        assert!(plain.extra.is_empty());
     }
 
     /// The per-record heap cost is the coordinates themselves, not serde's

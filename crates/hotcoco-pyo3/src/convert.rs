@@ -1,4 +1,4 @@
-use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Image, Rle, Segmentation};
+use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Extra, Image, Rle, Segmentation};
 use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -195,10 +195,7 @@ const CATEGORY_KEYS: &[&str] = &[
 /// hand-rolled per-value converter: the values are arbitrary user objects, and
 /// `json` already defines exactly which of those a COCO file can hold. A
 /// non-serializable value raises the stdlib's own `TypeError`, naming the type.
-fn extract_extra(
-    dict: &Bound<'_, PyDict>,
-    known: &[&str],
-) -> PyResult<serde_json::Map<String, serde_json::Value>> {
+fn extract_extra(dict: &Bound<'_, PyDict>, known: &[&str]) -> PyResult<Extra> {
     let py = dict.py();
     let mut extras: Option<Bound<'_, PyDict>> = None;
     for (k, v) in dict {
@@ -213,25 +210,21 @@ fn extract_extra(
             .set_item(key, v)?;
     }
     let Some(extras) = extras else {
-        return Ok(serde_json::Map::new());
+        return Ok(Extra::new());
     };
     let json_str: String = py
         .import("json")?
         .call_method1("dumps", (extras,))?
         .extract()?;
-    match serde_json::from_str(&json_str) {
-        Ok(serde_json::Value::Object(map)) => Ok(map),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(
-            "custom keys did not round-trip through JSON",
-        )),
-    }
+    serde_json::from_str(&json_str).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "custom keys did not round-trip through JSON: {e}"
+        ))
+    })
 }
 
 /// Merge a record's `extra` map back into its outgoing Python dict.
-fn merge_extra(
-    dict: &Bound<'_, PyDict>,
-    extra: &serde_json::Map<String, serde_json::Value>,
-) -> PyResult<()> {
+fn merge_extra(dict: &Bound<'_, PyDict>, extra: &Extra) -> PyResult<()> {
     if extra.is_empty() {
         return Ok(());
     }
