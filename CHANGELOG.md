@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`evaluate()` keeps its per-pair records in flat arenas.** Each (image,
+  category) pair `evaluate()` visited was one record with two heap vectors —
+  its scores and one 32-byte entry per area range — built as one object per
+  pair. The pairs now live in one arena: a 24-byte header each, then every
+  pair's scores, ground-truth counts, and matched and ignore bits packed back
+  to back, sized exactly from a pass over the index before any pair is
+  matched and written in parallel runs into disjoint windows, so nothing is
+  copied afterwards. The grouping `accumulate()` builds holds a 4-byte pair
+  index and area position instead of a pointer and a `usize`, which halves
+  its entries. On ten times val2017's detections (246,000 pairs)
+  `evaluate()` keeps 23 MB instead of 55 MB with no peak above that, and the
+  smaller grouping takes `accumulate()`'s peak from 56 MB to 31 MB over it;
+  segm keeps 30 MB less as well. Values are unchanged.
+
 - **The loader reads a file in blocks instead of whole.** `COCO()` and
   `load_res()` read the entire file into memory and parsed it from there, so
   the peak while loading was the file's bytes plus its records — and a

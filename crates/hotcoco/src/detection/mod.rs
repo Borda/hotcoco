@@ -55,6 +55,12 @@ use crate::detection::hierarchy::Hierarchy;
 use crate::params::{IouType, Params};
 use mode::FreqGroups;
 
+/// How many of `n` items each parallel run takes: a few runs per thread —
+/// enough to balance, few enough that per-run setup stays noise.
+pub(super) fn run_len(n: usize) -> usize {
+    n.div_ceil(4 * rayon::current_num_threads()).max(1)
+}
+
 /// COCO evaluation engine.
 ///
 /// Computes AP and AR metrics for bbox, segmentation, and keypoint predictions.
@@ -99,9 +105,9 @@ pub struct COCOeval {
     /// read only that range (see [`default_cells`](Self::default_cells)) —
     /// a quarter of [`eval_imgs`](Self::eval_imgs) on COCO's four ranges.
     default_eval_imgs: std::sync::OnceLock<Vec<Option<EvalImg>>>,
-    /// One per gathered (image, category) pair, in the order `evaluate()` visits
+    /// Every gathered (image, category) pair, in the order `evaluate()` visits
     /// them — what `accumulate()` reads. Empty until `evaluate()` runs.
-    cells: Vec<Option<matching::PairRecord>>,
+    cells: matching::Cells,
     /// What the last `evaluate()` saw; `None` until it runs.
     eval_inputs: Option<evaluate::EvalInputs>,
     ious: HashMap<(u64, u64), matching::IouMatrix>,
@@ -136,7 +142,7 @@ impl COCOeval {
             params,
             eval_imgs: std::sync::OnceLock::new(),
             default_eval_imgs: std::sync::OnceLock::new(),
-            cells: Vec::new(),
+            cells: matching::Cells::default(),
             eval_inputs: None,
             ious: HashMap::new(),
             segm_rles: None,

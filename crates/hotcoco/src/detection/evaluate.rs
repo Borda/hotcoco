@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use super::matching::{EvalImgContext, IouMatrix};
+use super::matching::{Cells, EvalImgContext, IouMatrix, lean_scores_len, push_pair_lean};
 use super::{COCOeval, EvalMode};
 
 impl COCOeval {
@@ -285,24 +285,31 @@ impl COCOeval {
     }
 
     /// The per-pair walk of `evaluate()`: every gathered pair under every area
-    /// range, as the lean records `accumulate()` reads, one per pair in
-    /// `sparse_pairs` order. Fans out over pairs, not (pair, area range)
-    /// cells, so `gather_pair` resolves what the ranges share once.
-    fn evaluate_pairs_lean(&self, inputs: &EvalInputs) -> Vec<Option<super::matching::PairRecord>> {
+    /// range, as the lean cells `accumulate()` reads, in `sparse_pairs` order.
+    /// Fans out over runs of pairs, not (pair, area range) cells, so
+    /// `gather_pair` resolves what the ranges share once, and each run writes
+    /// its window of arenas sized before the walk: the records never exist as
+    /// one object per pair, and nothing is copied afterwards.
+    fn evaluate_pairs_lean(&self, inputs: &EvalInputs) -> Cells {
         self.with_cell_context(&inputs.params, |ctx, max_det| {
-            inputs
-                .sparse_pairs
-                .par_iter()
-                .map(|&(img_id, cat_id)| {
-                    super::matching::evaluate_pair_lean(
-                        ctx,
-                        img_id,
-                        cat_id,
-                        max_det,
-                        self.not_exhaustive_cat(inputs, img_id, cat_id),
-                    )
-                })
-                .collect()
+            Cells::build(
+                &inputs.params,
+                &inputs.sparse_pairs,
+                super::run_len(inputs.sparse_pairs.len()),
+                |img_id, cat_id| lean_scores_len(ctx, img_id, cat_id, max_det),
+                |run, cells| {
+                    for &(img_id, cat_id) in run {
+                        push_pair_lean(
+                            ctx,
+                            img_id,
+                            cat_id,
+                            max_det,
+                            self.not_exhaustive_cat(inputs, img_id, cat_id),
+                            cells,
+                        );
+                    }
+                },
+            )
         })
     }
 

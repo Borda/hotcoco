@@ -5,29 +5,7 @@ use rayon::prelude::*;
 
 use super::COCOeval;
 use super::EvalMode;
-use super::matching::{AreaRecord, PairRecord};
-
-/// One (image, category, area range) cell as `accumulate()` reads it: a
-/// [`PairRecord`] and which of its area ranges.
-#[derive(Clone, Copy)]
-pub(super) struct CellRef<'a> {
-    pub(super) pair: &'a PairRecord,
-    pub(super) a_idx: usize,
-}
-
-impl<'a> CellRef<'a> {
-    fn area(&self) -> &'a AreaRecord {
-        &self.pair.areas[self.a_idx]
-    }
-
-    fn matched(&self, t: usize) -> impl Iterator<Item = bool> + 'a {
-        self.area().matched(t, self.pair.dt_scores.len())
-    }
-
-    fn ignore(&self, t: usize) -> impl Iterator<Item = bool> + 'a {
-        self.area().ignore(t, self.pair.dt_scores.len())
-    }
-}
+use super::matching::CellRef;
 
 /// The key two area ranges are compared on: bit equality of both bounds.
 /// `[0, 1e5**2]` and `[0, 1e10]` are the same range only if they are the same
@@ -54,7 +32,7 @@ pub(super) struct EvalGrouping<'a> {
     /// Indexed `k_idx * a + a_idx`, each bucket in `eval_imgs` order. Each cell
     /// carries the dense image slot its `image_id` resolves to — see
     /// [`image_mask`](Self::image_mask).
-    grouped: Vec<Vec<(CellRef<'a>, u32)>>,
+    grouped: Vec<Vec<(CellRef, u32)>>,
     /// Number of area ranges — the stride of `grouped`.
     a: usize,
     /// Distinct `image_id` -> dense slot, over every cell in `grouped`.
@@ -64,15 +42,9 @@ pub(super) struct EvalGrouping<'a> {
 impl<'a> EvalGrouping<'a> {
     /// Bucket an evaluated `COCOeval`'s cells.
     pub(super) fn build(ev: &'a COCOeval) -> Self {
-        // A few runs per thread: enough to balance, few enough that allocating
-        // `k * a` buckets per run stays noise. Tests pass their own to put run
-        // boundaries where they want them.
-        let chunk_len = ev
-            .cells
-            .len()
-            .div_ceil(4 * rayon::current_num_threads())
-            .max(1);
-        Self::build_chunked(ev, chunk_len)
+        // Tests pass their own run length to put run boundaries where they
+        // want them.
+        Self::build_chunked(ev, super::run_len(ev.cells.len()))
     }
 
     /// [`build`](Self::build) with the cells walked in runs of `chunk_len`.
@@ -122,13 +94,11 @@ impl<'a> EvalGrouping<'a> {
                 .collect()
         });
 
-        // Group eval_imgs by (k_idx, a_idx) — one pass over the cells, in parallel.
+        // Group the pairs by (k_idx, a_idx) — one pass over the cells, in parallel.
         //
-        // The walk is memory-bound: `Option<EvalImg>` is 360 bytes and COCO-scale
-        // runs have ~1.5M of them, so one core reads ~560 MB just to see three ids
-        // per cell. The cells are cut into a few contiguous runs per thread; each
-        // run keeps its own buckets, in cell order, and the runs are concatenated in
-        // order below — so every bucket ends up in `eval_imgs` order exactly as a
+        // The pairs are cut into a few contiguous runs per thread; each run keeps
+        // its own buckets, in pair order, and the runs are concatenated in order
+        // below — so every bucket ends up in `evaluate()` order exactly as a
         // sequential walk would leave it. That order feeds the stable score sort and
         // decides ties, so it is part of the output, not an implementation detail.
         // Explicit chunks rather than rayon's adaptive splitting: every run allocates
@@ -146,30 +116,32 @@ impl<'a> EvalGrouping<'a> {
         // remapped to global slots once the runs are back together. Slot numbers are
         // internal — `image_mask` is the only reader — so which run saw an image
         // first does not matter, only that every cell of one image shares a slot.
-        struct Run<'a> {
-            /// `k_idx * a + a_idx` → cells in this run, in cell order; the `u32` is an
+        struct Run {
+            /// `k_idx * a + a_idx` → cells in this run, in pair order; the `u32` is an
             /// index into `imgs`.
-            buckets: Vec<Vec<(CellRef<'a>, u32)>>,
+            buckets: Vec<Vec<(CellRef, u32)>>,
             /// Image ids in first-seen order. A repeat is only possible when an image's
             /// cells are not contiguous, and the remap below tolerates it.
             imgs: Vec<u64>,
         }
-        let runs: Vec<Run<'a>> = ev
-            .cells
-            .par_chunks(chunk_len)
-            .map(|cells| {
+        let cells = &ev.cells;
+        let runs: Vec<Run> = (0..cells.len().div_ceil(chunk_len))
+            .into_par_iter()
+            .map(|run| run * chunk_len)
+            .map(|start| {
                 let mut run = Run {
                     buckets: vec![Vec::new(); k * a],
                     imgs: Vec::new(),
                 };
                 let mut last_cat: Option<(u64, Option<usize>)> = None;
                 let mut last_img: Option<(u64, u32)> = None;
-                for pair in cells.iter().flatten() {
+                for pair in start..(start + chunk_len).min(cells.len()) {
+                    let (image_id, category_id) = cells.ids(pair);
                     let k_idx = match last_cat {
-                        Some((id, k_idx)) if id == pair.category_id => k_idx,
+                        Some((id, k_idx)) if id == category_id => k_idx,
                         _ => {
-                            let k_idx = cat_id_to_k_idx.get(&pair.category_id).copied();
-                            last_cat = Some((pair.category_id, k_idx));
+                            let k_idx = cat_id_to_k_idx.get(&category_id).copied();
+                            last_cat = Some((category_id, k_idx));
                             k_idx
                         }
                     };
@@ -183,19 +155,15 @@ impl<'a> EvalGrouping<'a> {
                         // An image gets a slot only once a cell of it lands in a
                         // bucket, so a run with nothing in scope has no slots.
                         let local = match last_img {
-                            Some((id, local)) if id == pair.image_id => local,
+                            Some((id, local)) if id == image_id => local,
                             _ => {
                                 let local = run.imgs.len() as u32;
-                                run.imgs.push(pair.image_id);
-                                last_img = Some((pair.image_id, local));
+                                run.imgs.push(image_id);
+                                last_img = Some((image_id, local));
                                 local
                             }
                         };
-                        let cell = CellRef {
-                            pair,
-                            a_idx: at_eval,
-                        };
-                        run.buckets[k_idx * a + a_idx].push((cell, local));
+                        run.buckets[k_idx * a + a_idx].push((CellRef::new(pair, at_eval), local));
                     }
                 }
                 run
@@ -218,7 +186,7 @@ impl<'a> EvalGrouping<'a> {
             .collect();
 
         // Concatenate the runs bucket by bucket, in run order.
-        let grouped: Vec<Vec<(CellRef<'a>, u32)>> = (0..k * a)
+        let grouped: Vec<Vec<(CellRef, u32)>> = (0..k * a)
             .into_par_iter()
             .map(|b| {
                 let total: usize = runs.iter().map(|run| run.buckets[b].len()).sum();
@@ -270,7 +238,7 @@ impl<'a> EvalGrouping<'a> {
         mask
     }
 
-    fn cell(&self, k_idx: usize, a_idx: usize) -> &[(CellRef<'a>, u32)] {
+    fn cell(&self, k_idx: usize, a_idx: usize) -> &[(CellRef, u32)] {
         &self.grouped[k_idx * self.a + a_idx]
     }
 }
@@ -291,6 +259,7 @@ pub(super) fn accumulate_impl(
     img_filter: Option<&HashSet<u64>>,
 ) -> AccumulatedEval {
     let params = &grouping.eval().params;
+    let cells = &grouping.eval().cells;
     let want_all_points = grouping.eval().eval_mode == EvalMode::OpenImages;
     let t = params.iou_thrs.len();
     let r = params.rec_thrs.len();
@@ -358,10 +327,7 @@ pub(super) fn accumulate_impl(
 
             // Independent of `max_det` — the cap truncates detections, never
             // ground truth — so it is summed once for the whole M axis.
-            let num_gt: usize = evals
-                .iter()
-                .map(|e| e.area().num_gt_in_denominator as usize)
-                .sum();
+            let num_gt: usize = evals.iter().map(|&e| cells.num_gt(e) as usize).sum();
             if num_gt == 0 {
                 return;
             }
@@ -405,14 +371,15 @@ pub(super) fn accumulate_impl(
             let mut rank_in_cell: Vec<usize> = Vec::new();
             let mut all_dt_matched: Vec<Vec<bool>> = vec![Vec::new(); t];
             let mut all_dt_ignore: Vec<Vec<bool>> = vec![Vec::new(); t];
-            for cell in &evals {
-                let scores = &cell.pair.dt_scores;
+            for &cell in &evals {
+                let scores = cells.scores(cell.pair());
                 let nd = scores.len().min(cap);
                 all_dt_scores.extend_from_slice(&scores[..nd]);
                 rank_in_cell.extend(0..nd);
+                let block = cells.block(cell);
                 for t_idx in 0..t {
-                    all_dt_matched[t_idx].extend(cell.matched(t_idx).take(nd));
-                    all_dt_ignore[t_idx].extend(cell.ignore(t_idx).take(nd));
+                    all_dt_matched[t_idx].extend(block.matched(t_idx).take(nd));
+                    all_dt_ignore[t_idx].extend(block.ignore(t_idx).take(nd));
                 }
             }
 
@@ -621,9 +588,10 @@ mod tests {
     /// concatenated out of order shows up as a difference.
     ///
     /// Returns, per `k_idx * a + a_idx` bucket, the cells in order as
-    /// `(cell address, image_id)`; slot numbers are not compared (they are
-    /// internal), only that they are consistent — see `assert_slots_consistent`.
-    fn reference_grouping(ev: &COCOeval) -> Vec<Vec<(*const PairRecord, usize, u64)>> {
+    /// `(pair index, evaluate-time area index, image_id)`; slot numbers are not
+    /// compared (they are internal), only that they are consistent — see
+    /// `assert_slots_consistent`.
+    fn reference_grouping(ev: &COCOeval) -> Vec<Vec<(usize, usize, u64)>> {
         let params = &ev.params;
         let k = if params.use_cats {
             params.cat_ids.len()
@@ -654,15 +622,15 @@ mod tests {
             .params
             .area_ranges;
         let mut grouped = vec![Vec::new(); k * a];
-        for pair in ev.cells.iter().flatten() {
-            let Some(&k_idx) = cat_id_to_k_idx.get(&pair.category_id) else {
+        for pair in 0..ev.cells.len() {
+            let Some(&k_idx) = cat_id_to_k_idx.get(&ev.cells.ids(pair).1) else {
                 continue;
             };
             for (at_eval, ar) in evaluated_ranges.iter().enumerate() {
                 let Some(&a_idx) = area_rng_to_idx.get(&area_key(ar.range)) else {
                     continue;
                 };
-                grouped[k_idx * a + a_idx].push((std::ptr::from_ref(pair), at_eval, pair.image_id));
+                grouped[k_idx * a + a_idx].push((pair, at_eval, ev.cells.ids(pair).0));
             }
         }
         grouped
@@ -673,6 +641,20 @@ mod tests {
             label: label.into(),
             range: [lo, hi],
         }
+    }
+
+    /// Every visited pair has a ground truth or a detection, so the fixture
+    /// fills one cell per pair.
+    fn assert_fixture_filled(ev: &COCOeval) {
+        assert_eq!(
+            ev.cells.len(),
+            ev.eval_inputs
+                .as_ref()
+                .expect("evaluated")
+                .sparse_pairs
+                .len(),
+            "fixture must fill every pair"
+        );
     }
 
     /// Six images × three categories. Most (image, category) pairs carry both a
@@ -763,15 +745,9 @@ mod tests {
         let got = EvalGrouping::build_chunked(ev, chunk_len);
         assert_eq!(got.grouped.len(), expected.len(), "{label}: bucket count");
         for (b, (got_bucket, want_bucket)) in got.grouped.iter().zip(&expected).enumerate() {
-            let got_cells: Vec<(*const PairRecord, usize, u64)> = got_bucket
+            let got_cells: Vec<(usize, usize, u64)> = got_bucket
                 .iter()
-                .map(|&(cell, _)| {
-                    (
-                        std::ptr::from_ref(cell.pair),
-                        cell.a_idx,
-                        cell.pair.image_id,
-                    )
-                })
+                .map(|&(cell, _)| (cell.pair(), cell.area(), ev.cells.ids(cell.pair()).0))
                 .collect();
             assert_eq!(
                 got_cells, *want_bucket,
@@ -787,7 +763,7 @@ mod tests {
         let mut slot_of: HashMap<u64, u32> = HashMap::new();
         let mut img_of: HashMap<u32, u64> = HashMap::new();
         for &(cell, slot) in g.grouped.iter().flatten() {
-            let image_id = cell.pair.image_id;
+            let image_id = g.eval().cells.ids(cell.pair()).0;
             assert_eq!(
                 *slot_of.entry(image_id).or_insert(slot),
                 slot,
@@ -802,11 +778,11 @@ mod tests {
         let keep: HashSet<u64> = [2u64, 5].into_iter().collect();
         let mask = g.image_mask(Some(&keep));
         for &(cell, slot) in g.grouped.iter().flatten() {
+            let image_id = g.eval().cells.ids(cell.pair()).0;
             assert_eq!(
                 mask[slot as usize],
-                keep.contains(&cell.pair.image_id),
-                "{label}: image_mask disagrees with the filter for image {}",
-                cell.pair.image_id
+                keep.contains(&image_id),
+                "{label}: image_mask disagrees with the filter for image {image_id}"
             );
         }
     }
@@ -820,14 +796,8 @@ mod tests {
         let mut ev = make_eval(true);
         // `evaluate()` visits only (image, category) pairs that hold a ground
         // truth or a detection, and since 1.1 keeps every one of them (as
-        // pycocotools does), so outside LVIS negatives no slot comes back
-        // empty. The grouping still has to step over empty slots; blank one
-        // by hand so the walk is exercised.
-        assert!(
-            ev.cells.iter().all(Option::is_some),
-            "fixture must fill every pair"
-        );
-        ev.cells[5] = None;
+        // pycocotools does): one cell per visited pair, none empty.
+        assert_fixture_filled(&ev);
         for chunk_len in CHUNKS {
             assert_same_grouping(&ev, chunk_len, "as evaluated");
         }
@@ -871,7 +841,7 @@ mod tests {
     #[test]
     fn grouping_matches_sequential_walk_without_categories() {
         let ev = make_eval(false);
-        assert!(ev.cells.iter().any(Option::is_some));
+        assert_fixture_filled(&ev);
         for chunk_len in CHUNKS {
             assert_same_grouping(&ev, chunk_len, "use_cats = false");
         }
