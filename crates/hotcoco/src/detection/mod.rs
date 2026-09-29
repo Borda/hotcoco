@@ -55,10 +55,10 @@ use crate::detection::hierarchy::Hierarchy;
 use crate::params::{IouType, Params};
 use mode::FreqGroups;
 
-/// How many of `n` items each parallel run takes: a few runs per thread —
-/// enough to balance, few enough that per-run setup stays noise.
-pub(super) fn run_len(n: usize) -> usize {
-    n.div_ceil(4 * rayon::current_num_threads()).max(1)
+/// How many of `n` items each parallel run takes, at least one.
+fn run_len(n: usize) -> usize {
+    n.div_ceil(crate::RUNS_PER_THREAD * rayon::current_num_threads())
+        .max(1)
 }
 
 /// COCO evaluation engine.

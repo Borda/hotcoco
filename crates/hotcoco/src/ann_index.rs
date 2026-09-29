@@ -236,6 +236,8 @@ impl IdIndex {
 mod tests {
     use std::collections::HashMap;
 
+    use rand::{Rng, SeedableRng};
+
     use super::*;
 
     fn ann(id: u64, image_id: u64, category_id: u64) -> Annotation {
@@ -285,15 +287,9 @@ mod tests {
     /// than two categories all run — checked against naive maps.
     #[test]
     fn index_agrees_with_naive_maps_at_scale() {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            state >> 33
-        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x9E37_79B9);
         let anns: Vec<Annotation> = (0..3000)
-            .map(|i| ann(i * 7 + 1, next() % 41, next() % 11))
+            .map(|i| ann(i * 7 + 1, rng.random_range(0..41), rng.random_range(0..11)))
             .collect();
         let mut by_img: HashMap<u64, Vec<u64>> = HashMap::new();
         let mut by_pair: HashMap<(u64, u64), Vec<u64>> = HashMap::new();

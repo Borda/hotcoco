@@ -75,6 +75,12 @@ pub mod quality;
 pub mod report;
 pub mod types;
 
+/// How many parallel runs each thread draws when work is cut into runs: a
+/// few, so a thread that draws the heavy items (polygon-dense records, busy
+/// image-category pairs) does not hold everyone else, and few enough that
+/// per-run setup stays noise.
+pub(crate) const RUNS_PER_THREAD: usize = 4;
+
 pub use coco::COCO;
 pub use convert::{
     ConvertError, CvatImportStats, CvatStats, DotaStats, OidStats, VocStats, YoloStats,

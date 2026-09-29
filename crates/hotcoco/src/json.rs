@@ -268,8 +268,8 @@ fn stream_results(src: &mut Source) -> io::Result<Option<Vec<Annotation>>> {
 
 /// The hand walk over a dataset object, or `None` for a shape it does not
 /// expect, which the serde derive then judges. Keys outside the schema are
-/// ignored, a `null` or missing `annotations` reads as none, and a repeated
-/// key keeps its last value, as Python's `json` does. The struct literal at
+/// ignored, a missing `annotations` reads as none, and a repeated key keeps
+/// its last value, as Python's `json` does. The struct literal at
 /// the end is deliberate: a field added to [`Dataset`] fails to compile here
 /// instead of being silently dropped.
 fn stream_dataset(src: &mut Source) -> io::Result<Option<Dataset>> {
@@ -295,10 +295,6 @@ fn stream_dataset(src: &mut Source) -> io::Result<Option<Dataset>> {
                 "licenses" => take(src, pos, &mut licenses)?,
                 "images" => take_array(src, pos, &mut images, false)?,
                 "categories" => take_array(src, pos, &mut categories, false)?,
-                "annotations" if src.byte(pos)? == Some(b'n') => {
-                    annotations = Vec::new();
-                    src.value::<()>(pos)?.map(|((), next)| next)
-                }
                 "annotations" => take_array(src, pos, &mut annotations, true)?,
                 _ => src.value::<IgnoredAny>(pos)?.map(|(_, next)| next),
             };
@@ -345,12 +341,10 @@ fn take_array<T: DeserializeOwned + Send>(
     slot: &mut Vec<T>,
     bulk: bool,
 ) -> io::Result<Option<usize>> {
-    let parsed = if src.byte(pos)? == Some(b'[') {
-        stream_array(src, pos, bulk)?
-    } else {
-        src.value::<Vec<T>>(pos)?
-    };
-    Ok(parsed.map(|(records, next)| {
+    if src.byte(pos)? != Some(b'[') {
+        return take(src, pos, slot);
+    }
+    Ok(stream_array(src, pos, bulk)?.map(|(records, next)| {
         *slot = records;
         next
     }))
@@ -480,16 +474,12 @@ fn results_whole(bytes: &[u8]) -> serde_json::Result<Vec<Annotation>> {
 /// How many runs to cut `len` bytes of array into: none below one chunk's
 /// worth, and no more than a few per thread.
 fn chunk_count(len: usize) -> usize {
-    (len / MIN_CHUNK_BYTES).min(RUNS_PER_THREAD * rayon::current_num_threads())
+    (len / MIN_CHUNK_BYTES).min(crate::RUNS_PER_THREAD * rayon::current_num_threads())
 }
 
 /// Below this many bytes per chunk, cutting the array up costs more than the
 /// parallel parse saves.
 const MIN_CHUNK_BYTES: usize = 64 * 1024;
-
-/// Several runs per thread, so a thread that draws polygon-heavy records does
-/// not hold the block.
-const RUNS_PER_THREAD: usize = 4;
 
 /// The records from `start`, the first of a run, in parallel runs cut at
 /// guessed boundaries, up to `stop` — a record start the runs must hand over
@@ -1077,8 +1067,6 @@ mod tests {
         assert!(ds.info.is_none());
         let ds = dataset(br#"{"images": []}"#).expect("dataset parses");
         assert!(ds.annotations.is_empty());
-        let ds = dataset(br#"{"annotations": null}"#).expect("null annotations read as none");
-        assert!(ds.annotations.is_empty());
         assert!(
             dataset(br"{}")
                 .expect("empty object")
@@ -1086,7 +1074,7 @@ mod tests {
                 .is_empty()
         );
         // Repeated keys keep the last value, as Python's `json` does.
-        let ds = dataset(br#"{"images": [{"id": 1}], "annotations": null, "images": []}"#)
+        let ds = dataset(br#"{"images": [{"id": 1}], "annotations": [], "images": []}"#)
             .expect("repeated key");
         assert!(ds.images.is_empty() && ds.annotations.is_empty());
         // Shapes the walk declines, and the derive's verdict on each.
@@ -1095,6 +1083,7 @@ mod tests {
             br#"["not", "an", "object"]"#,
             br#"{"images": [}"#,
             br#"{"images": null}"#,
+            br#"{"annotations": null}"#,
             br#"{"annotations": nul}"#,
             br"[1]",
         ] {

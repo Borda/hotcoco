@@ -116,17 +116,29 @@ impl Extra {
 
     /// The value under `key`.
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
-        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.index_of(key).map(|at| &self.0[at].1)
     }
 
     /// The value under `key`, mutably.
     pub fn get_mut(&mut self, key: &str) -> Option<&mut serde_json::Value> {
-        self.0.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.index_of(key).map(|at| &mut self.0[at].1)
     }
 
     /// Whether `key` is present.
     pub fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
+        self.index_of(key).is_some()
+    }
+
+    fn index_of(&self, key: &str) -> Option<usize> {
+        self.0.iter().position(|(k, _)| k == key)
+    }
+
+    /// Run `f` over the entries as a vector, then box them again.
+    fn edit<R>(&mut self, f: impl FnOnce(&mut Vec<(String, serde_json::Value)>) -> R) -> R {
+        let mut entries = Vec::from(std::mem::take(&mut self.0));
+        let out = f(&mut entries);
+        self.0 = entries.into_boxed_slice();
+        out
     }
 
     /// Set `key` to `value`; the previous value, if any. An existing key
@@ -136,19 +148,14 @@ impl Extra {
         key: impl Into<String>,
         value: serde_json::Value,
     ) -> Option<serde_json::Value> {
-        let mut entries = Vec::from(std::mem::take(&mut self.0));
-        let previous = upsert(&mut entries, key.into(), value);
-        self.0 = entries.into_boxed_slice();
-        previous
+        let key = key.into();
+        self.edit(|entries| upsert(entries, key, value))
     }
 
     /// Remove `key`; its value, if it was present.
     pub fn remove(&mut self, key: &str) -> Option<serde_json::Value> {
-        let at = self.0.iter().position(|(k, _)| k == key)?;
-        let mut entries = Vec::from(std::mem::take(&mut self.0));
-        let (_, value) = entries.remove(at);
-        self.0 = entries.into_boxed_slice();
-        Some(value)
+        let at = self.index_of(key)?;
+        Some(self.edit(|entries| entries.remove(at).1))
     }
 
     /// The `(key, value)` entries, in file order.

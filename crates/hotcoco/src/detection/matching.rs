@@ -185,6 +185,12 @@ fn arena_index(i: usize) -> u32 {
     u32::try_from(i).expect("cell arena positions are u32")
 }
 
+/// The bit words a pair of `nd` detections takes: `2 * n_thr` rows of `nd`
+/// bits per area range, packed end to end.
+fn words_for(n_thr: usize, n_areas: usize, nd: usize) -> usize {
+    (2 * n_thr * n_areas * nd).div_ceil(64)
+}
+
 /// A pair with nothing to gather, in the layout pass of [`Cells::build`].
 const NO_PAIR: u32 = u32::MAX;
 
@@ -193,7 +199,8 @@ impl Cells {
     /// says how many scores a pair will push (`None` for one with nothing to
     /// gather), then `fill` writes each run of `run_len` pairs through its
     /// [`CellWriter`], in parallel, into that run's window of every arena.
-    /// `fill` must push exactly the pairs `nd` admitted, with those counts.
+    /// `fill` must push exactly the pairs `nd` admitted, with those counts,
+    /// and `run_len` is at least one.
     pub(super) fn build(
         params: &Params,
         pairs: &[(u64, u64)],
@@ -202,19 +209,22 @@ impl Cells {
         fill: impl Fn(&[(u64, u64)], &mut CellWriter<'_>) + Sync,
     ) -> Self {
         let (n_thr, n_areas) = (params.iou_thrs.len(), params.area_ranges.len());
-        let words_of = |nd: usize| (2 * n_thr * n_areas * nd).div_ceil(64);
         let nds: Vec<u32> = pairs
             .par_iter()
             .map(|&(img_id, cat_id)| nd(img_id, cat_id).map_or(NO_PAIR, arena_index))
             .collect();
         // Per run: pairs kept, scores, and bit words.
         let runs: Vec<(usize, usize, usize)> = nds
-            .par_chunks(run_len.max(1))
+            .par_chunks(run_len)
             .map(|run| {
                 run.iter()
                     .filter(|&&nd| nd != NO_PAIR)
                     .fold((0, 0, 0), |(p, s, w), &nd| {
-                        (p + 1, s + nd as usize, w + words_of(nd as usize))
+                        (
+                            p + 1,
+                            s + nd as usize,
+                            w + words_for(n_thr, n_areas, nd as usize),
+                        )
                     })
             })
             .collect();
@@ -274,7 +284,7 @@ impl Cells {
         }
         writers
             .par_iter_mut()
-            .zip(pairs.par_chunks(run_len.max(1)))
+            .zip(pairs.par_chunks(run_len))
             .for_each(|(writer, run)| {
                 fill(run, writer);
                 debug_assert!(writer.is_full(), "a run wrote what its layout pass counted");
@@ -393,7 +403,7 @@ impl CellWriter<'_> {
         self.bit = self.n_words * 64;
         self.n_pairs += 1;
         self.n_scores += scores.len();
-        self.n_words += (2 * self.n_thr * self.n_areas * scores.len()).div_ceil(64);
+        self.n_words += words_for(self.n_thr, self.n_areas, scores.len());
     }
 
     /// The current pair's next area range: its denominator, then its
