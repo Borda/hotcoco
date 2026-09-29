@@ -230,6 +230,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`hotcoco.browse` runs on Python 3.9 again.** The two FastAPI route handlers
+  in `server.py` spelled their optional query parameters `str | None`. Every
+  other annotation in the package is a string under `from __future__ import
+  annotations`, but FastAPI evaluates route signatures at runtime, and 3.9
+  cannot evaluate a PEP 604 union, so `create_app()` raised `TypeError` on the
+  floor interpreter the wheel is built for. They are `Optional[str]` now. CI
+  runs the browse tests on 3.9, which is how this surfaced.
+
 - **`eval["precision"]`, `eval["recall"]`, and `eval["scores"]` are bit-identical
   to pycocotools' arrays.** They agreed to an ulp before; two small things kept
   them from being the same bits, and neither ever moved a headline metric.
