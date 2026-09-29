@@ -16,6 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The loader reads a file in blocks instead of whole.** `COCO()` and
+  `load_res()` read the entire file into memory and parsed it from there, so
+  the peak while loading was the file's bytes plus its records — and a
+  keypoints results file, which spells out 17 keypoints per detection in
+  text, outweighs its own records. The file is now read 4 MB at a time: the
+  annotations in each block are parsed in parallel while the next block is
+  read, moved into the output vector as the block finishes, and the record a
+  block ends inside waits for the next. The output vector is reserved from
+  the first block's record density, grown only if that falls short, and
+  shrunk to what it holds; `images` and `categories` stream the same way,
+  record by record, and come out exactly sized too. Peak heap over the live
+  records while loading the benchmark's 10× results (367,810 detections)
+  falls from 56 MB to 4 MB for bbox, 175 MB to 4 MB for segm, and 316 MB to
+  3 MB for keypoints — a 325 MB keypoints file loads with 237 MB — and from
+  17 MB to 8 MB for val2017's ground truth; the results load is also 5–10%
+  faster, since the
+  read overlaps the parse and a buffer reused across blocks is not faulted in
+  page by page like a fresh one. A block whose records carry `},{` inside
+  them — a nested list of objects, as panoptic `segments_info` is — parses
+  serially instead of in parallel runs, still a block at a time. A file with
+  `NaN` or `Infinity` tokens is read whole and sanitized, then streamed
+  from memory, so its peak is its bytes plus its records; a malformed file
+  is read whole so that serde can report where it fails. Values are
+  unchanged.
+
 - **Unknown keys cost a small vector, not a B-tree.** `Annotation`, `Image`,
   and `Category` keep keys outside the COCO schema in `extra`, which was a
   `serde_json::Map`: a B-tree whose first entry allocates a node of about
