@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use numpy::{PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
@@ -75,33 +76,11 @@ pub(crate) fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
             pyo3::exceptions::PyIOError::new_err(e.to_string())
         }
         Error::Json(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
-        Error::JsonParse(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
         Error::Convert(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+        // A lookup failure, so the exception a mapping lookup raises.
+        e @ Error::UnknownAnnIds(_) => pyo3::exceptions::PyKeyError::new_err(e.to_string()),
         Error::Other(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
     }
-}
-
-/// Annotation ids the dataset does not have — a lookup failure, so `KeyError`.
-///
-/// A sibling of [`to_pyerr`] rather than an arm inside it: the core returns
-/// `UnknownAnnIds` as its own type precisely so this one failure maps to the
-/// exception Python callers expect from a mapping lookup, and the message has
-/// one owner ([`hotcoco_core::UnknownAnnIds`]).
-pub(crate) fn unknown_ann_ids_to_pyerr(err: hotcoco_core::UnknownAnnIds) -> PyErr {
-    pyo3::exceptions::PyKeyError::new_err(err.to_string())
-}
-
-/// Read an annotation id from a Python mapping key.
-///
-/// Through `i64` rather than straight to `u64`: a negative id is a lookup that
-/// cannot succeed, and `KeyError` says that, where a bare `u64` extract reports
-/// `OverflowError` and reads like a bug in the caller's arithmetic. A non-integer
-/// key still raises the `TypeError` the extract produces.
-fn extract_ann_id(key: &Bound<'_, PyAny>) -> PyResult<u64> {
-    let id: i64 = key.extract()?;
-    u64::try_from(id).map_err(|_| {
-        pyo3::exceptions::PyKeyError::new_err(format!("annotation id {id} not in this dataset"))
-    })
 }
 
 /// Emit a `UserWarning` through Python's `warnings` machinery.
@@ -148,9 +127,9 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 }
 
 use convert::{
-    ANNOTATION_KEYS, IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
-    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_dataset,
-    rle_to_coco_py, set_scalar_ann_field,
+    IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
+    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, merge_ann_dict_checked,
+    py_to_annotation, py_to_dataset, rle_to_coco_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -163,9 +142,12 @@ use convert::{
 /// this dataset. It is used by `browse()` and `coco explore` to locate
 /// image files. Propagated automatically through `filter`, `split`,
 /// `sample`, and `load_res`.
+// Clone shares the dataset: `COCO` is plain data with no interior mutability,
+// so wrappers over one `Arc` cannot observe each other by construction.
 #[pyclass(name = "COCO", subclass, from_py_object)]
+#[derive(Clone)]
 struct PyCOCO {
-    inner: hotcoco_core::COCO,
+    inner: Arc<hotcoco_core::COCO>,
     /// Root directory for image files. Used by `browse()` and `coco explore`.
     /// Set at construction time or assign directly: ``coco.image_dir = "/data/images"``.
     #[pyo3(get, set)]
@@ -174,15 +156,15 @@ struct PyCOCO {
 
 /// Constructors, kept out of `#[pymethods]` so they stay Rust-only.
 ///
-/// Every `PyCOCO` in this file comes from one of these three. The distinction
-/// they encode is whether the new object inherits `image_dir`: a dataset derived
+/// The distinction they encode is whether the new object inherits
+/// `image_dir`: a dataset derived
 /// from this one sits in the same image directory, while one built from a
 /// foreign format or merged from several sources does not.
 impl PyCOCO {
     /// A dataset derived from this one — same images, so same `image_dir`.
     fn derived(&self, inner: hotcoco_core::COCO) -> PyCOCO {
         PyCOCO {
-            inner,
+            inner: Arc::new(inner),
             image_dir: self.image_dir.clone(),
         }
     }
@@ -193,19 +175,18 @@ impl PyCOCO {
     }
 
     /// A dataset with no image directory to inherit: a conversion from a foreign
-    /// format, a merge whose inputs came from different directories, or a view
-    /// onto an evaluator's own copy.
+    /// format, or a merge whose inputs came from different directories.
     fn without_image_dir(dataset: hotcoco_core::Dataset) -> PyCOCO {
+        Self::shared(hotcoco_core::COCO::from_dataset(dataset))
+    }
+
+    /// No image directory either; takes a `COCO` to own or an `Arc` to share,
+    /// which is how the evaluator's datasets are handed out without a copy.
+    fn shared(inner: impl Into<Arc<hotcoco_core::COCO>>) -> PyCOCO {
         PyCOCO {
-            inner: hotcoco_core::COCO::from_dataset(dataset),
+            inner: inner.into(),
             image_dir: None,
         }
-    }
-}
-
-impl Clone for PyCOCO {
-    fn clone(&self) -> Self {
-        self.derived_from(self.inner.dataset.clone())
     }
 }
 
@@ -232,7 +213,10 @@ impl PyCOCO {
             }
             None => hotcoco_core::COCO::from_dataset(hotcoco_core::Dataset::default()),
         };
-        Ok(PyCOCO { inner, image_dir })
+        Ok(PyCOCO {
+            inner: Arc::new(inner),
+            image_dir,
+        })
     }
 
     #[pyo3(signature = (img_ids=IdList::default(), cat_ids=IdList::default(), area_rng=None, iscrowd=None))]
@@ -1070,10 +1054,7 @@ impl PyCOCO {
 
         self.inner
             .load_res_anns(anns)
-            .map(|inner| PyCOCO {
-                inner,
-                image_dir: None,
-            })
+            .map(PyCOCO::shared)
             .map_err(to_pyerr)
     }
 
@@ -1084,172 +1065,86 @@ impl PyCOCO {
     /// makes the follow-up `createIndex()` a no-op.
     #[setter]
     fn set_dataset(&mut self, dataset: &Bound<'_, PyDict>) -> PyResult<()> {
-        self.inner = hotcoco_core::COCO::from_dataset(py_to_dataset(dataset)?);
+        self.inner = Arc::new(hotcoco_core::COCO::from_dataset(py_to_dataset(dataset)?));
         Ok(())
     }
 
-    /// Re-index the current dataset — pycocotools semantics. Under the
-    /// assignment flow the `dataset` setter has already indexed, so this is
-    /// a formality kept for the canonical `coco.dataset = d;
-    /// coco.createIndex()` sequence.
-    fn create_index(&mut self) {
-        self.inner.create_index();
-    }
+    /// A no-op — see the ``dataset`` setter, which indexes on assignment. Kept
+    /// for pycocotools' ``coco.dataset = d; coco.createIndex()`` sequence.
+    fn create_index(_slf: PyRef<'_, Self>) {}
 
     #[pyo3(name = "createIndex")]
-    fn create_index_camel(&mut self) {
-        self.create_index();
-    }
+    fn create_index_camel(_slf: PyRef<'_, Self>) {}
 
-    /// Replace whole annotations, matched by ``id``, and re-index immediately.
+    /// Edit annotations that are already loaded, matched by ``id``, keeping
+    /// the indices current.
     ///
-    /// The targeted counterpart to ``coco.dataset = d``: it edits the
-    /// annotations you name instead of rebuilding the dataset.
-    ///
-    /// Each dict **replaces** its annotation rather than merging into it: keys
-    /// you leave out come back as their defaults. Pass a full annotation dict,
-    /// or use :meth:`set_ann_field` to change one field and keep the rest.
-    /// Keys outside the COCO schema are preserved, as everywhere else.
-    ///
-    /// A ``COCOeval`` copies both datasets when it is constructed, so an
-    /// evaluator built before this call keeps evaluating the old annotations.
-    /// Mutate first, then construct the evaluator.
+    /// Each dict is merged into the annotation with the same ``id``: the keys
+    /// you pass are set, every other field keeps its value, and a key outside
+    /// the COCO schema is a custom key. The targeted counterpart to
+    /// ``coco.dataset = d``, which is still the way to add or remove
+    /// annotations or to drop a key. An evaluator built before the edit keeps
+    /// the annotations it was built with. The API reference for
+    /// ``update_anns`` has the full contract.
     ///
     /// Parameters
     /// ----------
     /// anns : list of dict
-    ///     Annotation dicts, each with an ``id`` that is already in the
-    ///     dataset.
+    ///     Partial or whole annotation dicts, each with an ``id`` that is
+    ///     already in the dataset.
+    /// create : bool, keyword-only, default False
+    ///     Allow a dict's schema-unknown key to create a new custom key on
+    ///     an annotation that does not have it yet.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///     If a dict has no ``id``, or names an ``id`` this dataset does not
-    ///     have. Nothing is written in that case — an unknown id is a mistake
-    ///     worth surfacing, not an edit to skip quietly.
-    /// TypeError
-    ///     If ``anns`` is not a list, or an element is not a dict.
-    /// ValueError
-    ///     If a dict is missing a required field or holds a value that does not
-    ///     fit it — the same errors the ``dataset`` setter raises.
+    ///     For a dict without an ``id``, ids the dataset does not have, or a
+    ///     key that is neither a COCO field nor a custom key already on that
+    ///     annotation when ``create`` is False — a misspelled schema field
+    ///     (``"Area"``, ``"iscrowed"``) raises here instead of quietly
+    ///     landing beside the field you meant to change. Nothing is written
+    ///     in any of those cases.
+    ///     ``TypeError`` and ``ValueError`` as the ``dataset`` setter raises.
     ///
     /// Examples
     /// --------
-    /// >>> anns = coco.dataset["annotations"]
-    /// >>> for ann in anns:
-    /// ...     ann["area"] = ann["bbox"][2] * ann["bbox"][3]
-    /// >>> coco.update_anns(anns)
-    fn update_anns(&mut self, anns: &Bound<'_, PyList>) -> PyResult<()> {
+    /// >>> coco.update_anns([{"id": ann["id"], "area": mask.area(coco.ann_to_rle(ann))}
+    /// ...                   for ann in coco.dataset["annotations"]])
+    #[pyo3(signature = (anns, *, create=false))]
+    fn update_anns(&mut self, anns: &Bound<'_, PyList>, create: bool) -> PyResult<()> {
         let mut updated = Vec::with_capacity(anns.len());
+        let mut missing = Vec::new();
         for item in anns {
             let dict = item.cast::<PyDict>().map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err("update_anns: list elements must be dicts")
             })?;
-            // Before the conversion, not after: `py_to_annotation` defaults a
-            // missing id to 0, which would silently overwrite whichever
-            // annotation carries that id, and it rejects a dict missing
-            // `image_id` first — so a check placed afterwards never sees the
-            // annotation whose only problem is the absent id.
-            if dict.get_item("id")?.is_none() {
+            let Some(id) = dict.get_item(pyo3::intern!(dict.py(), "id"))? else {
                 return Err(pyo3::exceptions::PyKeyError::new_err(
                     "every annotation passed to update_anns() needs an 'id'",
                 ));
-            }
-            updated.push(py_to_annotation(dict)?);
-        }
-        self.inner
-            .update_anns(updated)
-            .map_err(unknown_ann_ids_to_pyerr)
-    }
-
-    /// Set one field on the named annotations, and re-index immediately.
-    ///
-    /// The narrow form of :meth:`update_anns`: every other field of each
-    /// annotation is carried over untouched, so a partial edit cannot drop the
-    /// rest of the record. Switching each annotation's ``area`` between its box
-    /// area and its mask area between IoU types is the case this exists for —
-    /// an edit made through the ``dataset`` copy would not land at all.
-    ///
-    /// A field outside the COCO schema is a custom key. Setting one that the
-    /// annotations already carry works as it does for any other field; adding a
-    /// new one needs ``create=True``, so that a misspelled schema field —
-    /// ``"Area"``, ``"iscrowed"`` — raises instead of quietly landing beside the
-    /// field you meant to change.
-    ///
-    /// Parameters
-    /// ----------
-    /// field : str
-    ///     Annotation key to set, for example ``"area"`` or ``"iscrowd"``.
-    /// values : dict
-    ///     Annotation id to new value.
-    /// create : bool, keyword-only, default False
-    ///     Allow ``field`` to be a custom key the annotations do not have yet.
-    ///
-    /// Raises
-    /// ------
-    /// KeyError
-    ///     If an annotation id is not in this dataset, or ``field`` is neither a
-    ///     COCO field nor a custom key already on the annotation and ``create``
-    ///     is False. Nothing is written in either case.
-    /// TypeError
-    ///     If a value does not fit the field — ``{1: "big"}`` for ``"area"``.
-    /// ValueError
-    ///     If ``field`` is ``"id"``.
-    ///
-    /// Examples
-    /// --------
-    /// >>> mask_areas = {ann["id"]: mask.area(coco.ann_to_rle(ann))
-    /// ...               for ann in coco.dataset["annotations"]}
-    /// >>> coco.set_ann_field("area", mask_areas)
-    #[pyo3(signature = (field, values, *, create=false))]
-    fn set_ann_field(
-        &mut self,
-        py: Python<'_>,
-        field: &str,
-        values: &Bound<'_, PyDict>,
-        create: bool,
-    ) -> PyResult<()> {
-        if field == "id" {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "set_ann_field() cannot change 'id' — re-key annotations by assigning \
-                 coco.dataset instead",
-            ));
-        }
-        let known = ANNOTATION_KEYS.contains(&field);
-        let mut updated = Vec::with_capacity(values.len());
-        for (key, value) in values.iter() {
-            let ann_id = extract_ann_id(&key)?;
-            let ann = self.inner.get_ann(ann_id).ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!(
-                    "annotation id {ann_id} not in this dataset"
-                ))
-            })?;
-            if !known && !create && !ann.extra.contains_key(field) {
-                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
-                    "'{field}' is not an annotation field, and annotation {ann_id} does not \
-                     carry it as a custom key — check the spelling, or pass create=True to \
-                     add it"
-                )));
-            }
-            // A scalar field is set on a clone. Everything else — a shaped
-            // field, a custom key, a value that does not extract — rebuilds the
-            // annotation through the dict converters, so shapes and type errors
-            // keep coming from the one conversion path rather than from a
-            // second field-name matcher here.
-            if let Some(edited) = set_scalar_ann_field(ann, field, &value) {
-                updated.push(edited);
+            };
+            let id: u64 = convert::extract_int(&id)?;
+            // Merged into a copy, so a bad value further down the list leaves
+            // the dataset untouched; every unknown id is reported at once, as
+            // the core reports them.
+            let Some(mut ann) = self.inner.get_ann(id).cloned() else {
+                missing.push(id);
                 continue;
-            }
-            let obj = annotation_to_py(py, ann)?.into_bound(py);
-            let dict = obj
-                .cast::<PyDict>()
-                .expect("annotation_to_py builds a dict");
-            dict.set_item(field, value)?;
-            updated.push(py_to_annotation(dict)?);
+            };
+            merge_ann_dict_checked(&mut ann, dict, create)?;
+            updated.push(ann);
         }
-        self.inner
+        if !missing.is_empty() {
+            return Err(to_pyerr(hotcoco_core::Error::UnknownAnnIds(missing)));
+        }
+        // A shared dataset is copied on its first edit; an empty edit is none.
+        if updated.is_empty() {
+            return Ok(());
+        }
+        Arc::make_mut(&mut self.inner)
             .update_anns(updated)
-            .map_err(unknown_ann_ids_to_pyerr)
+            .map_err(to_pyerr)
     }
 
     /// Warnings collected while loading and indexing this dataset.
@@ -1267,11 +1162,9 @@ impl PyCOCO {
     ///
     /// **Returns a fresh copy on every access.** Mutating it in place —
     /// ``coco.dataset["annotations"].append(...)`` — changes a temporary and is
-    /// a silent no-op. Three ways to make an edit land, cheapest first:
-    /// :meth:`set_ann_field` for one field across annotations,
-    /// :meth:`update_anns` for whole annotations, and assigning the whole
-    /// dataset back (``coco.dataset = d``) when the images or categories
-    /// change too. All three keep the indices current.
+    /// a silent no-op. To edit annotations, pass the changed keys to
+    /// :meth:`update_anns`; for anything else, take the copy, edit it, and
+    /// assign it back (``coco.dataset = d``). Both keep the indices current.
     #[getter]
     fn dataset(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let ds = &self.inner.dataset;
@@ -1523,8 +1416,9 @@ impl PyParams {
         self.inner.use_cats
     }
     #[setter]
-    fn set_use_cats(&mut self, val: bool) {
-        self.inner.use_cats = val;
+    fn set_use_cats(&mut self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.use_cats = convert::extract_flag(val)?;
+        Ok(())
     }
     #[getter]
     fn expand_dt(&self) -> bool {
@@ -1615,8 +1509,8 @@ impl PyParams {
         self.use_cats()
     }
     #[setter(useCats)]
-    fn set_use_cats_camel(&mut self, val: bool) {
-        self.set_use_cats(val);
+    fn set_use_cats_camel(&mut self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.set_use_cats(val)
     }
 }
 
@@ -1858,8 +1752,8 @@ impl PyCOCOeval {
         }
 
         let iou = parse_iou_type(&iou_type)?;
-        let gt = hotcoco_core::COCO::from_dataset(coco_gt.inner.dataset.clone());
-        let dt = hotcoco_core::COCO::from_dataset(coco_dt.inner.dataset.clone());
+        let gt = Arc::clone(&coco_gt.inner);
+        let dt = Arc::clone(&coco_dt.inner);
 
         let inner = if oid_style {
             if iou != hotcoco_core::IouType::Bbox {
@@ -1895,7 +1789,7 @@ impl PyCOCOeval {
     }
 
     fn accumulate(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.inner.eval_imgs().is_empty() {
+        if !self.inner.evaluated() {
             warn_user(
                 py,
                 "hotcoco: accumulate() called before evaluate(). \
@@ -1917,9 +1811,9 @@ impl PyCOCOeval {
             )?;
         }
 
-        // Re-raise the comparability warnings as real Python warnings.
-        // `COCOeval::summarize` writes them with `eprintln!` to fd 2, which
-        // bypasses `sys.stderr` — invisible in a Jupyter cell, uncatchable by
+        // The comparability warnings are real Python warnings, not the Rust
+        // `summarize()`'s `eprintln!` — fd 2 bypasses `sys.stderr`, so that copy
+        // is invisible in a Jupyter cell and uncatchable by
         // `warnings.catch_warnings`. Emitting here makes filters, -W flags, and
         // pytest.warns all work. Synced via `with_params` so a post-`evaluate()`
         // params mutation still reaches the comparability check.
@@ -1928,13 +1822,14 @@ impl PyCOCOeval {
             warn_user(py, &format!("hotcoco: {w}"))?;
         }
 
-        // `summarize_lines()` rather than `summarize()`: the latter also prints the
-        // same warnings with `eprintln!`, and emitting them on fd 2 *and* as Python
-        // warnings would be duplicate output — the fd-2 copy being invisible to
-        // notebook users is the whole reason for the block above.
-        self.with_params(py, |ev| {
-            let _ = ev.summarize_lines();
-        });
+        // Print through Python's own `print`, not Rust's `println!`: the latter
+        // writes to fd 1 and skips `sys.stdout`, so `contextlib.redirect_stdout`
+        // and notebook cells never see the table.
+        let lines = self.with_params(py, hotcoco_core::COCOeval::summarize_lines);
+        let print = py.import("builtins")?.getattr("print")?;
+        for line in &lines {
+            print.call1((line,))?;
+        }
         Ok(())
     }
 
@@ -2287,12 +2182,13 @@ Examples
 
     /// The ground-truth dataset this evaluator was built from.
     ///
-    /// **Each access returns a fresh copy** — two reads give two independent
-    /// objects, and mutating one never reaches the evaluator. To evaluate
-    /// against different ground truth, construct a new ``COCOeval``.
+    /// Each access returns a new object that shares the evaluator's data
+    /// without copying it. Assigning to its ``dataset`` or calling its
+    /// ``update_anns`` never reaches the evaluator; to evaluate against
+    /// different ground truth, construct a new ``COCOeval``.
     #[getter]
     fn coco_gt(&self) -> PyCOCO {
-        PyCOCO::without_image_dir(self.inner.coco_gt.dataset.clone())
+        PyCOCO::shared(Arc::clone(self.inner.coco_gt()))
     }
 
     #[getter(cocoGt)]
@@ -2302,10 +2198,11 @@ Examples
 
     /// The detection dataset this evaluator was built from.
     ///
-    /// **Each access returns a fresh copy** — see ``coco_gt``.
+    /// Each access returns a new object sharing the evaluator's data — see
+    /// ``coco_gt``.
     #[getter]
     fn coco_dt(&self) -> PyCOCO {
-        PyCOCO::without_image_dir(self.inner.coco_dt.dataset.clone())
+        PyCOCO::shared(Arc::clone(self.inner.coco_dt()))
     }
 
     #[getter(cocoDt)]
@@ -2580,7 +2477,7 @@ Example\n\
             py,
             cal.per_category
                 .iter()
-                .map(|(&cat_id, &ece)| (self.inner.coco_gt.cat_name(cat_id), ece)),
+                .map(|(&cat_id, &ece)| (self.inner.coco_gt().cat_name(cat_id), ece)),
         )?;
 
         let dict = PyDict::new(py);
@@ -2606,7 +2503,7 @@ Example\n\
 
         // If slices is callable, group images by return value
         let slice_map: HashMap<String, Vec<u64>> = if slices.is_callable() {
-            let gt_images = &self.inner.coco_gt.dataset.images;
+            let gt_images = &self.inner.coco_gt().dataset.images;
             let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
             for img in gt_images {
                 // The callable sees the *full* image dict — every standard
@@ -2750,7 +2647,7 @@ Example\n\
             // unknown-id fallback so every surface spells it the same way.
             d.set_item(
                 "dt_category",
-                self.inner.coco_gt.cat_name(le.dt_category_id),
+                self.inner.coco_gt().cat_name(le.dt_category_id),
             )?;
             d.set_item("dt_category_id", le.dt_category_id)?;
 
@@ -2759,7 +2656,7 @@ Example\n\
                     d.set_item("gt_id", gt_id)?;
                     let gt_cat_name = le
                         .gt_category_id
-                        .map(|cid| self.inner.coco_gt.cat_name(cid));
+                        .map(|cid| self.inner.coco_gt().cat_name(cid));
                     d.set_item("gt_category", gt_cat_name)?;
                     d.set_item("gt_category_id", le.gt_category_id)?;
                 }

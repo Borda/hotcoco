@@ -43,7 +43,7 @@ Encode a binary mask to RLE.
 
     | Parameter | Type | Description |
     |-----------|------|-------------|
-    | `mask` | `numpy.ndarray` | 2-D `(H, W)` or 3-D `(H, W, N)`, dtype `uint8` or `bool` |
+    | `mask` | `numpy.ndarray` | 2-D `(H, W)` or 3-D `(H, W, N)`, dtype `uint8`, `bool`, or `int8`. Any memory layout — C-order, Fortran-order, or a sliced view. |
 
     **Returns:**
 
@@ -51,13 +51,13 @@ Encode a binary mask to RLE.
     - 3-D input → `list[dict]` of *N* RLE dicts
 
     ```python
-    rle = mask.encode(m)   # m: (H, W) uint8 array
+    rle = mask.encode(m)   # m: (H, W) uint8 or bool array
     # {"size": [100, 100], "counts": b"..."}
     ```
 
     `bool` masks are accepted as well as `uint8`, which pycocotools does not do:
     torch-side code stores masks as `bool`, so requiring a cast would break the
-    drop-in path for no gain. Wider dtypes raise a `TypeError` naming the dtype.
+    drop-in path for no gain. Wider dtypes raise a `TypeError` naming the dtype and the cast to apply.
 
 === "Rust"
 

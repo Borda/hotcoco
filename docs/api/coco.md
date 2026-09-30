@@ -73,8 +73,8 @@ The full dataset with `images`, `annotations`, and `categories`. Writable in
 Python: assigning a dataset dict replaces the contents and rebuilds the index.
 Reading it returns a copy, so edit the dict and assign it back — see
 [Getters return copies — assign back to apply](../getting-started/migration.md#getters-return-copies-assign-back-to-apply).
-To edit annotations that are already there, [`set_ann_field`](#set_ann_field) and
-[`update_anns`](#update_anns) do it without a full rebuild.
+To edit annotations that are already there, [`update_anns`](#update_anns) does
+it without a full rebuild.
 
 Keys outside the COCO schema (custom metadata on images, annotations, or
 categories) are preserved through load, dataset ops, and `save` — see
@@ -389,95 +389,65 @@ type:
 
 ---
 
-### `set_ann_field`
+### `update_anns`
 
-Set one field on the named annotations, keeping the indices current. Every other
-field of each annotation is carried over, so a partial edit cannot drop the rest
-of the record.
-
-A field outside the COCO schema is a custom key. Setting one the annotations
-already carry works like any other field; adding a new one needs `create=True`,
-so a misspelled schema field — `"Area"`, `"iscrowed"` — raises instead of quietly
-landing beside the field you meant to change.
+Edit annotations that are already loaded, matched by `id`, keeping the indices
+current. In Python each dict is **merged** into the annotation with the same
+`id`: the keys you pass are set and every other field keeps its value, so a
+one-field edit is a two-key dict. A key outside the COCO schema is a custom key,
+added or replaced like any other. IDs do not move, so only an edit that changes
+an `image_id` or a `category_id` costs a re-index.
 
 This is what evaluating one dataset under several IoU types needs: each
 annotation's active `area` follows the box for `bbox` and the mask for `segm`.
 
-=== "Python"
-
-    ```python
-    set_ann_field(field: str, values: dict[int, Any], *, create: bool = False) -> None
-    ```
-
-    | Parameter | Type | Description |
-    |---|---|---|
-    | `field` | `str` | Annotation key to set, for example `"area"`. Cannot be `"id"`. |
-    | `values` | `dict[int, Any]` | Annotation ID to new value. |
-    | `create` | `bool` | Allow `field` to be a custom key the annotations do not have yet. Default `False`. |
-
-    ```python
-    mask_areas = {ann["id"]: mask.area(coco.ann_to_rle(ann)) for ann in coco.dataset["annotations"]}
-    coco.set_ann_field("area", mask_areas)
-    ```
-
-=== "Rust"
-
-    Python only. In Rust, edit `coco.dataset.annotations` and call
-    `create_index()`, or use `update_anns` below.
-
-Raises `KeyError` if an annotation ID is not in the dataset, or if `field` is
-neither a COCO field nor a custom key already on the annotation while `create` is
-`False`; `TypeError` if a value does not fit the field, as `{1: "big"}` does not
-fit `"area"`; and `ValueError` for `field="id"`. Nothing is written in any of
-those cases.
-
----
-
-### `update_anns`
-
-Replace whole annotations, matched by `id`, keeping the indices current. The
-targeted counterpart to assigning [`dataset`](#dataset): it edits the annotations
-you name instead of rebuilding everything. Ids do not move, so only a
-replacement that changes an `image_id` or a `category_id` costs a re-index.
-
-Each dict **replaces** its annotation rather than merging into it — keys you
-leave out come back as their defaults. Use `set_ann_field` to change one field
-and keep the rest.
+Adding or removing annotations, or dropping a key, is a change to the dataset's
+shape: assign [`dataset`](#dataset) for those.
 
 === "Python"
 
     ```python
-    update_anns(anns: list[dict]) -> None
+    update_anns(anns: list[dict], *, create: bool = False) -> None
     ```
 
     | Parameter | Type | Description |
     |---|---|---|
-    | `anns` | `list[dict]` | Annotation dicts, each with an `id` already in the dataset. |
+    | `anns` | `list[dict]` | Partial or whole annotation dicts, each with an `id` already in the dataset. |
+    | `create` | `bool`, keyword-only | Allow a schema-unknown key to create a new custom key on an annotation that does not have it yet. Default `False`. |
 
     ```python
-    anns = coco.dataset["annotations"]
-    for ann in anns:
-        ann["area"] = ann["bbox"][2] * ann["bbox"][3]
-    coco.update_anns(anns)
+    coco.update_anns([
+        {"id": ann["id"], "area": mask.area(coco.ann_to_rle(ann))}
+        for ann in coco.dataset["annotations"]
+    ])
     ```
 
 === "Rust"
 
     ```rust
-    fn update_anns(&mut self, anns: Vec<Annotation>) -> Result<(), UnknownAnnIds>
+    fn update_anns(&mut self, anns: Vec<Annotation>) -> Result<()>
     ```
 
-Raises `KeyError` if a dict has no `id`, or names an `id` the dataset does not
-have; `TypeError` if the argument is not a list or an element is not a dict; and
-`ValueError` if a dict is missing a required field or holds a value that does not
-fit it, the same errors assigning `dataset` raises. Nothing is written in any of
-those cases. In a dataset with duplicate annotation IDs, the last occurrence is
-the one replaced — the record the ID lookup holds.
+    Replaces whole records by `id`; an unknown id is `Error::UnknownAnnIds`
+    and nothing is written. For a partial edit, change the record in
+    `coco.dataset.annotations` and call `create_index()`.
+
+Raises `KeyError` if a dict has no `id`, for the ids the dataset does not
+have, all of them named, or for a key that is neither a COCO field nor a
+custom key already on that annotation when `create` is `False` — a
+misspelled schema field (`"Area"`, `"iscrowed"`) raises here instead of
+quietly landing beside the field you meant to change. `TypeError` if the
+argument is not a list, an element is not a dict, or a value does not fit its
+field, as `"big"` does not fit `area`; and `ValueError` for a value of the
+right type and the wrong shape, the same errors assigning `dataset` raises.
+Nothing is written in any of those cases. In a dataset with duplicate
+annotation IDs, the last occurrence is the one edited — the record the ID
+lookup holds.
 
 !!! tip
-    A `COCOeval` copies both datasets when it is constructed, so an evaluator
-    built before the mutation keeps evaluating the old annotations. Mutate
-    first, then construct the evaluator.
+    An evaluator built before the edit keeps the annotations it was built
+    with — mutate first, then construct it. See
+    [Getters return copies](../getting-started/migration.md#getters-return-copies-assign-back-to-apply).
 
 ---
 

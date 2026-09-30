@@ -48,7 +48,7 @@ impl COCOeval {
             );
         }
         if self.eval_mode == EvalMode::OpenImages {
-            // `scripts/parity_oid.py` matches the TensorFlow reference on group-of
+            // `tests/test_parity_oid.py` matches the TensorFlow reference on group-of
             // handling, IoA containment and all-points AP. What remains unimplemented
             // is the Challenge's non-exhaustive image-level-label rule — detections
             // of an unverified class are ignored, and of a negatively-labeled class
@@ -63,7 +63,7 @@ impl COCOeval {
         }
 
         // Parameter deviations only mean something where there is a reference to
-        // deviate *from*: `scripts/parity.py` (pycocotools) and `parity_lvis.py`.
+        // deviate *from*: `scripts/parity.py` (pycocotools) and `tests/test_parity_lvis.py`.
         //
         // Exhaustive rather than an early return, so a fourth `EvalMode` cannot
         // inherit `parity_verified` for free — a mode with no checked reference
@@ -182,19 +182,14 @@ impl COCOeval {
     /// Return the summary metric lines as strings without printing.
     ///
     /// Computes stats (setting `self.stats`) and returns each formatted line.
-    /// Warnings about non-default parameters are printed to stderr.
+    /// Prints nothing — not the lines, and not the
+    /// [`reference_deviations`](Self::reference_deviations) warnings either;
+    /// [`summarize`](Self::summarize) owns those.
     pub fn summarize_lines(&mut self) -> Vec<String> {
         let eval = match &self.eval {
             Some(e) => e,
-            None => {
-                eprintln!("Please run evaluate() and accumulate() first.");
-                return Vec::new();
-            }
+            None => return Vec::new(),
         };
-
-        for w in &self.reference_deviations() {
-            eprintln!("Warning: {}", w);
-        }
 
         let metrics = self.metric_defs();
         let stats = summarize_impl(
@@ -240,8 +235,16 @@ impl COCOeval {
 
     /// Print the standard COCO evaluation summary.
     ///
-    /// Calls [`Self::summarize_lines`] and prints each line to stdout.
+    /// Each [`reference_deviations`](Self::reference_deviations) warning goes
+    /// to stderr first, then each [`Self::summarize_lines`] line to stdout.
     pub fn summarize(&mut self) {
+        if self.eval.is_none() {
+            eprintln!("Please run evaluate() and accumulate() first.");
+            return;
+        }
+        for w in &self.reference_deviations() {
+            eprintln!("Warning: {}", w);
+        }
         for line in self.summarize_lines() {
             println!("{}", line);
         }

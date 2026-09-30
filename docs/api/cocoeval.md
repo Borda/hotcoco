@@ -69,19 +69,23 @@ Run COCO evaluation to compute AP/AR metrics.
 
     ```rust
     // Standard COCO
-    COCOeval::new(coco_gt: COCO, coco_dt: COCO, iou_type: IouType) -> Self
+    COCOeval::new(coco_gt: impl Into<Arc<COCO>>, coco_dt: impl Into<Arc<COCO>>, iou_type: IouType) -> Self
 
     // LVIS federated
-    COCOeval::new_lvis(coco_gt: COCO, coco_dt: COCO, iou_type: IouType) -> Self
+    COCOeval::new_lvis(coco_gt: impl Into<Arc<COCO>>, coco_dt: impl Into<Arc<COCO>>, iou_type: IouType) -> Self
 
     // Open Images
-    COCOeval::new_oid(coco_gt: COCO, coco_dt: COCO, hierarchy: Option<Hierarchy>) -> Self
+    COCOeval::new_oid(coco_gt: impl Into<Arc<COCO>>, coco_dt: impl Into<Arc<COCO>>, hierarchy: Option<Hierarchy>) -> Self
     ```
+
+    Pass a `COCO` to hand the dataset over, or an `Arc<COCO>` to share one
+    ground truth across several evaluators. The evaluator holds both datasets
+    behind `Arc` and exposes them through `coco_gt()` and `coco_dt()`.
 
     | Parameter | Type | Description |
     |-----------|------|-------------|
-    | `coco_gt` | `COCO` | Ground truth COCO object |
-    | `coco_dt` | `COCO` | Detections COCO object (from `load_res`) |
+    | `coco_gt` | `COCO` or `Arc<COCO>` | Ground truth COCO object |
+    | `coco_dt` | `COCO` or `Arc<COCO>` | Detections COCO object (from `load_res`) |
     | `iou_type` | `IouType` | `IouType::Bbox`, `IouType::Segm`, `IouType::Keypoints`, or `IouType::Obb` |
     | `hierarchy` | `Option<Hierarchy>` | Category hierarchy for GT expansion; `None` to skip expansion |
 
@@ -261,6 +265,8 @@ summarize() -> None
 ```
 
 Compute and print the standard COCO metrics. Populates `stats`.
+
+The table goes through Python's `sys.stdout`, so `contextlib.redirect_stdout` captures or silences it, and it shows in a notebook cell. To skip printing altogether, call [`summary_lines`](#summary_lines) instead.
 
 !!! warning "Non-default parameters"
     `summarize()` uses a fixed display format that assumes default `iou_thrs`, `max_dets`, and `area_rng_lbl`. If you've changed any of these, a `UserWarning` is emitted (catchable with `warnings.catch_warnings`, visible in Jupyter) and some metrics might show `-1.000` (for example, AP50 when `iou_thrs` doesn't include 0.50). The `stats` array always has 12 entries (10 for keypoints) regardless of your parameters. `-1.000` always means "not computed for this configuration" — an unknown area label or max-dets value degrades to `-1.0` rather than silently substituting the `"all"` slice.

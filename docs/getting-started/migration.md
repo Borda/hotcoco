@@ -69,8 +69,11 @@ Annotation dicts carry the same keys — `id`, `image_id`, `category_id`, `bbox`
 
 ## Getters return copies — assign back to apply
 
-The data lives in Rust, so `ev.params`, `coco.dataset`, `ev.coco_gt`, and
-`ev.coco_dt` return **copies** on each access. Attribute assignment
+The data lives in Rust, so `coco.dataset` returns a **copy** on each access, and
+`ev.coco_gt` and `ev.coco_dt` return a new object that shares the evaluator's
+data without copying it; an edit to that object, through `dataset` or
+`update_anns`, lands on a private copy and never reaches the evaluator.
+Attribute assignment
 (`ev.params.cat_ids = [...]`) works — the setter routes the change back to Rust —
 but mutating a *container inside* a copy is a no-op:
 
@@ -96,12 +99,10 @@ coco.createIndex()                  # supported, but a formality after assignmen
 Editing annotations that are already there does not need the whole dataset:
 
 ```python
-coco.set_ann_field("area", {ann_id: mask_area})   # one field, many annotations
-coco.update_anns([edited_ann, ...])               # whole annotations, by id
+coco.update_anns([{"id": ann_id, "area": mask_area}])   # the keys you pass, by id
 ```
 
-See [`set_ann_field`](../api/coco.md#set_ann_field) and
-[`update_anns`](../api/coco.md#update_anns) for what each one raises and when it
+See [`update_anns`](../api/coco.md#update_anns) for what it raises and when it
 re-indexes.
 
 ## Known differences
@@ -113,6 +114,7 @@ re-indexes.
 | Annotation IDs | Requires unique positive integers | Also accepts 0-based IDs |
 | `getAnnIds(areaRng=...)` on annotations missing `area` | Raises `KeyError` | Excludes them from the query |
 | Mutating `coco.dataset` / `ev.params` internals in place | Mutates shared state | No-op on a copy — [assign back to apply](#getters-return-copies-assign-back-to-apply) |
+| `summarize()` with non-default params | Prints the table only | Also emits a `UserWarning` per deviation — filter with `warnings.filterwarnings` |
 | Performance | Single-threaded C + Python | Multi-threaded Rust |
 
 ## Metric parity

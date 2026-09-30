@@ -31,6 +31,19 @@ pub struct PrPoint {
     pub detection_rank: usize,
 }
 
+/// Precision at one rank, as pycocotools computes it: `tp / (fp + tp + np.spacing(1))`.
+///
+/// **The one spelling of the guard term.** It changes the result only when
+/// `tp + fp == 1` — any larger integer absorbs `2^-52` — and there it puts a lone
+/// leading true positive at `1 - 2^-52` rather than `1.0`. Keeping it is what
+/// makes the `precision` arrays bit-equal to the reference; `average_precision_all_points`
+/// deliberately does not use it, because its reference (TensorFlow's
+/// `compute_precision_recall`) has no such term.
+#[inline]
+pub(crate) fn coco_precision(tp: f64, fp: f64) -> f64 {
+    tp / (tp + fp + f64::EPSILON)
+}
+
 /// Precision interpolated at fixed recall thresholds, from cumulative TP/FP.
 ///
 /// `tp_cum` and `fp_cum` must already be cumulative (prefix-summed) over
@@ -38,9 +51,9 @@ pub struct PrPoint {
 /// - the final recall achieved (`tp_cum[nd-1] / num_gt`);
 /// - one [`PrPoint`] for each recall threshold that is reached.
 ///
-/// Unreachable recall thresholds are omitted. Precision is made monotonically
-/// non-increasing right-to-left before sampling (PASCAL VOC interpolation),
-/// matching pycocotools.
+/// Unreachable recall thresholds are omitted. Precision is `coco_precision`
+/// made monotonically non-increasing right-to-left before sampling (PASCAL VOC
+/// interpolation), matching pycocotools.
 ///
 /// # Panics
 ///
@@ -67,16 +80,22 @@ pub fn precision_recall_curve(
     )
 }
 
-/// Reusable working buffers for [`precision_recall_curve_into`].
+/// Reusable working buffers for [`precision_recall_curve_into`] and
+/// [`precision_recall_curve_of_order_into`].
 ///
-/// Two `nd`-long scratch vectors, held by the caller so a loop over IoU
-/// thresholds allocates once instead of once per threshold. Opaque on purpose:
+/// Working vectors — two `nd`-long ones for the cumulative-array form, a
+/// true-positive-long one plus a per-point index for the fused form — held by
+/// the caller so a loop over IoU thresholds allocates once instead of once per
+/// threshold. Opaque on purpose:
 /// what is inside is an implementation detail of the accumulator, and the only
 /// thing a caller may do with it is keep it alive.
 #[derive(Debug, Default)]
 pub struct PrCurveScratch {
     rc: Vec<f64>,
     pr: Vec<f64>,
+    /// [`precision_recall_curve_of_order_into`] only: for each emitted point,
+    /// which entry of `pr` (there, one per true positive) it reads.
+    env_idx: Vec<usize>,
 }
 
 /// [`precision_recall_curve`] writing into caller-owned buffers.
@@ -88,10 +107,10 @@ pub struct PrCurveScratch {
 /// plain tuple so the hot accumulator's reusable buffer stays a flat `Vec`. The
 /// return value is `final_recall`.
 ///
-/// This is the form the hot path wants: `detection::accumulate` runs it `T` times
-/// per (category, area range, max_det) cell — ~10,000 calls per `accumulate()` on
-/// COCO val, several hundred thousand across a bootstrap comparison — and each
-/// would otherwise allocate and drop three vectors.
+/// `detection::accumulate` uses this form only for Open Images, whose all-points
+/// AP needs the cumulative arrays too; every other mode goes through
+/// [`precision_recall_curve_of_order_into`], which computes the same curve
+/// without materializing them.
 ///
 /// # Panics
 ///
@@ -130,8 +149,7 @@ pub fn precision_recall_curve_into(
     pr.reserve(nd);
     for d in 0..nd {
         rc.push(tp_cum[d] / num_gt_f);
-        let total = tp_cum[d] + fp_cum[d];
-        pr.push(if total > 0.0 { tp_cum[d] / total } else { 0.0 });
+        pr.push(coco_precision(tp_cum[d], fp_cum[d]));
     }
 
     let final_recall = rc[nd - 1];
@@ -156,15 +174,37 @@ pub fn precision_recall_curve_into(
     final_recall
 }
 
+/// How one ranked detection moves the TP/FP counters.
+enum Tally {
+    TruePositive,
+    FalsePositive,
+    /// Contributes to neither counter but still occupies a rank, which is what
+    /// keeps the cumulative counts lined up with the score ordering the curve is
+    /// read at.
+    Ignored,
+}
+
+/// **The one owner of TP/FP classification.** `i` indexes the parallel
+/// `matched`/`ignored` arrays; both [`cumulative_tp_fp`] and
+/// [`precision_recall_curve_of_order_into`] decide TP versus FP versus ignored
+/// through this and nowhere else.
+#[inline]
+fn tally(i: usize, matched: &[bool], ignored: Option<&[bool]>) -> Tally {
+    if ignored.is_some_and(|ig| ig[i]) {
+        Tally::Ignored
+    } else if matched[i] {
+        Tally::TruePositive
+    } else {
+        Tally::FalsePositive
+    }
+}
+
 /// Cumulative TP and FP counts over detections visited in `order`.
 ///
-/// **The one owner of TP/FP classification.** `order` lists indices into the
-/// parallel `matched`/`ignored` arrays, score-descending; an ignored detection
-/// contributes to neither counter but still occupies a rank, which is what makes
-/// the cumulative arrays line up with the score ordering the curve is read at.
-///
-/// `tp_cum` and `fp_cum` are cleared and refilled to `order`'s length, so a
-/// caller sweeping IoU thresholds reuses one pair of buffers.
+/// `order` lists indices into the parallel `matched`/`ignored` arrays,
+/// score-descending; classification is the private `tally`'s. `tp_cum` and `fp_cum` are
+/// cleared and refilled to `order`'s length, so a caller sweeping IoU thresholds
+/// reuses one pair of buffers.
 pub fn cumulative_tp_fp(
     order: impl IntoIterator<Item = usize>,
     matched: &[bool],
@@ -177,16 +217,122 @@ pub fn cumulative_tp_fp(
 
     let (mut tp, mut fp) = (0.0f64, 0.0f64);
     for i in order {
-        if !ignored.is_some_and(|ig| ig[i]) {
-            if matched[i] {
-                tp += 1.0;
-            } else {
-                fp += 1.0;
-            }
+        match tally(i, matched, ignored) {
+            Tally::TruePositive => tp += 1.0,
+            Tally::FalsePositive => fp += 1.0,
+            Tally::Ignored => {}
         }
         tp_cum.push(tp);
         fp_cum.push(fp);
     }
+}
+
+/// [`precision_recall_curve_into`] straight from match flags, skipping the
+/// cumulative arrays.
+///
+/// Same values, same emission order, same return as [`cumulative_tp_fp`]
+/// followed by [`precision_recall_curve_into`] (the pair). `order` visits
+/// indices into `matched`/`ignored` score-descending, as for
+/// [`cumulative_tp_fp`]; classification is the private `tally`'s.
+///
+/// Where the pair writes four `nd`-long arrays (`tp_cum`, `fp_cum`, recall,
+/// precision) and reads them back, this keeps integer counters, computes
+/// precision at true-positive ranks only — the only ranks the VOC envelope can
+/// take its maximum from, and the only ranks (rank 0 aside) a recall threshold
+/// can first be met at — and samples recall on the fly: the two-pointer scan is
+/// turned inside out to run over ranks, recording each threshold at the first
+/// rank whose recall is not below it. That is the same rank the pair's scan
+/// lands on for any `rec_thrs` — sorted or not, `NaN` included, because the
+/// predicate is the negation of the pair's `recall < threshold` rather than a
+/// rewrite of it. Recall is `tp / num_gt` as a fresh division at every change,
+/// never a reciprocal multiply, so `19 / 20` still sits where the pair puts it
+/// against a `0.95` threshold. The body's comment carries the envelope argument.
+///
+/// `detection::accumulate` runs this `T` times per (category, area range,
+/// max_det) cell — ~10,000 calls per `accumulate()` on COCO val, several hundred
+/// thousand across a bootstrap comparison — which is why it takes caller-owned
+/// buffers.
+pub fn precision_recall_curve_of_order_into(
+    order: impl IntoIterator<Item = usize>,
+    matched: &[bool],
+    ignored: Option<&[bool]>,
+    num_gt: usize,
+    rec_thrs: &[f64],
+    scratch: &mut PrCurveScratch,
+    out: &mut Vec<(usize, f64, usize)>,
+) -> f64 {
+    out.clear();
+    if num_gt == 0 {
+        return 0.0;
+    }
+    let num_gt_f = num_gt as f64;
+
+    // Forward pass. Only a true positive moves recall, so a recall threshold is
+    // first met either at rank 0 or at a true-positive rank, and only a true
+    // positive raises precision: at a false-positive rank precision is
+    // `tp / (tp + fp)` with the same `tp` and a larger `fp`, so it is below the
+    // precision at the true positive before it, and at an ignored rank it is
+    // unchanged. The right-to-left envelope over every rank therefore equals the
+    // envelope over the true-positive ranks alone, and precision is computed
+    // there only — `#TP` divisions instead of `nd`. `pr` holds it, one entry per
+    // true positive in rank order; `out` holds `(rec_thr_idx, <placeholder>,
+    // rank)` plus, in `env_idx`, the index into `pr` of the true positive at
+    // (or first after) that rank, until the envelope below fills the precision
+    // in. A threshold met at rank 0 before any true positive gets index 0 — the
+    // envelope from the first true positive on, which is what the pair's running
+    // maximum over its leading zeros comes to as well.
+    let pr = &mut scratch.pr;
+    pr.clear();
+    let env_idx = &mut scratch.env_idx;
+    env_idx.clear();
+    out.reserve(rec_thrs.len());
+    env_idx.reserve(rec_thrs.len());
+    let (mut tp, mut fp) = (0usize, 0usize);
+    // `0 / num_gt`, exactly as the pair computes recall before the first true
+    // positive; also the return for an empty `order`.
+    let mut rc = 0.0f64;
+    let mut r_ptr = 0;
+    for (d, i) in order.into_iter().enumerate() {
+        let is_tp = match tally(i, matched, ignored) {
+            Tally::TruePositive => {
+                tp += 1;
+                rc = tp as f64 / num_gt_f;
+                pr.push(coco_precision(tp as f64, fp as f64));
+                true
+            }
+            Tally::FalsePositive => {
+                fp += 1;
+                false
+            }
+            Tally::Ignored => false,
+        };
+        if !is_tp && d != 0 {
+            continue;
+        }
+        // "Not below", spelled as the negation of the pair's `rc < rec_thr`
+        // rather than as `rc >= rec_thr`, so an incomparable (`NaN`) threshold
+        // records at the current rank there and here alike.
+        while r_ptr < rec_thrs.len()
+            && rc.partial_cmp(&rec_thrs[r_ptr]) != Some(std::cmp::Ordering::Less)
+        {
+            out.push((r_ptr, 0.0, d));
+            env_idx.push(pr.len().saturating_sub(1));
+            r_ptr += 1;
+        }
+    }
+
+    let final_recall = rc;
+
+    // Make precision monotonically non-increasing from right to left (VOC interp).
+    for j in (0..pr.len().saturating_sub(1)).rev() {
+        pr[j] = pr[j].max(pr[j + 1]);
+    }
+    for (point, &j) in out.iter_mut().zip(env_idx.iter()) {
+        // No true positive at all: every precision the pair computes is zero.
+        point.1 = pr.get(j).copied().unwrap_or(0.0);
+    }
+
+    final_recall
 }
 
 /// Mean interpolated precision over `rec_thrs` — the tail every AP path
@@ -592,7 +738,7 @@ mod tests {
     /// All-points AP, derived by hand rather than recorded from this crate's output.
     ///
     /// Each case is small enough to integrate on paper, which is the point: the
-    /// end-to-end check against TensorFlow lives in `scripts/parity_oid.py`, and
+    /// end-to-end check against TensorFlow lives in `tests/test_parity_oid.py`, and
     /// this pins the arithmetic so a failure there localizes to the reference
     /// rather than to this function.
     #[test]
@@ -828,6 +974,35 @@ mod tests {
         average_precision_ranked(&[true, false], Some(&[false]), 1, &[0.5]);
     }
 
+    /// A lone leading true positive reads [`coco_precision`]`(1, 0)`, one ulp
+    /// under 1.0, on both curve paths — the only place the guard term shows.
+    #[test]
+    fn both_curve_paths_carry_the_pycocotools_guard_term() {
+        let rec_thrs = [0.0, 0.5, 1.0];
+        let lone_tp = coco_precision(1.0, 0.0);
+        assert!(
+            lone_tp < 1.0 && lone_tp > 1.0 - 2.0 * f64::EPSILON,
+            "{lone_tp}"
+        );
+
+        // Rank 0 TP, rank 1 FP: the envelope has nothing above the lone TP.
+        let (_, curve) = precision_recall_curve(&[1.0, 1.0], &[0.0, 1.0], 2, &rec_thrs);
+        assert_eq!(curve[0].precision, lone_tp);
+
+        let mut scratch = PrCurveScratch::default();
+        let mut out = Vec::new();
+        precision_recall_curve_of_order_into(
+            [0, 1],
+            &[true, false],
+            None,
+            2,
+            &rec_thrs,
+            &mut scratch,
+            &mut out,
+        );
+        assert_eq!(out[0].1, lone_tp);
+    }
+
     #[test]
     #[should_panic(expected = "parallel arrays")]
     fn precision_recall_curve_rejects_mismatched_lengths() {
@@ -850,5 +1025,197 @@ mod tests {
         // A sentinel on either axis alone invalidates that point, not the sweep.
         let best = max_f_beta(&[-1.0, 0.6, 0.9], &[0.4, -1.0, 0.9], 1.0).expect("one valid point");
         assert!((best - 0.9).abs() < 1e-12);
+    }
+
+    /// The fused kernel is bit-identical to `cumulative_tp_fp` followed by
+    /// `precision_recall_curve_into` — same `final_recall`, same tuples, same
+    /// order — everywhere `detection::accumulate` can take it.
+    ///
+    /// The cases that could tell the two apart are all here on purpose: no
+    /// detections, no ground truth, a single rank, ignored detections at the
+    /// front and back (`pr` at rank 0 is the `total == 0` zero), recall landing
+    /// exactly on a threshold (`19 / 20` against `0.95`, and against the
+    /// `0.9500000000000001` the reference grid does *not* contain), unsorted and
+    /// duplicated `rec_thrs` (the two-pointer scan never rewinds), a `NaN`
+    /// threshold (recorded at the current rank in both, because the predicate is
+    /// the negation of `rc < thr`, not `rc >= thr`), empty `rec_thrs`, and a
+    /// non-identity `order`.
+    #[test]
+    fn fused_curve_matches_cumulative_then_interpolate_bit_for_bit() {
+        fn legacy(
+            order: &[usize],
+            matched: &[bool],
+            ignored: Option<&[bool]>,
+            num_gt: usize,
+            rec_thrs: &[f64],
+        ) -> (f64, Vec<(usize, f64, usize)>) {
+            let (mut tp, mut fp) = (Vec::new(), Vec::new());
+            cumulative_tp_fp(order.iter().copied(), matched, ignored, &mut tp, &mut fp);
+            let mut scratch = PrCurveScratch::default();
+            let mut out = Vec::new();
+            let fr =
+                precision_recall_curve_into(&tp, &fp, num_gt, rec_thrs, &mut scratch, &mut out);
+            (fr, out)
+        }
+        fn fused(
+            order: &[usize],
+            matched: &[bool],
+            ignored: Option<&[bool]>,
+            num_gt: usize,
+            rec_thrs: &[f64],
+        ) -> (f64, Vec<(usize, f64, usize)>) {
+            let mut scratch = PrCurveScratch::default();
+            // Pre-seeded with garbage: the kernel must clear it.
+            let mut out = vec![(usize::MAX, f64::NAN, usize::MAX)];
+            let fr = precision_recall_curve_of_order_into(
+                order.iter().copied(),
+                matched,
+                ignored,
+                num_gt,
+                rec_thrs,
+                &mut scratch,
+                &mut out,
+            );
+            (fr, out)
+        }
+        fn assert_same(
+            label: &str,
+            (fr_a, out_a): (f64, Vec<(usize, f64, usize)>),
+            (fr_b, out_b): (f64, Vec<(usize, f64, usize)>),
+        ) {
+            assert_eq!(fr_a.to_bits(), fr_b.to_bits(), "{label}: final_recall");
+            assert_eq!(out_a.len(), out_b.len(), "{label}: point count");
+            for (i, (a, b)) in out_a.iter().zip(&out_b).enumerate() {
+                assert_eq!(a.0, b.0, "{label}: rec_thr_idx at point {i}");
+                assert_eq!(
+                    a.1.to_bits(),
+                    b.1.to_bits(),
+                    "{label}: precision at point {i}"
+                );
+                assert_eq!(a.2, b.2, "{label}: detection_rank at point {i}");
+            }
+        }
+
+        let grid = crate::params::default_rec_thrs();
+        let odd_grids: [&[f64]; 5] = [
+            &[],
+            &[0.95, 0.9500000000000001, 0.95],
+            &[0.5, 0.9, 0.3, 0.3, 1.0, 0.0],
+            &[0.2, f64::NAN, 0.4, 0.6],
+            &[1.5],
+        ];
+
+        // Hand-built boundary cases.
+        let m19 = {
+            // 19 TP among 20 ranks, one FP in the middle: recall lands on 19/20.
+            let mut v = vec![true; 20];
+            v[7] = false;
+            v
+        };
+        let id20: Vec<usize> = (0..20).collect();
+        let ig_ends = {
+            let mut v = vec![false; 20];
+            v[0] = true;
+            v[19] = true;
+            v
+        };
+        struct Case {
+            label: &'static str,
+            order: Vec<usize>,
+            matched: Vec<bool>,
+            ignored: Option<Vec<bool>>,
+            num_gt: usize,
+        }
+        let case = |label, order, matched, ignored, num_gt| Case {
+            label,
+            order,
+            matched,
+            ignored,
+            num_gt,
+        };
+        let cases = [
+            case("empty order", vec![], vec![], None, 3),
+            case("no ground truth", id20.clone(), m19.clone(), None, 0),
+            case("single tp", vec![0], vec![true], None, 1),
+            case("single fp", vec![0], vec![false], None, 1),
+            case("single ignored", vec![0], vec![true], Some(vec![true]), 1),
+            case("19 of 20", id20.clone(), m19.clone(), None, 20),
+            case(
+                "ignored at both ends",
+                id20.clone(),
+                m19.clone(),
+                Some(ig_ends),
+                20,
+            ),
+            case(
+                "all ignored",
+                id20.clone(),
+                m19.clone(),
+                Some(vec![true; 20]),
+                5,
+            ),
+            case(
+                "reversed order",
+                (0..20).rev().collect(),
+                m19.clone(),
+                None,
+                20,
+            ),
+        ];
+        for Case {
+            label,
+            order,
+            matched,
+            ignored,
+            num_gt,
+        } in &cases
+        {
+            let ig = ignored.as_deref();
+            assert_same(
+                &format!("{label} / grid"),
+                legacy(order, matched, ig, *num_gt, &grid),
+                fused(order, matched, ig, *num_gt, &grid),
+            );
+            for (g, rec_thrs) in odd_grids.iter().enumerate() {
+                assert_same(
+                    &format!("{label} / odd grid {g}"),
+                    legacy(order, matched, ig, *num_gt, rec_thrs),
+                    fused(order, matched, ig, *num_gt, rec_thrs),
+                );
+            }
+        }
+
+        // Randomized: sizes the accumulator sees, ignore-heavy and ignore-free,
+        // shuffled orders.
+        let mut rng = StdRng::seed_from_u64(0xA2_F05E);
+        for &nd in &[0usize, 1, 2, 17, 1000] {
+            for &num_gt in &[0usize, 1, 7, 20, 1000] {
+                for trial in 0..8 {
+                    let p_ignored = [0.0, 0.1, 0.6][trial % 3];
+                    let matched: Vec<bool> = (0..nd).map(|_| rng.random_bool(0.5)).collect();
+                    let ignored: Option<Vec<bool>> = if trial % 2 == 0 {
+                        Some((0..nd).map(|_| rng.random_bool(p_ignored)).collect())
+                    } else {
+                        None
+                    };
+                    let mut order: Vec<usize> = (0..nd).collect();
+                    for i in (1..nd).rev() {
+                        order.swap(i, rng.random_range(0..=i));
+                    }
+                    let ig = ignored.as_deref();
+                    let label = format!("random nd={nd} num_gt={num_gt} trial={trial}");
+                    assert_same(
+                        &format!("{label} / grid"),
+                        legacy(&order, &matched, ig, num_gt, &grid),
+                        fused(&order, &matched, ig, num_gt, &grid),
+                    );
+                    assert_same(
+                        &format!("{label} / odd grid 2"),
+                        legacy(&order, &matched, ig, num_gt, odd_grids[2]),
+                        fused(&order, &matched, ig, num_gt, odd_grids[2]),
+                    );
+                }
+            }
+        }
     }
 }

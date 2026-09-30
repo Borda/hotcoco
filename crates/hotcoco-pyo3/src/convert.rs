@@ -1,20 +1,30 @@
-use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Image, Rle, Segmentation};
+use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Extra, Image, Rle, Segmentation};
 use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
 /// Extract an optional field from a Python dict.
+///
+/// `$key` is interned (`pyo3::intern!`) rather than passed as a bare `&str`:
+/// `get_item` takes anything `IntoPyObject`, and for a plain `&str` that means
+/// allocating a fresh `PyString` on every call. Decoding an RF-DETR-shaped
+/// annotation list calls this once per key per annotation — millions of
+/// throwaway strings for a fixed set of ~10 field names. Interning builds each
+/// literal's `PyString` once per process and reuses it from then on.
 macro_rules! opt {
-    ($dict:expr, $key:expr) => {
-        $dict.get_item($key)?.map(|v| v.extract()).transpose()?
+    ($dict:expr, $key:literal) => {
+        $dict
+            .get_item(pyo3::intern!($dict.py(), $key))?
+            .map(|v| v.extract())
+            .transpose()?
     };
 }
 
 /// Extract a required field from a Python dict, raising `PyValueError` if missing.
 macro_rules! req {
-    ($dict:expr, $key:expr) => {
+    ($dict:expr, $key:literal) => {
         $dict
-            .get_item($key)?
+            .get_item(pyo3::intern!($dict.py(), $key))?
             .ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(concat!("dict missing '", $key, "'"))
             })?
@@ -22,23 +32,129 @@ macro_rules! req {
     };
 }
 
-/// The dict keys each record type owns. Any other key on an incoming dict is a
-/// custom key, preserved through the `extra` map (serde-flattened in the core
-/// types) so `load → filter → save` keeps user metadata the way pycocotools does.
-pub(crate) const ANNOTATION_KEYS: &[&str] = &[
-    "id",
-    "image_id",
-    "category_id",
-    "bbox",
-    "area",
-    "segmentation",
-    "iscrowd",
-    "keypoints",
-    "num_keypoints",
-    "obb",
-    "score",
-    "is_group_of",
-];
+/// A non-negative integer field that also accepts an integral float.
+///
+/// Ids come back as `1.0` from a JSON written by pandas or a numpy-backed
+/// encoder, and pycocotools accepts them because `1.0 == 1` and they hash
+/// alike. A fractional or negative value is still an error, naming the value;
+/// a value that does not fit the field's width is an `OverflowError`. The
+/// JSON loader applies the same rule through `types::deserialize_uint`.
+pub(crate) fn extract_int<T: TryFrom<u64>>(v: &Bound<'_, PyAny>) -> PyResult<T> {
+    let n = if let Ok(i) = v.extract::<u64>() {
+        i
+    } else if let Ok(f) = v.extract::<f64>()
+        && f.fract() == 0.0
+        && f >= 0.0
+        && f <= u64::MAX as f64
+    {
+        f as u64
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "expected a non-negative integer, got {}",
+            v.repr()?
+        )));
+    };
+    T::try_from(n).map_err(|_| {
+        pyo3::exceptions::PyOverflowError::new_err(format!(
+            "integer {n} is out of range for this field"
+        ))
+    })
+}
+
+/// A 0/1 flag: `bool`, any integer, or an integral float.
+///
+/// The one Python-side reader for `iscrowd`, `is_group_of`, `useCats`, and
+/// the `iscrowd` argument of the mask functions, so every flag in the API
+/// agrees on what counts as one. pycocotools' own default is `useCats = 1`,
+/// Open Images spells `IsGroupOf` as `0`/`1`, and a flag column read back
+/// from pandas is `0.0`. The JSON loader applies the same rule through
+/// `types::deserialize_flag`.
+pub(crate) fn extract_flag(v: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(b) = v.extract::<bool>() {
+        return Ok(b);
+    }
+    if let Ok(i) = v.extract::<i64>() {
+        return Ok(i != 0);
+    }
+    if let Ok(f) = v.extract::<f64>()
+        && f.fract() == 0.0
+    {
+        return Ok(f != 0.0);
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "expected a bool or 0/1 flag, got {}",
+        v.repr()?
+    )))
+}
+
+/// The Python type name of `obj`, for error messages.
+pub(crate) fn type_name(obj: &Bound<'_, PyAny>) -> String {
+    obj.get_type()
+        .name()
+        .map_or_else(|_| "unknown type".to_owned(), |n| n.to_string())
+}
+
+/// The numpy dtype name of `obj` (`"uint8"`, `"float32"`, …), or `None` for
+/// anything without a numpy `dtype`.
+pub(crate) fn numpy_dtype_name(obj: &Bound<'_, PyAny>) -> Option<String> {
+    obj.getattr("dtype")
+        .and_then(|d| d.getattr("name"))
+        .and_then(|n| n.extract::<String>())
+        .ok()
+}
+
+/// Compressed RLE `counts` as a string, from either the `str` or the `bytes`
+/// spelling; `None` for anything else (an uncompressed list).
+///
+/// `bytes` is what `mask.encode` and pycocotools emit. It has to be checked
+/// before any list branch: Python bytes extract as a sequence of ints, so a
+/// caller that tries the list first reads the ASCII codes of the compressed
+/// string as run lengths — a silently empty mask, not an error. Both RLE
+/// parsers go through here so that cannot happen to one and not the other
+/// again.
+fn counts_as_str(counts: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if let Ok(s) = counts.extract::<String>() {
+        return Ok(Some(s));
+    }
+    if let Ok(b) = counts.cast::<PyBytes>() {
+        return std::str::from_utf8(b.as_bytes())
+            .map(|s| Some(s.to_owned()))
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
+            });
+    }
+    Ok(None)
+}
+
+/// `req!` with an explicit reader such as [`extract_int`]. Same interning
+/// rationale as `opt!` above.
+macro_rules! req_with {
+    ($dict:expr, $key:literal, $read:expr) => {
+        $read(
+            &$dict
+                .get_item(pyo3::intern!($dict.py(), $key))?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(concat!("dict missing '", $key, "'"))
+                })?,
+        )?
+    };
+}
+
+/// `opt!` with an explicit reader such as [`extract_int`]. Same interning
+/// rationale as `opt!` above.
+macro_rules! opt_with {
+    ($dict:expr, $key:literal, $read:expr) => {
+        $dict
+            .get_item(pyo3::intern!($dict.py(), $key))?
+            .map(|v| $read(&v))
+            .transpose()?
+    };
+}
+
+/// The dict keys each record type owns; an annotation's are the arms of
+/// [`set_ann_field`]. Any other key on an incoming dict is a custom key,
+/// preserved through the `extra` map (serde-flattened in the core types) so
+/// `load → filter → save` keeps user metadata the way pycocotools does.
 const IMAGE_KEYS: &[&str] = &[
     "id",
     "file_name",
@@ -66,43 +182,48 @@ const CATEGORY_KEYS: &[&str] = &[
 /// hand-rolled per-value converter: the values are arbitrary user objects, and
 /// `json` already defines exactly which of those a COCO file can hold. A
 /// non-serializable value raises the stdlib's own `TypeError`, naming the type.
+///
+/// `known` says whether a key is a schema key, and may consume it: the record
+/// converters pass their key list, the annotation merge passes the setter.
 fn extract_extra(
     dict: &Bound<'_, PyDict>,
-    known: &[&str],
-) -> PyResult<serde_json::Map<String, serde_json::Value>> {
+    mut known: impl FnMut(&str, &Bound<'_, PyAny>) -> PyResult<bool>,
+) -> PyResult<Extra> {
     let py = dict.py();
     let mut extras: Option<Bound<'_, PyDict>> = None;
     for (k, v) in dict {
-        let Ok(key) = k.extract::<String>() else {
+        let Ok(key) = k.cast::<PyString>() else {
             continue; // non-string keys cannot appear in COCO JSON
         };
-        if known.contains(&key.as_str()) {
+        if known(&key.to_cow()?, &v)? {
             continue;
         }
         extras
             .get_or_insert_with(|| PyDict::new(py))
-            .set_item(key, v)?;
+            .set_item(k, v)?;
     }
-    let Some(extras) = extras else {
-        return Ok(serde_json::Map::new());
-    };
-    let json_str: String = py
-        .import("json")?
-        .call_method1("dumps", (extras,))?
-        .extract()?;
-    match serde_json::from_str(&json_str) {
-        Ok(serde_json::Value::Object(map)) => Ok(map),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(
-            "custom keys did not round-trip through JSON",
-        )),
+    match extras {
+        Some(extras) => extra_from_dict(&extras),
+        None => Ok(Extra::new()),
     }
 }
 
+/// The custom keys of a record, as the JSON they will be saved as.
+fn extra_from_dict(extras: &Bound<'_, PyDict>) -> PyResult<Extra> {
+    let json_str: String = extras
+        .py()
+        .import("json")?
+        .call_method1("dumps", (extras,))?
+        .extract()?;
+    serde_json::from_str(&json_str).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "custom keys did not round-trip through JSON: {e}"
+        ))
+    })
+}
+
 /// Merge a record's `extra` map back into its outgoing Python dict.
-fn merge_extra(
-    dict: &Bound<'_, PyDict>,
-    extra: &serde_json::Map<String, serde_json::Value>,
-) -> PyResult<()> {
+fn merge_extra(dict: &Bound<'_, PyDict>, extra: &Extra) -> PyResult<()> {
     if extra.is_empty() {
         return Ok(());
     }
@@ -150,14 +271,8 @@ pub fn annotation_to_py(py: Python<'_>, ann: &Annotation) -> PyResult<Py<PyAny>>
 
 pub fn segmentation_to_py(py: Python<'_>, seg: &Segmentation) -> PyResult<Py<PyAny>> {
     match seg {
-        Segmentation::Polygon(polys) => {
-            let inner_lists: Vec<Bound<'_, PyList>> = polys
-                .iter()
-                .map(|p| PyList::new(py, p.iter()))
-                .collect::<PyResult<_>>()?;
-            let list = PyList::new(py, inner_lists)?;
-            Ok(list.into_any().unbind())
-        }
+        Segmentation::Polygon(polys) => polygons_to_py(py, polys),
+        Segmentation::Rect(bbox) => polygons_to_py(py, &[Segmentation::rect_corners(bbox)]),
         Segmentation::CompressedRle { size, counts } => {
             let dict = PyDict::new(py);
             dict.set_item("size", vec![size[0], size[1]])?;
@@ -170,86 +285,110 @@ pub fn segmentation_to_py(py: Python<'_>, seg: &Segmentation) -> PyResult<Py<PyA
             dict.set_item("counts", counts.clone())?;
             Ok(dict.into_any().unbind())
         }
+        // `Segmentation` is `#[non_exhaustive]`: a format the core adds must
+        // be given a Python shape here, and this arm makes forgetting loud.
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "segmentation format has no Python representation yet: {seg:?}"
+        ))),
     }
 }
 
-pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
-    let id: u64 = opt!(dict, "id").unwrap_or(0);
-    let image_id: u64 = req!(dict, "image_id");
-    let category_id: u64 = opt!(dict, "category_id").unwrap_or(0);
-    let bbox: Option<[f64; 4]> = opt!(dict, "bbox");
-    let area: Option<f64> = opt!(dict, "area");
-    let segmentation: Option<Segmentation> = dict
-        .get_item("segmentation")?
-        .map(|v| py_to_segmentation(&v))
-        .transpose()?;
-    let iscrowd: bool = dict
-        .get_item("iscrowd")?
-        .map(|v| {
-            v.extract::<bool>()
-                .or_else(|_| v.extract::<u8>().map(|i| i != 0))
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let keypoints: Option<Vec<f64>> = opt!(dict, "keypoints");
-    let num_keypoints: Option<u32> = opt!(dict, "num_keypoints");
-    let obb: Option<[f64; 5]> = opt!(dict, "obb");
-    let score: Option<f64> = opt!(dict, "score");
-    let is_group_of: Option<bool> = opt!(dict, "is_group_of");
-    let extra = extract_extra(dict, ANNOTATION_KEYS)?;
+fn polygons_to_py<P: AsRef<[f64]>>(py: Python<'_>, polys: &[P]) -> PyResult<Py<PyAny>> {
+    let inner_lists: Vec<Bound<'_, PyList>> = polys
+        .iter()
+        .map(|p| PyList::new(py, p.as_ref()))
+        .collect::<PyResult<_>>()?;
+    Ok(PyList::new(py, inner_lists)?.into_any().unbind())
+}
 
-    Ok(Annotation {
-        id,
-        image_id,
-        category_id,
-        bbox,
-        area,
-        segmentation,
-        iscrowd,
-        keypoints,
-        num_keypoints,
-        obb,
-        score,
-        is_group_of,
-        extra,
+/// Set the annotation field a schema key names; `false` for any other key,
+/// which is a custom key for `extra`.
+///
+/// The one place a dict key becomes an annotation field, for a whole record
+/// ([`py_to_annotation`]) and for a partial edit ([`merge_ann_dict`]) alike,
+/// so both read a value by the same rules.
+fn set_ann_field(ann: &mut Annotation, key: &str, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match key {
+        "id" => ann.id = extract_int(value)?,
+        "image_id" => ann.image_id = extract_int(value)?,
+        "category_id" => ann.category_id = extract_int(value)?,
+        "bbox" => ann.bbox = Some(value.extract()?),
+        "area" => ann.area = Some(value.extract()?),
+        "segmentation" => ann.segmentation = Some(py_to_segmentation(value)?),
+        "iscrowd" => ann.iscrowd = extract_flag(value)?,
+        "keypoints" => ann.keypoints = Some(py_to_keypoints(value)?),
+        "num_keypoints" => ann.num_keypoints = Some(extract_int(value)?),
+        "obb" => ann.obb = Some(Box::new(value.extract()?)),
+        "score" => ann.score = Some(value.extract()?),
+        "is_group_of" => ann.is_group_of = Some(extract_flag(value)?),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Flat `[x, y, v, …]` is the COCO spelling; an `(N, 3)` array is how the
+/// same triplets sit in a tensor. Both mean one thing.
+fn py_to_keypoints(value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
+    value.extract::<Vec<f64>>().or_else(|flat_err| {
+        value
+            .extract::<Vec<[f64; 3]>>()
+            .map(|rows| rows.into_iter().flatten().collect())
+            .map_err(|_| flat_err)
     })
 }
 
-/// Set one scalar COCO field on a copy of `ann`, without a dict round-trip.
-///
-/// The fast path behind [`PyCOCO::set_ann_field`](crate::PyCOCO): only the
-/// fields whose Python form is a single number or flag are handled here.
-/// Anything else — a shaped field (`bbox`, `segmentation`, `keypoints`, `obb`),
-/// a custom key, or a value that does not extract — returns `None`, and the
-/// caller falls back to rebuilding the annotation through
-/// [`annotation_to_py`] and [`py_to_annotation`].
-///
-/// Falling back on a failed extraction rather than raising here is what keeps
-/// the two paths indistinguishable: a wrong value type is reported by
-/// `py_to_annotation`, the way it was before this fast path existed.
-pub fn set_scalar_ann_field(
-    ann: &Annotation,
-    field: &str,
-    value: &Bound<'_, PyAny>,
-) -> Option<Annotation> {
-    let mut out = ann.clone();
-    match field {
-        "area" => out.area = Some(value.extract().ok()?),
-        "score" => out.score = Some(value.extract().ok()?),
-        "image_id" => out.image_id = value.extract().ok()?,
-        "category_id" => out.category_id = value.extract().ok()?,
-        "num_keypoints" => out.num_keypoints = Some(value.extract().ok()?),
-        "is_group_of" => out.is_group_of = Some(value.extract().ok()?),
-        // Same bool-or-int leniency `py_to_annotation` applies.
-        "iscrowd" => {
-            out.iscrowd = value
-                .extract::<bool>()
-                .or_else(|_| value.extract::<u8>().map(|i| i != 0))
-                .ok()?;
+/// Apply every key of `dict` to `ann` in one pass: schema keys set their
+/// fields, the rest land in `extra`, replacing a custom key of the same
+/// name. Every schema-unknown key is allowed to create a new custom key —
+/// used for a whole record, which has no prior state to check a key
+/// against.
+pub(crate) fn merge_ann_dict(ann: &mut Annotation, dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    merge_ann_dict_checked(ann, dict, true)
+}
+
+/// [`merge_ann_dict`], but a schema-unknown key that is not already a
+/// custom key on `ann` is an error unless `create` is true — so a
+/// misspelled schema field (`"Area"`, `"iscrowed"`) raises instead of
+/// quietly landing beside the field the caller meant to change.
+pub(crate) fn merge_ann_dict_checked(
+    ann: &mut Annotation,
+    dict: &Bound<'_, PyDict>,
+    create: bool,
+) -> PyResult<()> {
+    let mut unknown_field = None;
+    let custom = extract_extra(dict, |key, value| {
+        let set = set_ann_field(ann, key, value)?;
+        if !set && !create && unknown_field.is_none() && !ann.extra.contains_key(key) {
+            unknown_field = Some(key.to_string());
         }
-        _ => return None,
+        Ok(set)
+    })?;
+    if let Some(field) = unknown_field {
+        return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "'{field}' is not an annotation field, and annotation {} does not carry it as a \
+             custom key — check the spelling, or pass create=True to add it",
+            ann.id
+        )));
     }
-    Some(out)
+    if !custom.is_empty() {
+        ann.extra = std::mem::take(&mut ann.extra)
+            .into_iter()
+            .chain(custom)
+            .collect();
+    }
+    Ok(())
+}
+
+pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
+    // The one required key; the message matches `req!`.
+    if !dict.contains(pyo3::intern!(dict.py(), "image_id"))? {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "dict missing 'image_id'",
+        ));
+    }
+    let mut ann = Annotation::default();
+    merge_ann_dict(&mut ann, dict)?;
+    Ok(ann)
 }
 
 fn py_to_segmentation(obj: &Bound<'_, PyAny>) -> PyResult<Segmentation> {
@@ -257,32 +396,15 @@ fn py_to_segmentation(obj: &Bound<'_, PyAny>) -> PyResult<Segmentation> {
     if let Ok(dict) = obj.cast::<PyDict>() {
         let size: [u32; 2] = req!(dict, "size");
         let counts_obj = dict
-            .get_item("counts")?
+            .get_item(pyo3::intern!(dict.py(), "counts"))?
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("dict missing 'counts'"))?;
-        // Try str first, then bytes (what `mask.encode` returns, matching
-        // pycocotools), then a list of ints (uncompressed RLE). Bytes must be
-        // checked before the list: a `bytes` object is a Python sequence of
-        // ints, so `extract::<Vec<u32>>()` succeeds on it and silently turns
-        // the compressed string's byte values into an uncompressed RLE.
-        if let Ok(s) = counts_obj.extract::<String>() {
-            return Ok(Segmentation::CompressedRle { size, counts: s });
-        }
-        if let Ok(b) = counts_obj.cast::<PyBytes>() {
-            let s = std::str::from_utf8(b.as_bytes()).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
-            })?;
-            return Ok(Segmentation::CompressedRle {
-                size,
-                counts: s.to_string(),
-            });
+        if let Some(counts) = counts_as_str(&counts_obj)? {
+            return Ok(Segmentation::CompressedRle { size, counts });
         }
         let counts: Vec<u32> = counts_obj.extract().map_err(|_| {
-            let name = counts_obj
-                .get_type()
-                .name()
-                .map_or_else(|_| "?".to_string(), |n| n.to_string());
             pyo3::exceptions::PyTypeError::new_err(format!(
-                "RLE 'counts' must be str, bytes, or a list of ints, got {name}"
+                "RLE 'counts' must be str, bytes, or a list of ints, got {}",
+                type_name(&counts_obj)
             ))
         })?;
         return Ok(Segmentation::UncompressedRle { size, counts });
@@ -400,25 +522,18 @@ pub fn rle_to_coco_py(py: Python<'_>, rle: &Rle) -> PyResult<Py<PyAny>> {
 pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
     // Support {"h", "w", "counts": [ints]}, {"size": [h,w], "counts": "string"},
     // and {"size": [h,w], "counts": b"bytes"} (pycocotools format)
-    if let Some(size_obj) = dict.get_item("size")? {
+    if let Some(size_obj) = dict.get_item(pyo3::intern!(dict.py(), "size"))? {
         let size: [u32; 2] = size_obj.extract()?;
-        let counts_obj = dict.get_item("counts")?.ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("RLE dict has 'size' but missing 'counts'")
-        })?;
-        // Try str first
-        if let Ok(s) = counts_obj.extract::<String>() {
+        let counts_obj = dict
+            .get_item(pyo3::intern!(dict.py(), "counts"))?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("RLE dict has 'size' but missing 'counts'")
+            })?;
+        if let Some(s) = counts_as_str(&counts_obj)? {
             return hotcoco_core::mask::rle_from_string(&s, size[0], size[1])
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
         }
-        // Try bytes (pycocotools format)
-        if let Ok(b) = counts_obj.cast::<PyBytes>() {
-            let s = std::str::from_utf8(b.as_bytes()).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("invalid UTF-8 in RLE counts: {e}"))
-            })?;
-            return hotcoco_core::mask::rle_from_string(s, size[0], size[1])
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()));
-        }
-        // Try list of ints (uncompressed RLE)
+        // Uncompressed RLE: a list of ints
         let counts: Vec<u32> = counts_obj.extract()?;
         return Ok(Rle {
             h: size[0],
@@ -427,38 +542,38 @@ pub fn py_to_rle(dict: &Bound<'_, PyDict>) -> PyResult<Rle> {
         });
     }
     let h: u32 = dict
-        .get_item("h")?
+        .get_item(pyo3::intern!(dict.py(), "h"))?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("RLE dict missing 'h'"))?
         .extract()?;
     let w: u32 = dict
-        .get_item("w")?
+        .get_item(pyo3::intern!(dict.py(), "w"))?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("RLE dict missing 'w'"))?
         .extract()?;
     let counts: Vec<u32> = dict
-        .get_item("counts")?
+        .get_item(pyo3::intern!(dict.py(), "counts"))?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("RLE dict missing 'counts'"))?
         .extract()?;
     Ok(Rle { h, w, counts })
 }
 
 pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
-    let id: u64 = req!(dict, "id");
+    let id: u64 = req_with!(dict, "id", extract_int);
     let file_name: String = opt!(dict, "file_name").unwrap_or_default();
     // Default rather than require: pycocotools' assignment flow (`coco.dataset
     // = d; coco.createIndex()`) builds images as bare `{"id": …}` — that is
     // what torchmetrics' pycocotools backend passes. Dimensions are only
     // consumed by mask operations, which pycocotools equally cannot perform
     // without them.
-    let height: u32 = opt!(dict, "height").unwrap_or_default();
-    let width: u32 = opt!(dict, "width").unwrap_or_default();
-    let license: Option<u64> = opt!(dict, "license");
+    let height: u32 = opt_with!(dict, "height", extract_int).unwrap_or_default();
+    let width: u32 = opt_with!(dict, "width", extract_int).unwrap_or_default();
+    let license: Option<u64> = opt_with!(dict, "license", extract_int);
     let coco_url: Option<String> = opt!(dict, "coco_url");
     let flickr_url: Option<String> = opt!(dict, "flickr_url");
     let date_captured: Option<String> = opt!(dict, "date_captured");
     let neg_category_ids: Vec<u64> = opt!(dict, "neg_category_ids").unwrap_or_default();
     let not_exhaustive_category_ids: Vec<u64> =
         opt!(dict, "not_exhaustive_category_ids").unwrap_or_default();
-    let extra = extract_extra(dict, IMAGE_KEYS)?;
+    let extra = extract_extra(dict, |key, _| Ok(IMAGE_KEYS.contains(&key)))?;
 
     Ok(Image {
         id,
@@ -476,13 +591,15 @@ pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
 }
 
 pub fn py_to_category(dict: &Bound<'_, PyDict>) -> PyResult<Category> {
-    let id: u64 = req!(dict, "id");
-    let name: String = req!(dict, "name");
+    let id: u64 = req_with!(dict, "id", extract_int);
+    // Missing `name` is tolerated the way pycocotools tolerates it (it stores
+    // raw dicts); `COCO::create_index` fills the placeholder.
+    let name: String = opt!(dict, "name").unwrap_or_default();
     let supercategory: Option<String> = opt!(dict, "supercategory");
     let skeleton: Option<Vec<[u32; 2]>> = opt!(dict, "skeleton");
     let keypoints: Option<Vec<String>> = opt!(dict, "keypoints");
     let frequency: Option<String> = opt!(dict, "frequency");
-    let extra = extract_extra(dict, CATEGORY_KEYS)?;
+    let extra = extract_extra(dict, |key, _| Ok(CATEGORY_KEYS.contains(&key)))?;
 
     Ok(Category {
         id,
