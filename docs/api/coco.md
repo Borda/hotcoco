@@ -407,12 +407,13 @@ shape: assign [`dataset`](#dataset) for those.
 === "Python"
 
     ```python
-    update_anns(anns: list[dict]) -> None
+    update_anns(anns: list[dict], *, create: bool = False) -> None
     ```
 
     | Parameter | Type | Description |
     |---|---|---|
     | `anns` | `list[dict]` | Partial or whole annotation dicts, each with an `id` already in the dataset. |
+    | `create` | `bool`, keyword-only | Allow a schema-unknown key to create a new custom key on an annotation that does not have it yet. Default `False`. |
 
     ```python
     coco.update_anns([
@@ -431,13 +432,17 @@ shape: assign [`dataset`](#dataset) for those.
     and nothing is written. For a partial edit, change the record in
     `coco.dataset.annotations` and call `create_index()`.
 
-Raises `KeyError` if a dict has no `id`, or for the ids the dataset does not
-have, all of them named; `TypeError` if the argument is not a list, an element
-is not a dict, or a value does not fit its field, as `"big"` does not fit
-`area`; and `ValueError` for a value of the right type and the wrong shape, the
-same errors assigning `dataset` raises. Nothing is written in any of those
-cases. In a dataset with duplicate annotation IDs, the last occurrence is the
-one edited — the record the ID lookup holds.
+Raises `KeyError` if a dict has no `id`, for the ids the dataset does not
+have, all of them named, or for a key that is neither a COCO field nor a
+custom key already on that annotation when `create` is `False` — a
+misspelled schema field (`"Area"`, `"iscrowed"`) raises here instead of
+quietly landing beside the field you meant to change. `TypeError` if the
+argument is not a list, an element is not a dict, or a value does not fit its
+field, as `"big"` does not fit `area`; and `ValueError` for a value of the
+right type and the wrong shape, the same errors assigning `dataset` raises.
+Nothing is written in any of those cases. In a dataset with duplicate
+annotation IDs, the last occurrence is the one edited — the record the ID
+lookup holds.
 
 !!! tip
     An evaluator built before the edit keeps the annotations it was built

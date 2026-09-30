@@ -339,9 +339,37 @@ fn py_to_keypoints(value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
 
 /// Apply every key of `dict` to `ann` in one pass: schema keys set their
 /// fields, the rest land in `extra`, replacing a custom key of the same
-/// name.
+/// name. Every schema-unknown key is allowed to create a new custom key —
+/// used for a whole record, which has no prior state to check a key
+/// against.
 pub(crate) fn merge_ann_dict(ann: &mut Annotation, dict: &Bound<'_, PyDict>) -> PyResult<()> {
-    let custom = extract_extra(dict, |key, value| set_ann_field(ann, key, value))?;
+    merge_ann_dict_checked(ann, dict, true)
+}
+
+/// [`merge_ann_dict`], but a schema-unknown key that is not already a
+/// custom key on `ann` is an error unless `create` is true — so a
+/// misspelled schema field (`"Area"`, `"iscrowed"`) raises instead of
+/// quietly landing beside the field the caller meant to change.
+pub(crate) fn merge_ann_dict_checked(
+    ann: &mut Annotation,
+    dict: &Bound<'_, PyDict>,
+    create: bool,
+) -> PyResult<()> {
+    let mut unknown_field = None;
+    let custom = extract_extra(dict, |key, value| {
+        let set = set_ann_field(ann, key, value)?;
+        if !set && !create && unknown_field.is_none() && !ann.extra.contains_key(key) {
+            unknown_field = Some(key.to_string());
+        }
+        Ok(set)
+    })?;
+    if let Some(field) = unknown_field {
+        return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "'{field}' is not an annotation field, and annotation {} does not carry it as a \
+             custom key — check the spelling, or pass create=True to add it",
+            ann.id
+        )));
+    }
     if !custom.is_empty() {
         ann.extra = std::mem::take(&mut ann.extra)
             .into_iter()

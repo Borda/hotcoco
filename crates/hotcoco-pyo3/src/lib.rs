@@ -128,8 +128,8 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 
 use convert::{
     IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
-    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, merge_ann_dict, py_to_annotation,
-    py_to_dataset, rle_to_coco_py,
+    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, merge_ann_dict_checked,
+    py_to_annotation, py_to_dataset, rle_to_coco_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -1092,19 +1092,27 @@ impl PyCOCO {
     /// anns : list of dict
     ///     Partial or whole annotation dicts, each with an ``id`` that is
     ///     already in the dataset.
+    /// create : bool, keyword-only, default False
+    ///     Allow a dict's schema-unknown key to create a new custom key on
+    ///     an annotation that does not have it yet.
     ///
     /// Raises
     /// ------
     /// KeyError
-    ///     For a dict without an ``id``, or ids the dataset does not have;
+    ///     For a dict without an ``id``, ids the dataset does not have, or a
+    ///     key that is neither a COCO field nor a custom key already on that
+    ///     annotation when ``create`` is False — a misspelled schema field
+    ///     (``"Area"``, ``"iscrowed"``) raises here instead of quietly
+    ///     landing beside the field you meant to change. Nothing is written
+    ///     in any of those cases.
     ///     ``TypeError`` and ``ValueError`` as the ``dataset`` setter raises.
-    ///     Nothing is written in any of those cases.
     ///
     /// Examples
     /// --------
     /// >>> coco.update_anns([{"id": ann["id"], "area": mask.area(coco.ann_to_rle(ann))}
     /// ...                   for ann in coco.dataset["annotations"]])
-    fn update_anns(&mut self, anns: &Bound<'_, PyList>) -> PyResult<()> {
+    #[pyo3(signature = (anns, *, create=false))]
+    fn update_anns(&mut self, anns: &Bound<'_, PyList>, create: bool) -> PyResult<()> {
         let mut updated = Vec::with_capacity(anns.len());
         let mut missing = Vec::new();
         for item in anns {
@@ -1124,7 +1132,7 @@ impl PyCOCO {
                 missing.push(id);
                 continue;
             };
-            merge_ann_dict(&mut ann, dict)?;
+            merge_ann_dict_checked(&mut ann, dict, create)?;
             updated.push(ann);
         }
         if !missing.is_empty() {

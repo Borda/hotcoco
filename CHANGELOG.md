@@ -15,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   id raises `KeyError` instead of being skipped. `coco.dataset` returns a copy,
   so an edit through it never landed, and assigning the whole dataset back was
   the only way — too coarse for evaluating one dataset under several IoU
-  types, where each annotation's `area` follows the box or the mask. The API
-  reference has the contract. *Rust API:* `COCO::update_anns` and
-  `Error::UnknownAnnIds`. Based on
+  types, where each annotation's `area` follows the box or the mask. A key
+  outside the COCO schema is a custom key; adding one an annotation does not
+  carry yet needs `create=True`, so a misspelled schema field
+  (`"Area"`, `"iscrowed"`) raises instead of landing quietly beside the field
+  you meant to change. The API reference has the contract. *Rust API:*
+  `COCO::update_anns` and `Error::UnknownAnnIds`. Based on
   [#8](https://github.com/derekallman/hotcoco/pull/8) by Jirka Borovec.
 
 - **`metrics::counts::precision_recall_curve_of_order_into`** — the interpolated

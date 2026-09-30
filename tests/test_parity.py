@@ -1071,8 +1071,9 @@ def test_update_anns_sets_scalar_shaped_and_custom_keys_alike():
     coco.update_anns([{"id": 1, "bbox": [1.0, 2.0, 3.0, 4.0]}])
     assert coco.dataset["annotations"][0]["bbox"] == [1.0, 2.0, 3.0, 4.0]
 
-    coco.update_anns([{"id": 1, "provenance": "hand-drawn"}])
+    coco.update_anns([{"id": 1, "provenance": "hand-drawn"}], create=True)
     assert coco.dataset["annotations"][0]["provenance"] == "hand-drawn"
+    # Already on the record now, so no flag needed to change it again.
     coco.update_anns([{"id": 1, "provenance": "traced"}])
     assert coco.dataset["annotations"][0]["provenance"] == "traced"
 
@@ -1099,15 +1100,29 @@ def test_update_anns_input_shape():
     assert coco.dataset["annotations"][0]["area"] == 5.0
 
 
-def test_update_anns_treats_a_misspelled_field_as_a_custom_key():
-    # As pycocotools does: `ann["Area"] = x` adds a key, and the data shows it.
+def test_update_anns_rejects_a_misspelled_field_without_create():
+    # A typo used to land as a custom key, leaving the intended edit undone with
+    # nothing raised — the silent no-op this guard exists to remove.
     coco = COCO(_make_minimal_gt("bbox", annotations=[_make_bbox_ann(1)]))
 
-    coco.update_anns([{"id": 1, "Area": 5000.0}])
+    with pytest.raises(KeyError, match="Area"):
+        coco.update_anns([{"id": 1, "Area": 5000.0}])
 
     ann = coco.dataset["annotations"][0]
     assert ann["area"] == 10000.0
-    assert ann["Area"] == 5000.0
+    assert "Area" not in ann
+
+
+def test_update_anns_allows_a_new_custom_key_with_create():
+    coco = COCO(_make_minimal_gt("bbox", annotations=[_make_bbox_ann(1)]))
+
+    coco.update_anns([{"id": 1, "provenance": "hand-drawn"}], create=True)
+    ann = coco.dataset["annotations"][0]
+    assert ann["provenance"] == "hand-drawn"
+
+    # Already on the record now, so no flag needed to change it again.
+    coco.update_anns([{"id": 1, "provenance": "traced"}])
+    assert coco.dataset["annotations"][0]["provenance"] == "traced"
 
 
 def test_update_anns_reports_the_missing_id_first():
