@@ -18,6 +18,12 @@ pub enum Error {
     #[error(transparent)]
     Convert(#[from] ConvertError),
 
+    /// Annotation ids handed to [`COCO::update_anns`](crate::COCO::update_anns)
+    /// that the dataset does not have. Its own variant so a binding can map
+    /// exactly this failure to a lookup error — Python's `KeyError`.
+    #[error("annotation id(s) not in this dataset: {0:?}")]
+    UnknownAnnIds(Vec<u64>),
+
     /// Any other error with a human-readable message.
     #[error("{0}")]
     Other(String),

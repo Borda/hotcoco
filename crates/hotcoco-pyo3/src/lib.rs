@@ -77,6 +77,8 @@ pub(crate) fn to_pyerr(err: hotcoco_core::Error) -> PyErr {
         }
         Error::Json(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
         Error::Convert(e) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+        // A lookup failure, so the exception a mapping lookup raises.
+        e @ Error::UnknownAnnIds(_) => pyo3::exceptions::PyKeyError::new_err(e.to_string()),
         Error::Other(msg) => pyo3::exceptions::PyRuntimeError::new_err(msg),
     }
 }
@@ -126,8 +128,8 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 
 use convert::{
     IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
-    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, py_to_annotation, py_to_dataset,
-    rle_to_coco_py,
+    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, merge_ann_dict, py_to_annotation,
+    py_to_dataset, rle_to_coco_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1076,69 @@ impl PyCOCO {
     #[pyo3(name = "createIndex")]
     fn create_index_camel(_slf: PyRef<'_, Self>) {}
 
+    /// Edit annotations that are already loaded, matched by ``id``, keeping
+    /// the indices current.
+    ///
+    /// Each dict is merged into the annotation with the same ``id``: the keys
+    /// you pass are set, every other field keeps its value, and a key outside
+    /// the COCO schema is a custom key. The targeted counterpart to
+    /// ``coco.dataset = d``, which is still the way to add or remove
+    /// annotations or to drop a key. An evaluator built before the edit keeps
+    /// the annotations it was built with. The API reference for
+    /// ``update_anns`` has the full contract.
+    ///
+    /// Parameters
+    /// ----------
+    /// anns : list of dict
+    ///     Partial or whole annotation dicts, each with an ``id`` that is
+    ///     already in the dataset.
+    ///
+    /// Raises
+    /// ------
+    /// KeyError
+    ///     For a dict without an ``id``, or ids the dataset does not have;
+    ///     ``TypeError`` and ``ValueError`` as the ``dataset`` setter raises.
+    ///     Nothing is written in any of those cases.
+    ///
+    /// Examples
+    /// --------
+    /// >>> coco.update_anns([{"id": ann["id"], "area": mask.area(coco.ann_to_rle(ann))}
+    /// ...                   for ann in coco.dataset["annotations"]])
+    fn update_anns(&mut self, anns: &Bound<'_, PyList>) -> PyResult<()> {
+        let mut updated = Vec::with_capacity(anns.len());
+        let mut missing = Vec::new();
+        for item in anns {
+            let dict = item.cast::<PyDict>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("update_anns: list elements must be dicts")
+            })?;
+            let Some(id) = dict.get_item(pyo3::intern!(dict.py(), "id"))? else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(
+                    "every annotation passed to update_anns() needs an 'id'",
+                ));
+            };
+            let id: u64 = convert::extract_int(&id)?;
+            // Merged into a copy, so a bad value further down the list leaves
+            // the dataset untouched; every unknown id is reported at once, as
+            // the core reports them.
+            let Some(mut ann) = self.inner.get_ann(id).cloned() else {
+                missing.push(id);
+                continue;
+            };
+            merge_ann_dict(&mut ann, dict)?;
+            updated.push(ann);
+        }
+        if !missing.is_empty() {
+            return Err(to_pyerr(hotcoco_core::Error::UnknownAnnIds(missing)));
+        }
+        // A shared dataset is copied on its first edit; an empty edit is none.
+        if updated.is_empty() {
+            return Ok(());
+        }
+        Arc::make_mut(&mut self.inner)
+            .update_anns(updated)
+            .map_err(to_pyerr)
+    }
+
     /// Warnings collected while loading and indexing this dataset.
     ///
     /// Each entry was also printed to stderr at the moment it arose; this
@@ -1089,8 +1154,9 @@ impl PyCOCO {
     ///
     /// **Returns a fresh copy on every access.** Mutating it in place —
     /// ``coco.dataset["annotations"].append(...)`` — changes a temporary and is
-    /// a silent no-op. Take the copy, edit it, and assign it back
-    /// (``coco.dataset = d``), which re-indexes immediately.
+    /// a silent no-op. To edit annotations, pass the changed keys to
+    /// :meth:`update_anns`; for anything else, take the copy, edit it, and
+    /// assign it back (``coco.dataset = d``). Both keep the indices current.
     #[getter]
     fn dataset(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let ds = &self.inner.dataset;
@@ -2109,9 +2175,9 @@ Examples
     /// The ground-truth dataset this evaluator was built from.
     ///
     /// Each access returns a new object that shares the evaluator's data
-    /// without copying it. Assigning to its ``dataset`` never reaches the
-    /// evaluator; to evaluate against different ground truth, construct a new
-    /// ``COCOeval``.
+    /// without copying it. Assigning to its ``dataset`` or calling its
+    /// ``update_anns`` never reaches the evaluator; to evaluate against
+    /// different ground truth, construct a new ``COCOeval``.
     #[getter]
     fn coco_gt(&self) -> PyCOCO {
         PyCOCO::shared(Arc::clone(self.inner.coco_gt()))

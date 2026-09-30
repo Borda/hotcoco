@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::ann_index::{AnnIndex, Duplicates, IdIndex};
+use crate::error::Error;
 use crate::mask;
 use crate::types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
 
@@ -162,14 +163,7 @@ impl COCO {
                  the same way). Deduplicate ids to make this dataset unambiguous."
             ));
         }
-        self.index = AnnIndex::build(&self.dataset.annotations);
-        // One push per distinct (image, category) pair, so each image appears
-        // once in a category's list.
-        self.cat_to_imgs =
-            FxHashMap::with_capacity_and_hasher(self.dataset.categories.len(), FxBuildHasher);
-        for (img_id, cat_id) in self.index.pairs() {
-            self.cat_to_imgs.entry(cat_id).or_default().push(img_id);
-        }
+        self.index_annotations();
 
         self.imgs = FxHashMap::with_capacity_and_hasher(self.dataset.images.len(), FxBuildHasher);
         for (i, img) in self.dataset.images.iter().enumerate() {
@@ -187,6 +181,63 @@ impl COCO {
         for (i, cat) in self.dataset.categories.iter().enumerate() {
             self.cats.insert(cat.id, i);
         }
+    }
+
+    /// The groupings that key on an annotation's `image_id` and
+    /// `category_id`: rebuilt by [`create_index`](Self::create_index) and by
+    /// an [`update_anns`](Self::update_anns) that moves one.
+    fn index_annotations(&mut self) {
+        self.index = AnnIndex::build(&self.dataset.annotations);
+        // One push per distinct (image, category) pair, so each image appears
+        // once in a category's list.
+        self.cat_to_imgs =
+            FxHashMap::with_capacity_and_hasher(self.dataset.categories.len(), FxBuildHasher);
+        for (img_id, cat_id) in self.index.pairs() {
+            self.cat_to_imgs.entry(cat_id).or_default().push(img_id);
+        }
+    }
+
+    /// Replace annotations by id, re-indexing only when a replacement moves
+    /// one.
+    ///
+    /// The targeted counterpart to replacing the whole
+    /// [`dataset`](Self::dataset): each annotation in `anns` overwrites the one
+    /// that carries the same `id`. Ids do not move, so the id lookup survives
+    /// untouched; the per-image and per-category groupings are rebuilt only if
+    /// a replacement changes an `image_id` or a `category_id`, which is what
+    /// they key on. Editing `area` across a whole dataset — the multi-IoU-type
+    /// case — therefore costs one pass over `anns`, not one over the dataset.
+    ///
+    /// Every id is checked before anything is written: the ids that are not
+    /// in the dataset come back as [`Error::UnknownAnnIds`] and the dataset is
+    /// left untouched, so a partial update never happens.
+    ///
+    /// In a dataset with duplicate annotation ids, the id lookup holds the
+    /// *last* occurrence (pycocotools parity — see
+    /// [`create_index`](Self::create_index)), so that is the one replaced.
+    pub fn update_anns(&mut self, anns: Vec<Annotation>) -> crate::error::Result<()> {
+        let mut targets = Vec::with_capacity(anns.len());
+        let mut missing = Vec::new();
+        for ann in &anns {
+            match self.anns.position(ann.id) {
+                Some(i) => targets.push(i),
+                None => missing.push(ann.id),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(Error::UnknownAnnIds(missing));
+        }
+
+        let mut moved = false;
+        for (i, ann) in targets.into_iter().zip(anns) {
+            let old = &self.dataset.annotations[i];
+            moved |= old.image_id != ann.image_id || old.category_id != ann.category_id;
+            self.dataset.annotations[i] = ann;
+        }
+        if moved {
+            self.index_annotations();
+        }
+        Ok(())
     }
 
     /// Get annotation IDs matching the given filters.

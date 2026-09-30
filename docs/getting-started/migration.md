@@ -71,7 +71,9 @@ Annotation dicts carry the same keys — `id`, `image_id`, `category_id`, `bbox`
 
 The data lives in Rust, so `coco.dataset` returns a **copy** on each access, and
 `ev.coco_gt` and `ev.coco_dt` return a new object that shares the evaluator's
-data without copying it. Attribute assignment
+data without copying it; an edit to that object, through `dataset` or
+`update_anns`, lands on a private copy and never reaches the evaluator.
+Attribute assignment
 (`ev.params.cat_ids = [...]`) works — the setter routes the change back to Rust —
 but mutating a *container inside* a copy is a no-op:
 
@@ -93,6 +95,15 @@ d["annotations"].append(new_ann)
 coco.dataset = d                    # replaces contents and rebuilds the index
 coco.createIndex()                  # supported, but a formality after assignment
 ```
+
+Editing annotations that are already there does not need the whole dataset:
+
+```python
+coco.update_anns([{"id": ann_id, "area": mask_area}])   # the keys you pass, by id
+```
+
+See [`update_anns`](../api/coco.md#update_anns) for what it raises and when it
+re-indexes.
 
 ## Known differences
 

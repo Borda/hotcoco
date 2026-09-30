@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`COCO.update_anns`** edits annotations that are already loaded, without
+  rebuilding the dataset: each dict is merged into the annotation with the
+  same `id`, so `{"id": 1, "area": 5000.0}` is a one-field edit, and an unknown
+  id raises `KeyError` instead of being skipped. `coco.dataset` returns a copy,
+  so an edit through it never landed, and assigning the whole dataset back was
+  the only way — too coarse for evaluating one dataset under several IoU
+  types, where each annotation's `area` follows the box or the mask. The API
+  reference has the contract. *Rust API:* `COCO::update_anns` and
+  `Error::UnknownAnnIds`. Based on
+  [#8](https://github.com/derekallman/hotcoco/pull/8) by Jirka Borovec.
+
 - **`metrics::counts::precision_recall_curve_of_order_into`** — the interpolated
   precision-recall curve straight from ranked match flags, without the
   cumulative TP/FP arrays `precision_recall_curve_into` reads. Same values, same

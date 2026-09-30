@@ -1,7 +1,7 @@
 use hotcoco_core::{Annotation, Category, Dataset, DatasetStats, Extra, Image, Rle, Segmentation};
 use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
 /// Extract an optional field from a Python dict.
 ///
@@ -126,8 +126,8 @@ fn counts_as_str(counts: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     Ok(None)
 }
 
-/// `req!` with an explicit reader — [`extract_int`] or [`extract_flag`]. Same
-/// interning rationale as `opt!` above.
+/// `req!` with an explicit reader such as [`extract_int`]. Same interning
+/// rationale as `opt!` above.
 macro_rules! req_with {
     ($dict:expr, $key:literal, $read:expr) => {
         $read(
@@ -140,8 +140,8 @@ macro_rules! req_with {
     };
 }
 
-/// `opt!` with an explicit reader — [`extract_int`] or [`extract_flag`]. Same
-/// interning rationale as `opt!` above.
+/// `opt!` with an explicit reader such as [`extract_int`]. Same interning
+/// rationale as `opt!` above.
 macro_rules! opt_with {
     ($dict:expr, $key:literal, $read:expr) => {
         $dict
@@ -151,23 +151,10 @@ macro_rules! opt_with {
     };
 }
 
-/// The dict keys each record type owns. Any other key on an incoming dict is a
-/// custom key, preserved through the `extra` map (serde-flattened in the core
-/// types) so `load → filter → save` keeps user metadata the way pycocotools does.
-const ANNOTATION_KEYS: &[&str] = &[
-    "id",
-    "image_id",
-    "category_id",
-    "bbox",
-    "area",
-    "segmentation",
-    "iscrowd",
-    "keypoints",
-    "num_keypoints",
-    "obb",
-    "score",
-    "is_group_of",
-];
+/// The dict keys each record type owns; an annotation's are the arms of
+/// [`set_ann_field`]. Any other key on an incoming dict is a custom key,
+/// preserved through the `extra` map (serde-flattened in the core types) so
+/// `load → filter → save` keeps user metadata the way pycocotools does.
 const IMAGE_KEYS: &[&str] = &[
     "id",
     "file_name",
@@ -195,24 +182,36 @@ const CATEGORY_KEYS: &[&str] = &[
 /// hand-rolled per-value converter: the values are arbitrary user objects, and
 /// `json` already defines exactly which of those a COCO file can hold. A
 /// non-serializable value raises the stdlib's own `TypeError`, naming the type.
-fn extract_extra(dict: &Bound<'_, PyDict>, known: &[&str]) -> PyResult<Extra> {
+///
+/// `known` says whether a key is a schema key, and may consume it: the record
+/// converters pass their key list, the annotation merge passes the setter.
+fn extract_extra(
+    dict: &Bound<'_, PyDict>,
+    mut known: impl FnMut(&str, &Bound<'_, PyAny>) -> PyResult<bool>,
+) -> PyResult<Extra> {
     let py = dict.py();
     let mut extras: Option<Bound<'_, PyDict>> = None;
     for (k, v) in dict {
-        let Ok(key) = k.extract::<String>() else {
+        let Ok(key) = k.cast::<PyString>() else {
             continue; // non-string keys cannot appear in COCO JSON
         };
-        if known.contains(&key.as_str()) {
+        if known(&key.to_cow()?, &v)? {
             continue;
         }
         extras
             .get_or_insert_with(|| PyDict::new(py))
-            .set_item(key, v)?;
+            .set_item(k, v)?;
     }
-    let Some(extras) = extras else {
-        return Ok(Extra::new());
-    };
-    let json_str: String = py
+    match extras {
+        Some(extras) => extra_from_dict(&extras),
+        None => Ok(Extra::new()),
+    }
+}
+
+/// The custom keys of a record, as the JSON they will be saved as.
+fn extra_from_dict(extras: &Bound<'_, PyDict>) -> PyResult<Extra> {
+    let json_str: String = extras
+        .py()
         .import("json")?
         .call_method1("dumps", (extras,))?
         .extract()?;
@@ -302,50 +301,66 @@ fn polygons_to_py<P: AsRef<[f64]>>(py: Python<'_>, polys: &[P]) -> PyResult<Py<P
     Ok(PyList::new(py, inner_lists)?.into_any().unbind())
 }
 
-pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
-    let id: u64 = opt_with!(dict, "id", extract_int).unwrap_or(0);
-    let image_id: u64 = req_with!(dict, "image_id", extract_int);
-    let category_id: u64 = opt_with!(dict, "category_id", extract_int).unwrap_or(0);
-    let bbox: Option<[f64; 4]> = opt!(dict, "bbox");
-    let area: Option<f64> = opt!(dict, "area");
-    let segmentation: Option<Segmentation> = dict
-        .get_item(pyo3::intern!(dict.py(), "segmentation"))?
-        .map(|v| py_to_segmentation(&v))
-        .transpose()?;
-    let iscrowd: bool = opt_with!(dict, "iscrowd", extract_flag).unwrap_or(false);
-    let keypoints: Option<Vec<f64>> = dict
-        .get_item(pyo3::intern!(dict.py(), "keypoints"))?
-        .map(|v| {
-            // Flat `[x, y, v, …]` is the COCO spelling; an `(N, 3)` array is
-            // how the same triplets sit in a tensor. Both mean one thing.
-            v.extract::<Vec<f64>>().or_else(|flat_err| {
-                v.extract::<Vec<[f64; 3]>>()
-                    .map(|rows| rows.into_iter().flatten().collect())
-                    .map_err(|_| flat_err)
-            })
-        })
-        .transpose()?;
-    let num_keypoints: Option<u32> = opt_with!(dict, "num_keypoints", extract_int);
-    let obb: Option<[f64; 5]> = opt!(dict, "obb");
-    let score: Option<f64> = opt!(dict, "score");
-    let is_group_of: Option<bool> = opt_with!(dict, "is_group_of", extract_flag);
-    let extra = extract_extra(dict, ANNOTATION_KEYS)?;
+/// Set the annotation field a schema key names; `false` for any other key,
+/// which is a custom key for `extra`.
+///
+/// The one place a dict key becomes an annotation field, for a whole record
+/// ([`py_to_annotation`]) and for a partial edit ([`merge_ann_dict`]) alike,
+/// so both read a value by the same rules.
+fn set_ann_field(ann: &mut Annotation, key: &str, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match key {
+        "id" => ann.id = extract_int(value)?,
+        "image_id" => ann.image_id = extract_int(value)?,
+        "category_id" => ann.category_id = extract_int(value)?,
+        "bbox" => ann.bbox = Some(value.extract()?),
+        "area" => ann.area = Some(value.extract()?),
+        "segmentation" => ann.segmentation = Some(py_to_segmentation(value)?),
+        "iscrowd" => ann.iscrowd = extract_flag(value)?,
+        "keypoints" => ann.keypoints = Some(py_to_keypoints(value)?),
+        "num_keypoints" => ann.num_keypoints = Some(extract_int(value)?),
+        "obb" => ann.obb = Some(Box::new(value.extract()?)),
+        "score" => ann.score = Some(value.extract()?),
+        "is_group_of" => ann.is_group_of = Some(extract_flag(value)?),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
 
-    Ok(Annotation {
-        id,
-        image_id,
-        category_id,
-        bbox,
-        area,
-        segmentation,
-        iscrowd,
-        keypoints,
-        num_keypoints,
-        obb: obb.map(Box::new),
-        score,
-        is_group_of,
-        extra,
+/// Flat `[x, y, v, …]` is the COCO spelling; an `(N, 3)` array is how the
+/// same triplets sit in a tensor. Both mean one thing.
+fn py_to_keypoints(value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
+    value.extract::<Vec<f64>>().or_else(|flat_err| {
+        value
+            .extract::<Vec<[f64; 3]>>()
+            .map(|rows| rows.into_iter().flatten().collect())
+            .map_err(|_| flat_err)
     })
+}
+
+/// Apply every key of `dict` to `ann` in one pass: schema keys set their
+/// fields, the rest land in `extra`, replacing a custom key of the same
+/// name.
+pub(crate) fn merge_ann_dict(ann: &mut Annotation, dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    let custom = extract_extra(dict, |key, value| set_ann_field(ann, key, value))?;
+    if !custom.is_empty() {
+        ann.extra = std::mem::take(&mut ann.extra)
+            .into_iter()
+            .chain(custom)
+            .collect();
+    }
+    Ok(())
+}
+
+pub fn py_to_annotation(dict: &Bound<'_, PyDict>) -> PyResult<Annotation> {
+    // The one required key; the message matches `req!`.
+    if !dict.contains(pyo3::intern!(dict.py(), "image_id"))? {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "dict missing 'image_id'",
+        ));
+    }
+    let mut ann = Annotation::default();
+    merge_ann_dict(&mut ann, dict)?;
+    Ok(ann)
 }
 
 fn py_to_segmentation(obj: &Bound<'_, PyAny>) -> PyResult<Segmentation> {
@@ -530,7 +545,7 @@ pub fn py_to_image(dict: &Bound<'_, PyDict>) -> PyResult<Image> {
     let neg_category_ids: Vec<u64> = opt!(dict, "neg_category_ids").unwrap_or_default();
     let not_exhaustive_category_ids: Vec<u64> =
         opt!(dict, "not_exhaustive_category_ids").unwrap_or_default();
-    let extra = extract_extra(dict, IMAGE_KEYS)?;
+    let extra = extract_extra(dict, |key, _| Ok(IMAGE_KEYS.contains(&key)))?;
 
     Ok(Image {
         id,
@@ -556,7 +571,7 @@ pub fn py_to_category(dict: &Bound<'_, PyDict>) -> PyResult<Category> {
     let skeleton: Option<Vec<[u32; 2]>> = opt!(dict, "skeleton");
     let keypoints: Option<Vec<String>> = opt!(dict, "keypoints");
     let frequency: Option<String> = opt!(dict, "frequency");
-    let extra = extract_extra(dict, CATEGORY_KEYS)?;
+    let extra = extract_extra(dict, |key, _| Ok(CATEGORY_KEYS.contains(&key)))?;
 
     Ok(Category {
         id,
