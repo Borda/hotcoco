@@ -109,7 +109,7 @@ COCO RLE uses `[height, width]` order, not `[width, height]`. If your masks look
 
 ### Metrics differ slightly from pycocotools
 
-First check that `ev.params` matches the configuration you expect — mismatched `iou_thrs` or `area_rng` is the usual cause. With default parameters, hotcoco matches pycocotools to the last bits of a `float64` (see [Benchmarks](../benchmarks.md#metric-parity)); anything above about 1e-12 is a bug worth reporting.
+First check that `ev.params` matches the configuration you expect — mismatched `iou_thrs` or `area_rng` is the usual cause. With default parameters, hotcoco matches pycocotools bit for bit (see [Benchmarks](../benchmarks.md#metric-parity)); anything above about 1e-12 is a bug worth reporting.
 
 ---
 

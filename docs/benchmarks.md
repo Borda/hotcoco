@@ -101,6 +101,12 @@ sits in memory beside its records.
 Absolute times stay under 0.4s at 368,000 detections, and hotcoco is fastest on
 every row.
 
+`StreamingEval` holds less still. On Objects365 val with 1M synthetic detections,
+matching each batch as it arrives and keeping only the lean per-pair records
+peaks at 270 MB above the loaded ground truth, against 739 MB for collecting
+every prediction and evaluating at the end. The numbers are identical either
+way, whatever the batch size.
+
 ### Where the time goes
 
 The preceding end-to-end numbers blend two very different phases: **load** (JSON
@@ -301,9 +307,9 @@ for i, (a, b) in enumerate(zip(ref, got)):
 print("max diff:", np.abs(ref - got).max())
 ```
 
-Anything above ~1e-12 on your data is worth
-[opening an issue](https://github.com/derekallman/hotcoco/issues) — that is the
-threshold the project's own parity gate uses.
+On val2017 the project's own parity gate requires exact equality, so any
+difference at all is a bug. On your own data, anything above ~1e-12 is worth
+[opening an issue](https://github.com/derekallman/hotcoco/issues).
 
 The same shape works for `hotcoco.mask` against `pycocotools.mask`, operation by
 operation.
