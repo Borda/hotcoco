@@ -155,6 +155,18 @@ struct PairHeader {
     bits_start: u32,
 }
 
+impl PairHeader {
+    /// The header past the last pair: its offsets are the arenas' lengths, so
+    /// the last pair's score count is the gap to it like every other's.
+    fn sentinel(n_scores: usize, n_words: usize) -> Self {
+        PairHeader {
+            scores_start: arena_index(n_scores),
+            bits_start: arena_index(n_words),
+            ..PairHeader::default()
+        }
+    }
+}
+
 /// One (image, category, area range) cell: a pair's index in [`Cells`] and
 /// which of its area ranges, by evaluate-time position.
 #[derive(Debug, Clone, Copy)]
@@ -240,11 +252,7 @@ impl Cells {
             num_gt: vec![0; n_pairs * n_areas],
             bits: vec![0; n_words],
         };
-        cells.pairs[n_pairs] = PairHeader {
-            scores_start: arena_index(n_scores),
-            bits_start: arena_index(n_words),
-            ..PairHeader::default()
-        };
+        cells.pairs[n_pairs] = PairHeader::sentinel(n_scores, n_words);
         // One writer per run, over disjoint windows of every arena.
         let (mut ph, mut sc, mut ng, mut bw) = (
             &mut cells.pairs[..n_pairs],
@@ -290,6 +298,48 @@ impl Cells {
                 debug_assert!(writer.is_full(), "a run wrote what its layout pass counted");
             });
         cells
+    }
+
+    /// One arena from runs of pairs picked out of others, in the order
+    /// given, with their offsets rebased: `finalize()`'s per-image gather in
+    /// `StreamingEval`. Every pair's bits start on a word boundary
+    /// ([`words_for`] rounds up per pair), so a run's words copy without
+    /// repacking. `params` fixes the row and block counts, which every source
+    /// must share.
+    pub(super) fn gather<'a>(
+        params: &Params,
+        runs: impl IntoIterator<Item = (&'a Cells, std::ops::Range<usize>)>,
+    ) -> Self {
+        let (n_thr, n_areas) = (params.iou_thrs.len(), params.area_ranges.len());
+        let mut out = Cells {
+            pairs: Vec::new(),
+            n_thr,
+            n_areas,
+            scores: Vec::new(),
+            num_gt: Vec::new(),
+            bits: Vec::new(),
+        };
+        for (src, range) in runs {
+            debug_assert_eq!((src.n_thr, src.n_areas), (n_thr, n_areas));
+            debug_assert!(range.end <= src.len());
+            let (first, end) = (&src.pairs[range.start], &src.pairs[range.end]);
+            let (s0, s1) = (first.scores_start as usize, end.scores_start as usize);
+            let (w0, w1) = (first.bits_start as usize, end.bits_start as usize);
+            let (scores_base, bits_base) = (out.scores.len(), out.bits.len());
+            out.pairs
+                .extend(src.pairs[range.clone()].iter().map(|h| PairHeader {
+                    scores_start: arena_index(scores_base + h.scores_start as usize - s0),
+                    bits_start: arena_index(bits_base + h.bits_start as usize - w0),
+                    ..*h
+                }));
+            out.scores.extend_from_slice(&src.scores[s0..s1]);
+            out.num_gt
+                .extend_from_slice(&src.num_gt[range.start * n_areas..range.end * n_areas]);
+            out.bits.extend_from_slice(&src.bits[w0..w1]);
+        }
+        out.pairs
+            .push(PairHeader::sentinel(out.scores.len(), out.bits.len()));
+        out
     }
 
     /// The number of pairs.

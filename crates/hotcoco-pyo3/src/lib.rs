@@ -128,8 +128,8 @@ fn freq_group_name(group: hotcoco_core::FreqGroup) -> &'static str {
 
 use convert::{
     IdList, NameList, annotation_to_py, category_to_py, confusion_counts_to_py,
-    dataset_stats_to_py, f64_array, image_to_py, map_to_dict, merge_ann_dict_checked,
-    py_to_annotation, py_to_dataset, rle_to_coco_py,
+    dataset_stats_to_py, dict_list, f64_array, image_to_py, map_to_dict, merge_ann_dict_checked,
+    py_to_annotation, py_to_category, py_to_dataset, py_to_image, rle_to_coco_py,
 };
 
 // ---------------------------------------------------------------------------
@@ -305,17 +305,7 @@ impl PyCOCO {
 
         // Case 2: list of annotation dicts
         if let Ok(list) = res.cast::<PyList>() {
-            let anns = list
-                .iter()
-                .map(|item| {
-                    let dict = item.cast::<PyDict>().map_err(|_| {
-                        pyo3::exceptions::PyTypeError::new_err(
-                            "load_res: list elements must be dicts",
-                        )
-                    })?;
-                    py_to_annotation(dict)
-                })
-                .collect::<PyResult<Vec<_>>>()?;
+            let anns = dict_list(list, "load_res", py_to_annotation)?;
             return self
                 .inner
                 .load_res_anns(anns)
@@ -1665,6 +1655,23 @@ struct PyCOCOeval {
 }
 
 impl PyCOCOeval {
+    /// Wrap a core evaluator: a fresh `params` object mirroring its state and
+    /// no cached `.eval`. The one place the cache-reset invariant is spelled.
+    fn from_inner(py: Python<'_>, inner: hotcoco_core::COCOeval) -> PyResult<Self> {
+        let params = Py::new(
+            py,
+            PyParams {
+                inner: inner.params.clone(),
+            },
+        )?;
+        Ok(PyCOCOeval {
+            inner,
+            params,
+            eval_cache: None,
+            eval_params: None,
+        })
+    }
+
     /// Run `f` against the evaluator with `ev.params` reconciled on both sides:
     /// pull the Python-visible `Params` in, run, push the result back.
     ///
@@ -1767,20 +1774,7 @@ impl PyCOCOeval {
         } else {
             hotcoco_core::COCOeval::new(gt, dt, iou)
         };
-        let params = Python::attach(|py| {
-            Py::new(
-                py,
-                PyParams {
-                    inner: inner.params.clone(),
-                },
-            )
-        })?;
-        Ok(PyCOCOeval {
-            inner,
-            params,
-            eval_cache: None,
-            eval_params: None,
-        })
+        Python::attach(|py| Self::from_inner(py, inner))
     }
 
     fn evaluate(&mut self, py: Python<'_>) {
@@ -2691,6 +2685,104 @@ Example\n\
 }
 
 // ---------------------------------------------------------------------------
+// StreamingEval
+// ---------------------------------------------------------------------------
+
+#[doc = "Incremental evaluation: feed detector batches as they come, get a ``COCOeval`` back.
+
+Each ``update()`` call matches a batch of images' ground truth against
+their detections right away, so the matching runs as detections are
+produced instead of at the end of the epoch. ``finalize()`` returns an
+ordinary ``COCOeval`` ready for ``accumulate()``, ``summarize()``, and
+``report()``, with numbers identical to a batch run over the same
+annotations. The API reference has the full contract: what the returned
+evaluator supports, and the restrictions.
+
+>>> se = StreamingEval(categories, iou_type='bbox')
+>>> for images, gt_anns, dt_anns in batches:
+...     se.update(images, gt_anns, dt_anns)
+>>> ev = se.finalize()
+>>> ev.accumulate()
+>>> ev.summarize()
+"]
+#[pyclass(name = "StreamingEval")]
+struct PyStreamingEval {
+    /// `None` once `finalize()` has consumed it; `update`/`finalize` then
+    /// raise [`spent`] instead of panicking.
+    inner: Option<hotcoco_core::StreamingEval>,
+}
+
+/// The error for a `StreamingEval` used after `finalize()` consumed it.
+fn spent() -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(
+        "this StreamingEval is spent: finalize() has already been called",
+    )
+}
+
+#[pymethods]
+impl PyStreamingEval {
+    #[new]
+    #[pyo3(signature = (categories, iou_type="bbox", lvis_style=false, params=None))]
+    fn new(
+        categories: &Bound<'_, PyList>,
+        iou_type: &str,
+        lvis_style: bool,
+        params: Option<&PyParams>,
+    ) -> PyResult<Self> {
+        let iou = parse_iou_type(iou_type)?;
+        let categories = dict_list(categories, "categories", py_to_category)?;
+
+        let eval_mode = if lvis_style {
+            hotcoco_core::EvalMode::Lvis
+        } else {
+            hotcoco_core::EvalMode::Coco
+        };
+        let params = match params {
+            Some(p) => p.inner.clone(),
+            None => eval_mode.default_params(iou),
+        };
+
+        let inner = hotcoco_core::StreamingEval::new(params, eval_mode, categories)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(PyStreamingEval { inner: Some(inner) })
+    }
+
+    #[doc = "Match a batch of images' ground truth against their detections now.
+
+``images``: the batch's image dicts, each with at least ``id``.
+``gt_anns``: their annotations, in the shape ``COCO(dict)`` accepts.
+``dt_anns``: their raw predictions, in the shape ``load_res()`` accepts and
+loaded the same way. Pass the detector's whole batch; a batch of one works.
+
+Raises the error ``load_res()`` raises for a NaN score, and ``RuntimeError``
+after ``finalize()``."]
+    fn update(
+        &mut self,
+        py: Python<'_>,
+        images: &Bound<'_, PyList>,
+        gt_anns: &Bound<'_, PyList>,
+        dt_anns: &Bound<'_, PyList>,
+    ) -> PyResult<()> {
+        let images = dict_list(images, "images", py_to_image)?;
+        let gt = dict_list(gt_anns, "gt_anns", py_to_annotation)?;
+        let dt = dict_list(dt_anns, "dt_anns", py_to_annotation)?;
+
+        let inner = self.inner.as_mut().ok_or_else(spent)?;
+        py.detach(|| inner.update(images, gt, dt)).map_err(to_pyerr)
+    }
+
+    #[doc = "Assemble every image seen so far into a ``COCOeval``, ready for
+``accumulate()`` → ``summarize()`` → ``report()``.
+
+Consumes this ``StreamingEval``: ``update()`` or ``finalize()`` afterwards
+raises ``RuntimeError``."]
+    fn finalize(&mut self, py: Python<'_>) -> PyResult<PyCOCOeval> {
+        let inner = self.inner.take().ok_or_else(spent)?;
+        PyCOCOeval::from_inner(py, inner.finalize())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EvalImg / AccumulatedEval → Python converters
 // ---------------------------------------------------------------------------
 
@@ -2943,6 +3035,7 @@ fn compare(
 fn hotcoco(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCOCO>()?;
     m.add_class::<PyCOCOeval>()?;
+    m.add_class::<PyStreamingEval>()?;
     m.add_class::<PyParams>()?;
     m.add_class::<PyHierarchy>()?;
     m.add_function(wrap_pyfunction!(init_as_pycocotools, m)?)?;

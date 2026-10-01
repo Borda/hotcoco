@@ -16,6 +16,29 @@ pub enum EvalMode {
     OpenImages,
 }
 
+impl EvalMode {
+    /// The parameters each mode's protocol starts from — what the `COCOeval`
+    /// constructors and `StreamingEval` bindings hand to `Params`. COCO is
+    /// [`Params::new`](crate::params::Params::new); LVIS caps detections at 300; Open Images scores one
+    /// IoU threshold (0.5), one area range, and 100 detections.
+    pub fn default_params(self, iou_type: crate::params::IouType) -> crate::params::Params {
+        let mut params = crate::params::Params::new(iou_type);
+        match self {
+            EvalMode::Coco => {}
+            EvalMode::Lvis => params.max_dets = vec![300],
+            EvalMode::OpenImages => {
+                params.iou_thrs = vec![0.5];
+                params.area_ranges = vec![crate::AreaRange {
+                    label: "all".to_string(),
+                    range: [0.0, 1e10],
+                }];
+                params.max_dets = vec![100];
+            }
+        }
+        params
+    }
+}
+
 /// LVIS category frequency bucket, as stored in `Category.frequency`.
 ///
 /// Public because it is a field of [`MetricDef`](super::MetricDef): a renderer
@@ -40,6 +63,26 @@ pub(super) struct FreqGroups {
 }
 
 impl FreqGroups {
+    /// Bucket `categories` by their LVIS `frequency` tag, as positions in
+    /// `cat_ids` (the K axis). A category outside `cat_ids`, or without a tag,
+    /// lands in no bucket — so the buckets are empty for any non-LVIS dataset.
+    pub fn from_categories(categories: &[crate::types::Category], cat_ids: &[u64]) -> Self {
+        let cat_id_to_k_idx: std::collections::HashMap<u64, usize> =
+            cat_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let mut groups = FreqGroups::default();
+        for cat in categories {
+            if let Some(&k_idx) = cat_id_to_k_idx.get(&cat.id) {
+                match cat.frequency.as_deref() {
+                    Some("r") => groups.rare.push(k_idx),
+                    Some("c") => groups.common.push(k_idx),
+                    Some("f") => groups.frequent.push(k_idx),
+                    _ => {}
+                }
+            }
+        }
+        groups
+    }
+
     pub fn get(&self, group: FreqGroup) -> &[usize] {
         match group {
             FreqGroup::Rare => &self.rare,

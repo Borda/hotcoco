@@ -28,6 +28,7 @@ mod mode;
 mod report;
 mod results;
 pub mod slice;
+mod streaming;
 mod summarize;
 mod tide;
 
@@ -44,6 +45,7 @@ pub use matching::EvalImg;
 pub use mode::{EvalMode, FreqGroup};
 pub use results::{EvalParams, EvalResults};
 pub use slice::{SliceResult, SlicedResults};
+pub use streaming::StreamingEval;
 pub use tide::TideErrors;
 
 use std::borrow::Cow;
@@ -118,8 +120,8 @@ pub struct COCOeval {
     pub(crate) stats: Option<Vec<f64>>,
     /// Evaluation mode (COCO, LVIS, or OpenImages).
     pub eval_mode: EvalMode,
-    /// LVIS: k_indices bucketed by category frequency.
-    /// Populated during `evaluate()` when `eval_mode == Lvis`.
+    /// K-axis positions bucketed by the categories' LVIS `frequency` tags.
+    /// Filled by `evaluate()`; read only in LVIS mode.
     freq_groups: FreqGroups,
     /// Open Images: category hierarchy for GT/DT expansion.
     pub hierarchy: Option<Hierarchy>,
@@ -154,6 +156,42 @@ impl COCOeval {
         }
     }
 
+    /// An evaluator in the state `evaluate()` leaves, from cells matched
+    /// elsewhere: what [`StreamingEval::finalize`] returns. `coco_gt` carries
+    /// what the summary surfaces read off it — category names — and no
+    /// annotations, so the full per-image records cannot be rebuilt; the
+    /// `eval_imgs` cache is seeded empty to say so, and `default_cells()`
+    /// reads that same cache.
+    fn from_cells(
+        coco_gt: COCO,
+        params: Params,
+        eval_mode: EvalMode,
+        cells: matching::Cells,
+    ) -> Self {
+        // Every pair `evaluate()` collects has a side, so the cells hold them all.
+        let sparse_pairs = (0..cells.len()).map(|p| cells.ids(p)).collect();
+        let inputs = evaluate::EvalInputs {
+            params: params.clone(),
+            sparse_pairs,
+            // Read only by the rebuild, which the seeded cache makes unreachable.
+            not_exhaustive: HashMap::new(),
+        };
+        let mut ev = Self::with_mode(
+            coco_gt,
+            COCO::from_dataset(crate::types::Dataset::default()),
+            params,
+            eval_mode,
+            None,
+        );
+        ev.cells = cells;
+        ev.eval_inputs = Some(inputs);
+        ev.eval_imgs = std::sync::OnceLock::from(Vec::new());
+        // LVIS evaluates per category, so `cat_ids` is the K axis it reads.
+        ev.freq_groups =
+            FreqGroups::from_categories(&ev.coco_gt.dataset.categories, &ev.params.cat_ids);
+        ev
+    }
+
     /// Create a new COCOeval from ground truth and detection COCO objects.
     pub fn new(
         coco_gt: impl Into<Arc<COCO>>,
@@ -163,7 +201,7 @@ impl COCOeval {
         Self::with_mode(
             coco_gt,
             coco_dt,
-            Params::new(iou_type),
+            EvalMode::Coco.default_params(iou_type),
             EvalMode::Coco,
             None,
         )
@@ -190,6 +228,9 @@ impl COCOeval {
     /// detection — are materialized from the same inputs when something asks
     /// for them. They describe what `evaluate()` produced, whatever `params`
     /// has been set to since.
+    ///
+    /// Also empty for an evaluator [`StreamingEval::finalize`] built: it holds
+    /// the lean cells and no dataset to rebuild the records from.
     pub fn eval_imgs(&self) -> &[Option<EvalImg>] {
         match &self.eval_inputs {
             None => &[],
@@ -324,10 +365,13 @@ impl COCOeval {
         coco_dt: impl Into<Arc<COCO>>,
         iou_type: IouType,
     ) -> Self {
-        let mut params = Params::new(iou_type);
-        params.max_dets = vec![300];
-
-        Self::with_mode(coco_gt, coco_dt, params, EvalMode::Lvis, None)
+        Self::with_mode(
+            coco_gt,
+            coco_dt,
+            EvalMode::Lvis.default_params(iou_type),
+            EvalMode::Lvis,
+            None,
+        )
     }
 
     /// Run the full evaluation pipeline in one call: `evaluate` → `accumulate` → `summarize`.
@@ -351,14 +395,12 @@ impl COCOeval {
         coco_dt: impl Into<Arc<COCO>>,
         hierarchy: Option<Hierarchy>,
     ) -> Self {
-        let mut params = Params::new(IouType::Bbox);
-        params.iou_thrs = vec![0.5];
-        params.area_ranges = vec![crate::AreaRange {
-            label: "all".to_string(),
-            range: [0.0, 1e10],
-        }];
-        params.max_dets = vec![100];
-
-        Self::with_mode(coco_gt, coco_dt, params, EvalMode::OpenImages, hierarchy)
+        Self::with_mode(
+            coco_gt,
+            coco_dt,
+            EvalMode::OpenImages.default_params(IouType::Bbox),
+            EvalMode::OpenImages,
+            hierarchy,
+        )
     }
 }

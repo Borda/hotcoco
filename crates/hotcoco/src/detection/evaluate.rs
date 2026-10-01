@@ -165,23 +165,10 @@ impl COCOeval {
             (HashMap::new(), HashMap::new())
         };
 
-        // LVIS: build freq_groups now that cat_ids are established.
-        if self.eval_mode == EvalMode::Lvis {
-            let cat_id_to_k_idx: HashMap<u64, usize> =
-                cat_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-            let mut freq_groups = super::mode::FreqGroups::default();
-            for cat in &self.coco_gt.dataset.categories {
-                if let Some(&k_idx) = cat_id_to_k_idx.get(&cat.id) {
-                    match cat.frequency.as_deref() {
-                        Some("r") => freq_groups.rare.push(k_idx),
-                        Some("c") => freq_groups.common.push(k_idx),
-                        Some("f") => freq_groups.frequent.push(k_idx),
-                        _ => {}
-                    }
-                }
-            }
-            self.freq_groups = freq_groups;
-        }
+        // Now that cat_ids are established; empty outside LVIS, whose
+        // categories are the ones that carry frequency tags.
+        self.freq_groups =
+            super::mode::FreqGroups::from_categories(&self.coco_gt.dataset.categories, &cat_ids);
 
         let sparse_pairs = self.collect_sparse_pairs(&cat_ids, &neg_cats);
 

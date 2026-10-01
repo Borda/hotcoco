@@ -61,8 +61,9 @@ at the moment.
 - **Ecosystem backends** — a FiftyOne evaluation backend surfacing TIDE errors
   and confusion matrices in its UI; `MeanAveragePrecision(backend="hotcoco")`
   for torchmetrics; a Hugging Face `evaluate` metric module.
-- **Streaming evaluation** — chunked evaluation for datasets that don't fit in
-  memory. Slots in once real users hit memory limits at Objects365/LVIS scale.
+- **Bounded-memory evaluation** — a chunked results-file reader for
+  `StreamingEval`, and an `accumulate()` whose working set does not scale with
+  total detections, for evaluation sets past Objects365 scale.
 - **Browse enhancements** — model A/B overlay toggle, failure clustering by
   TIDE error type, PR-curve click-through, aggregate → category → image
   drill-down.

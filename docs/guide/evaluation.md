@@ -248,6 +248,29 @@ Pass `--slices <path>` to `coco eval` with a JSON file mapping slice names to im
 coco eval --gt annotations.json --dt detections.json --slices slices.json
 ```
 
+## Streaming evaluation
+
+`evaluate()` needs every detection before it matches the first image, so in a training loop the whole evaluation waits for the end of the epoch, and every prediction made along the way is held until then. `StreamingEval` matches each detector batch as soon as its predictions exist. Call `update()` after each batch — the matching runs there, overlapped with the next forward pass — and `finalize()` returns an ordinary `COCOeval` with only `accumulate()` and `summarize()` left to run.
+
+```python
+from hotcoco import COCO, StreamingEval
+
+coco_gt = COCO("instances_val2017.json")
+se = StreamingEval(coco_gt.load_cats(coco_gt.get_cat_ids()), iou_type="bbox")
+
+for image_ids, predictions in validation_loader:   # one detector batch
+    gt_anns = coco_gt.load_anns(coco_gt.get_ann_ids(img_ids=image_ids))
+    se.update(coco_gt.load_imgs(image_ids), gt_anns, predictions)   # matched now
+
+ev = se.finalize()
+ev.accumulate()
+ev.summarize()
+```
+
+`predictions` is the batch's detections as one list of dicts in the shape `load_res()` accepts — `image_id`, `category_id`, `bbox`, and `score`. Each batch runs through the same code `evaluate()` runs, so the numbers are identical to a batch run over the same annotations, whatever order the images arrive in and however they are batched. Memory stays at about 20 bytes per detection instead of an epoch's worth of prediction dicts. The same recipe evaluates a stored results file in chunks when it is too large to load at once.
+
+Analyses that need per-image records — TIDE, the confusion matrix, calibration, per-image diagnostics — need a batch `COCOeval`; the [API reference](../api/cocoeval.md#streamingeval) has what the finalized evaluator supports and the restrictions.
+
 ## Where to next
 
 - [LVIS and Open Images](lvis-open-images.md) — federated AP, category hierarchies, and group-of matching

@@ -25,6 +25,6 @@ under a family namespace would defeat their purpose.
 
 from __future__ import annotations
 
-from .hotcoco import COCOeval, Hierarchy, Params, compare
+from .hotcoco import COCOeval, Hierarchy, Params, StreamingEval, compare
 
-__all__ = ["COCOeval", "Hierarchy", "Params", "compare"]
+__all__ = ["COCOeval", "Hierarchy", "Params", "StreamingEval", "compare"]

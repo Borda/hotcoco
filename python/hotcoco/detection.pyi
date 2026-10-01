@@ -8,6 +8,7 @@ two in sync — `tests/test_stubs.py` checks the names, not the signatures.
 from . import COCOeval as COCOeval
 from . import Hierarchy as Hierarchy
 from . import Params as Params
+from . import StreamingEval as StreamingEval
 from . import compare as compare
 
-__all__ = ["COCOeval", "Hierarchy", "Params", "compare"]
+__all__ = ["COCOeval", "Hierarchy", "Params", "StreamingEval", "compare"]

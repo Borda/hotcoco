@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `COCO::update_anns` and `Error::UnknownAnnIds`. Based on
   [#8](https://github.com/derekallman/hotcoco/pull/8) by Jirka Borovec.
 
+- **`StreamingEval`** evaluates as detections are produced. `update(images,
+  gt_anns, dt_anns)` matches a detector batch as soon as its predictions
+  exist — between training steps, overlapped with postprocessing — and
+  `finalize()` returns an ordinary `COCOeval` for `accumulate()`,
+  `summarize()`, and `report()`, so loading a results file and `evaluate()`
+  leave the end of the epoch. Each batch runs through the same `evaluate()`
+  the whole-dataset path runs, and only its lean cells are kept, so the
+  numbers are identical to a batch run over the same annotations and memory
+  is about 20 bytes per detection: on Objects365 val with 1M detections,
+  peak memory above the loaded ground truth drops from 739 MB to 270 MB.
+  The evaluation guide has the loop and the API reference has what the
+  finalized evaluator supports. *Rust API:* `hotcoco::StreamingEval` and
+  `EvalMode::default_params`. Based on
+  [#22](https://github.com/derekallman/hotcoco/pull/22) by Jirka Borovec.
+
 - **`metrics::counts::precision_recall_curve_of_order_into`** — the interpolated
   precision-recall curve straight from ranked match flags, without the
   cumulative TP/FP arrays `precision_recall_curve_into` reads. Same values, same

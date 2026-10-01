@@ -187,6 +187,75 @@ impl Lcg {
 /// same seed as `_tie_heavy_dataset` in `tests/test_parity.py`, which proves
 /// the arrays it yields equal pycocotools'; the tests here add invariants on
 /// top of that.
+/// Two ground truths and two detections under masks: DT1 matches exactly,
+/// DT2 shares GT2's box but its mask is half-width, IoU exactly 0.5.
+fn segm_datasets() -> (Dataset, Dataset) {
+    let gt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            ann(1, [0.0, 0.0, 20.0, 20.0]).mask(rect_mask(640, 640, 0, 0, 20, 20)),
+            ann(2, [50.0, 50.0, 20.0, 20.0]).mask(rect_mask(640, 640, 50, 50, 20, 20)),
+        ],
+    );
+    let dt = dataset(
+        vec![img(1)],
+        vec![cat(1, "thing")],
+        vec![
+            det(101, [0.0, 0.0, 20.0, 20.0], 0.9).mask(rect_mask(640, 640, 0, 0, 20, 20)),
+            // bbox deliberately equals GT2's; only the mask is half-width.
+            det(102, [50.0, 50.0, 20.0, 20.0], 0.8)
+                .mask(rect_mask(640, 640, 50, 50, 10, 20))
+                .with_area(200.0),
+        ],
+    );
+    (gt, dt)
+}
+
+/// Two poses: GT1/DT1 identical, and DT2 4.2 px off GT2's one visible
+/// keypoint, an OKS that straddles the 0.50 and 0.55 thresholds (see
+/// `test_keypoints_eval_end_to_end`). The second pose sits in `second_img`.
+fn keypoint_datasets(second_img: u64) -> (Dataset, Dataset) {
+    let mut gt1_kpts = Vec::with_capacity(51);
+    for i in 0..17 {
+        gt1_kpts.extend_from_slice(&[100.0 + i as f64, 100.0, 2.0]);
+    }
+    let mut gt2_kpts = vec![0.0; 51];
+    gt2_kpts[0] = 300.0;
+    gt2_kpts[1] = 300.0;
+    gt2_kpts[2] = 2.0;
+    let mut dt2_kpts = vec![0.0; 51];
+    dt2_kpts[0] = 304.2; // d = 4.2 from GT2's visible keypoint
+    dt2_kpts[1] = 300.0;
+
+    let images: Vec<Image> = if second_img == 1 {
+        vec![img(1)]
+    } else {
+        vec![img(1), img(second_img)]
+    };
+    let gt = dataset(
+        images.clone(),
+        vec![cat(1, "person")],
+        vec![
+            ann(1, [80.0, 80.0, 100.0, 50.0]).kpts(gt1_kpts.clone()),
+            ann(2, [280.0, 280.0, 100.0, 50.0])
+                .in_img(second_img)
+                .kpts(gt2_kpts),
+        ],
+    );
+    let dt = dataset(
+        images,
+        vec![cat(1, "person")],
+        vec![
+            det(101, [80.0, 80.0, 100.0, 50.0], 0.9).kpts(gt1_kpts),
+            det(102, [280.0, 280.0, 100.0, 50.0], 0.8)
+                .in_img(second_img)
+                .kpts(dt2_kpts),
+        ],
+    );
+    (gt, dt)
+}
+
 fn tie_heavy_datasets() -> (Dataset, Dataset) {
     const DETS_PER_CELL: usize = 14;
     const SIZES: [f64; 3] = [20.0, 50.0, 120.0]; // small, medium, large by COCO area
@@ -6834,25 +6903,7 @@ const BBOX_SEGM_KEYS: [&str; 12] = [
 /// threshold over 2 GTs → 0.5.
 #[test]
 fn test_segm_eval_end_to_end() {
-    let gt = dataset(
-        vec![img(1)],
-        vec![cat(1, "thing")],
-        vec![
-            ann(1, [0.0, 0.0, 20.0, 20.0]).mask(rect_mask(640, 640, 0, 0, 20, 20)),
-            ann(2, [50.0, 50.0, 20.0, 20.0]).mask(rect_mask(640, 640, 50, 50, 20, 20)),
-        ],
-    );
-    let dt = dataset(
-        vec![img(1)],
-        vec![cat(1, "thing")],
-        vec![
-            det(101, [0.0, 0.0, 20.0, 20.0], 0.9).mask(rect_mask(640, 640, 0, 0, 20, 20)),
-            // bbox deliberately equals GT2's; only the mask is half-width.
-            det(102, [50.0, 50.0, 20.0, 20.0], 0.8)
-                .mask(rect_mask(640, 640, 50, 50, 10, 20))
-                .with_area(200.0),
-        ],
-    );
+    let (gt, dt) = segm_datasets();
 
     let mut ev = COCOeval::new(
         COCO::from_dataset(gt),
@@ -7023,34 +7074,7 @@ fn test_keypoints_eval_end_to_end() {
         "fixture OKS must sit between the 0.50 and 0.55 thresholds: {oks}"
     );
 
-    let mut gt1_kpts = Vec::with_capacity(51);
-    for i in 0..17 {
-        gt1_kpts.extend_from_slice(&[100.0 + i as f64, 100.0, 2.0]);
-    }
-    let mut gt2_kpts = vec![0.0; 51];
-    gt2_kpts[0] = 300.0;
-    gt2_kpts[1] = 300.0;
-    gt2_kpts[2] = 2.0;
-    let mut dt2_kpts = vec![0.0; 51];
-    dt2_kpts[0] = 304.2; // d = 4.2 from GT2's visible keypoint
-    dt2_kpts[1] = 300.0;
-
-    let gt = dataset(
-        vec![img(1)],
-        vec![cat(1, "person")],
-        vec![
-            ann(1, [80.0, 80.0, 100.0, 50.0]).kpts(gt1_kpts.clone()),
-            ann(2, [280.0, 280.0, 100.0, 50.0]).kpts(gt2_kpts),
-        ],
-    );
-    let dt = dataset(
-        vec![img(1)],
-        vec![cat(1, "person")],
-        vec![
-            det(101, [80.0, 80.0, 100.0, 50.0], 0.9).kpts(gt1_kpts),
-            det(102, [280.0, 280.0, 100.0, 50.0], 0.8).kpts(dt2_kpts),
-        ],
-    );
+    let (gt, dt) = keypoint_datasets(1);
 
     let mut ev = COCOeval::new(
         COCO::from_dataset(gt),
@@ -7191,4 +7215,215 @@ fn update_anns_does_not_re_report_duplicate_ids() {
     // An explicit `create_index()` still reports, the pycocotools idiom intact.
     coco.create_index();
     assert_eq!(coco.load_warnings().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming evaluation: `StreamingEval::update`/`finalize` must give
+// `accumulate()` the same input `COCOeval::evaluate()` does, one image at a
+// time and in any order. The unit tests in `detection/streaming.rs` compare
+// the lean cells directly; these compare what a user sees — accumulated
+// arrays, stats, slices, comparisons — across geometries and modes.
+// `tie_heavy_datasets()` is reused because tie order is where a wrong pair
+// order would show, and a fixture without ties could not tell.
+// ---------------------------------------------------------------------------
+
+/// Stream the datasets behind `batch` — images in **reverse** id order, so
+/// the layout `finalize()` produces is never the arrival order — under the
+/// same `params` and mode, then assert `accumulate()` + `summarize()` give
+/// bit-identical arrays, stats, and per-class results on both. Returns the
+/// pair for further checks.
+fn assert_streams_like_batch(
+    gt_ds: &Dataset,
+    dt_ds: &Dataset,
+    mut batch: COCOeval,
+) -> (COCOeval, COCOeval) {
+    batch.evaluate();
+    let mut streamed = stream_datasets(gt_ds, dt_ds, batch.params.clone(), batch.eval_mode);
+
+    batch.accumulate();
+    streamed.accumulate();
+    batch.summarize();
+    streamed.summarize();
+
+    let a = batch.accumulated().expect("batch accumulated");
+    let b = streamed.accumulated().expect("streamed accumulated");
+    assert_eq!(
+        (a.shape.t, a.shape.r, a.shape.k, a.shape.a, a.shape.m),
+        (b.shape.t, b.shape.r, b.shape.k, b.shape.a, b.shape.m),
+        "accumulated shapes differ"
+    );
+    assert_eq!(a.precision, b.precision, "precision arrays differ");
+    assert_eq!(a.recall, b.recall, "recall arrays differ");
+    assert_eq!(a.scores, b.scores, "score arrays differ");
+    assert_eq!(a.ap_all_points, b.ap_all_points, "ap_all_points differ");
+    assert_eq!(batch.stats(), streamed.stats(), "summary stats differ");
+    assert_eq!(
+        batch.get_results(None, true),
+        streamed.get_results(None, true),
+        "per-class results differ"
+    );
+    (batch, streamed)
+}
+
+/// Stream `gt_ds`/`dt_ds` into a `StreamingEval`: images in reverse id
+/// order, three to an `update()`, so no batch matches the final layout. Each
+/// batch's annotations come from the dataset's own index.
+fn stream_datasets(
+    gt_ds: &Dataset,
+    dt_ds: &Dataset,
+    params: hotcoco::Params,
+    mode: hotcoco::EvalMode,
+) -> COCOeval {
+    let (gt, dt) = (
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+    );
+    let anns_of = |coco: &COCO, ids: &[u64]| -> Vec<Annotation> {
+        coco.load_anns(&coco.get_ann_ids(ids, &[], None, None))
+            .into_iter()
+            .cloned()
+            .collect()
+    };
+    let mut streaming = hotcoco::StreamingEval::new(params, mode, gt_ds.categories.clone())
+        .expect("mode is supported");
+    let mut images = gt_ds.images.clone();
+    images.sort_by_key(|img| std::cmp::Reverse(img.id));
+    for batch in images.chunks(3) {
+        let ids: Vec<u64> = batch.iter().map(|img| img.id).collect();
+        streaming
+            .update(batch.to_vec(), anns_of(&gt, &ids), anns_of(&dt, &ids))
+            .expect("scores are finite");
+    }
+    streaming.finalize()
+}
+
+/// Also covers what a streamed evaluator supports beyond `summarize()`:
+/// `slice_by` and `compare` read the lean cells and `params.img_ids`, both
+/// of which `finalize()` fills, and agree with the batch evaluator.
+#[test]
+fn streaming_matches_batch_on_tie_heavy_bbox() {
+    let (gt_ds, dt_ds) = tie_heavy_datasets();
+    let batch = COCOeval::new(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Bbox,
+    );
+    let (batch, streamed) = assert_streams_like_batch(&gt_ds, &dt_ds, batch);
+
+    let img_ids: Vec<u64> = gt_ds.images.iter().map(|i| i.id).collect();
+    let (first, rest) = img_ids.split_at(img_ids.len() / 2);
+    let slices = || {
+        HashMap::from([
+            ("first".to_string(), first.to_vec()),
+            ("rest".to_string(), rest.to_vec()),
+        ])
+    };
+    // `slices` comes back in hash-map order, so compare it by name.
+    let by_name = |r: hotcoco::SlicedResults| {
+        let mut out: Vec<(String, usize, _, _)> = std::iter::once(r.overall)
+            .chain(r.slices)
+            .map(|s| (s.name, s.num_images, s.metrics, s.delta))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    };
+    assert_eq!(
+        by_name(batch.slice_by(slices()).unwrap()),
+        by_name(streamed.slice_by(slices()).unwrap()),
+        "slice_by differs between batch and streamed"
+    );
+
+    let opts = hotcoco::CompareOpts::default();
+    assert_eq!(
+        format!("{:?}", hotcoco::compare(&batch, &batch, &opts).unwrap()),
+        format!("{:?}", hotcoco::compare(&batch, &streamed, &opts).unwrap()),
+        "compare(batch, streamed) must read as compare(batch, batch)"
+    );
+}
+
+/// LVIS federated filtering is read off each `Image` as it arrives: a
+/// confirmed-negative category scores unmatched detections as false
+/// positives, a not-exhaustive one ignores them, and a category with no
+/// ground truth and no label in an image is dropped from that image.
+#[test]
+fn streaming_matches_batch_on_lvis_federated_categories() {
+    let categories = vec![cat(1, "a"), cat(2, "b")];
+    let images = vec![
+        Image {
+            neg_category_ids: vec![2],
+            ..img(1)
+        },
+        Image {
+            not_exhaustive_category_ids: vec![1],
+            ..img(2)
+        },
+        img(3),
+    ];
+    let gts = vec![
+        ann(1, [10.0, 10.0, 50.0, 50.0]).in_img(1).in_cat(1),
+        ann(2, [10.0, 10.0, 50.0, 50.0]).in_img(2).in_cat(1),
+    ];
+    let dts = vec![
+        // TP against gt 1.
+        det(101, [12.0, 12.0, 50.0, 50.0], 0.9).in_img(1).in_cat(1),
+        // No GT for cat 2 in image 1, but neg_category_ids confirms it
+        // absent: scored as a false positive.
+        det(102, [200.0, 200.0, 50.0, 50.0], 0.8)
+            .in_img(1)
+            .in_cat(2),
+        // Unmatched against gt 2, but cat 1 is not_exhaustive in image 2:
+        // ignored rather than a false positive.
+        det(103, [300.0, 300.0, 50.0, 50.0], 0.7)
+            .in_img(2)
+            .in_cat(1),
+        // No GT for cat 2 anywhere and image 3 confirms nothing: dropped.
+        det(104, [50.0, 50.0, 50.0, 50.0], 0.6).in_img(3).in_cat(2),
+    ];
+    let gt_ds = dataset(images.clone(), categories.clone(), gts);
+    let dt_ds = dataset(images, categories, dts);
+
+    let batch = COCOeval::new_lvis(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Bbox,
+    );
+    assert_streams_like_batch(&gt_ds, &dt_ds, batch);
+}
+
+/// Segm goes through the per-image RLE cache `evaluate()` prepares; the
+/// one-image run must prepare its own.
+#[test]
+fn streaming_matches_batch_on_segm() {
+    let (mut gt_ds, mut dt_ds) = segm_datasets();
+    // A second image, so the per-batch RLE cache has more than one raster.
+    gt_ds.images.push(img(2));
+    dt_ds.images.push(img(2));
+    gt_ds.annotations.push(
+        ann(3, [100.0, 100.0, 40.0, 40.0])
+            .in_img(2)
+            .mask(rect_mask(640, 640, 100, 100, 40, 40)),
+    );
+    dt_ds.annotations.push(
+        det(103, [100.0, 100.0, 40.0, 40.0], 0.7)
+            .in_img(2)
+            .mask(rect_mask(640, 640, 100, 100, 30, 40))
+            .with_area(1200.0),
+    );
+    let batch = COCOeval::new(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Segm,
+    );
+    assert_streams_like_batch(&gt_ds, &dt_ds, batch);
+}
+
+#[test]
+fn streaming_matches_batch_on_keypoints() {
+    let (gt_ds, dt_ds) = keypoint_datasets(2);
+    let batch = COCOeval::new(
+        COCO::from_dataset(gt_ds.clone()),
+        COCO::from_dataset(dt_ds.clone()),
+        IouType::Keypoints,
+    );
+    assert_streams_like_batch(&gt_ds, &dt_ds, batch);
 }

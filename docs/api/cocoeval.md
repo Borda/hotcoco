@@ -843,6 +843,87 @@ cap is a `Params` setting that `LVISeval` already configures.
 
 ---
 
+## StreamingEval
+
+Evaluate detector batches as they come and get a `COCOeval` back. Each
+`update()` call matches its images right away; `finalize()` assembles every
+image seen into an evaluator ready for `accumulate()`, `summarize()`, and
+`report()`. The results are identical to a batch `COCOeval` over the same
+annotations, however the images were batched. For the training loop this is
+built for, see
+[Streaming evaluation](../guide/evaluation.md#streaming-evaluation).
+
+=== "Python"
+
+    ```python
+    StreamingEval(
+        categories: list[dict],
+        iou_type: str = "bbox",
+        lvis_style: bool = False,
+        params: Params | None = None,
+    )
+    ```
+
+    | Parameter | Type | Default | Description |
+    |-----------|------|---------|-------------|
+    | `categories` | `list[dict]` | — | Every category the run will see, as COCO category dicts. A category with no annotations keeps a `-1.0` slot instead of vanishing from the per-class results. |
+    | `iou_type` | `str` | `"bbox"` | `"bbox"`, `"segm"`, `"keypoints"`, or `"obb"` |
+    | `lvis_style` | `bool` | `False` | LVIS federated evaluation; sets `max_dets` to `[300]` when `params` is not given |
+    | `params` | <code>Params &#124; None</code> | `None` | Evaluation parameters, frozen for the run. `img_ids`, when set, skips images outside it; `cat_ids`, when empty, is filled from `categories`. |
+
+    Raises `ValueError` for Open Images: hierarchy expansion needs the whole
+    ground truth before the first image is evaluated.
+
+=== "Rust"
+
+    ```rust
+    StreamingEval::new(params: Params, eval_mode: EvalMode, categories: Vec<Category>) -> Result<Self>
+    ```
+
+    Returns an error for `EvalMode::OpenImages`.
+
+### `update`
+
+```python
+se.update(images: list[dict], gt_anns: list[dict], dt_anns: list[dict]) -> None
+```
+
+Match a batch of images' ground truth against their detections now. `images`
+are COCO image dicts with at least `id` — plus `neg_category_ids` and
+`not_exhaustive_category_ids` in LVIS mode, where they apply. A batch of one
+is fine; passing the detector's whole batch amortizes the per-call setup.
+`gt_anns` are annotation dicts in the shape `COCO(dict)` accepts, with ids
+unique within the batch. `dt_anns` are raw predictions in the shape
+`load_res()` accepts — `image_id`, `category_id`, `bbox` (or
+`segmentation`/`keypoints`), and `score` — and are loaded the same way: ids
+assigned, `area` derived, `iscrowd` cleared. Within an image, detections with
+tied scores rank in the order given, as they do in a results file, so keep a
+batch's predictions in the order the detector emitted them. An image seen
+again in a later call replaces its earlier result.
+
+A NaN score raises the same `RuntimeError` as `load_res()`; so does calling
+this after `finalize()`.
+
+### `finalize`
+
+```python
+se.finalize() -> COCOeval
+```
+
+Assemble every image seen so far into a `COCOeval`. Consumes the
+`StreamingEval`: `update()` or `finalize()` afterwards raises
+`RuntimeError`.
+
+The returned evaluator holds the per-cell match results and the category list,
+not the annotations, which is what keeps `finalize()` cheap. It supports
+`accumulate()`, `summarize()`, `report()`, `results()`, `get_results()`,
+`slice_by()`, and `compare()`. Its `eval_imgs` is empty, and the analyses
+that rebuild full per-image records from the datasets — `confusion_matrix()`,
+`tide_errors()`, `calibration()`, `f_scores()`, and `image_diagnostics()` —
+see no cells. Build a batch `COCOeval` for those.
+
+---
+
 ## Module-level functions
 
 ### `compare`

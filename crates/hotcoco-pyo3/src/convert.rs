@@ -612,6 +612,25 @@ pub fn py_to_category(dict: &Bound<'_, PyDict>) -> PyResult<Category> {
     })
 }
 
+/// Convert a list of dicts element by element. `what` names the list in the
+/// `TypeError` a non-dict element raises.
+pub fn dict_list<'py, T>(
+    list: &Bound<'py, PyList>,
+    what: &str,
+    convert_fn: impl Fn(&Bound<'py, PyDict>) -> PyResult<T>,
+) -> PyResult<Vec<T>> {
+    list.iter()
+        .map(|item| {
+            let d = item.cast::<PyDict>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "each item in '{what}' must be a dict"
+                ))
+            })?;
+            convert_fn(d)
+        })
+        .collect()
+}
+
 /// Extract a list of dicts from a parent dict, converting each element with `convert_fn`.
 /// Returns an empty Vec if the key is absent.
 fn extract_dict_list<'py, T>(
@@ -621,21 +640,12 @@ fn extract_dict_list<'py, T>(
 ) -> PyResult<Vec<T>> {
     match dict.get_item(key)? {
         None => Ok(Vec::new()),
-        Some(v) => v
-            .cast::<PyList>()
-            .map_err(|_| {
+        Some(v) => {
+            let list = v.cast::<PyList>().map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err(format!("'{key}' must be a list of dicts"))
-            })?
-            .iter()
-            .map(|item| {
-                let d = item.cast::<PyDict>().map_err(|_| {
-                    pyo3::exceptions::PyTypeError::new_err(format!(
-                        "each item in '{key}' must be a dict"
-                    ))
-                })?;
-                convert_fn(d)
-            })
-            .collect(),
+            })?;
+            dict_list(list, key, convert_fn)
+        }
     }
 }
 

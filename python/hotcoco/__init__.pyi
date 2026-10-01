@@ -238,6 +238,25 @@ class COCOeval:
     def evalImgs(self) -> list[dict[str, Any] | None]: ...
 
 # ---------------------------------------------------------------------------
+# StreamingEval
+# ---------------------------------------------------------------------------
+
+class StreamingEval:
+    """Incremental evaluation — feed detector batches as they come, get a ``COCOeval`` back."""
+
+    def __init__(
+        self,
+        categories: list[dict[str, Any]],
+        iou_type: str = "bbox",
+        lvis_style: bool = False,
+        params: Params | None = None,
+    ) -> None: ...
+    def update(
+        self, images: list[dict[str, Any]], gt_anns: list[dict[str, Any]], dt_anns: list[dict[str, Any]]
+    ) -> None: ...
+    def finalize(self) -> COCOeval: ...
+
+# ---------------------------------------------------------------------------
 # Params
 # ---------------------------------------------------------------------------
 
