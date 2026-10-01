@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.1.0] - 2026-10-01
+
+### Added
+
 - **`COCO.update_anns`** edits annotations that are already loaded, without
   rebuilding the dataset: each dict is merged into the annotation with the
   same `id`, so `{"id": 1, "area": 5000.0}` is a one-field edit, and an unknown
