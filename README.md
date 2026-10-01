@@ -15,7 +15,7 @@ Pure Rust, available as a **Python package**, **CLI tool**, and **Rust library**
 
 ## Performance
 
-Bbox evaluation on COCO val2017 runs in **0.06s** against 4.91s for pycocotools; segm is ~81× faster and keypoints ~50×. Two other Rust evaluators, ultrafast-pycocotools and vernier, are in the same speed class; the benchmarks page compares all five on time and memory. The precision, recall, and scores arrays and every summary metric are bit-identical to pycocotools', so your AP scores don't change.
+Bbox evaluation on COCO val2017 runs in **0.06s** against 4.92s for pycocotools; segm is ~80× faster and keypoints ~50×. Two other Rust evaluators, ultrafast-pycocotools and vernier, are in the same speed class; the benchmarks page compares all five on time and memory. The precision, recall, and scores arrays and every summary metric are bit-identical to pycocotools', so your AP scores don't change.
 
 Full tables, hardware, the Objects365 scale run, phase breakdowns, and parity verification: [Benchmarks](https://derekallman.github.io/hotcoco/benchmarks/).
 
