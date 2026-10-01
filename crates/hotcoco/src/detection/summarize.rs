@@ -5,6 +5,7 @@
 //! result maps, or DTOs is [`super::report`].
 
 use std::collections::{BTreeMap, HashSet};
+use std::ops::Range;
 
 use crate::params::Params;
 
@@ -28,14 +29,15 @@ pub(super) fn mean_or_missing(sum: f64, count: usize) -> f64 {
 /// this one owns **which values are allowed into it** — averaging a `-1.0` in
 /// treats "not computed" as a real score of minus one.
 ///
-/// Folds `(sum, count)` in visit order rather than collecting, so the caller's
-/// iteration order is the summation order and the last bit of every AP is
-/// reproducible.
-pub(super) fn mean_of_valid(values: impl Iterator<Item = f64>) -> f64 {
-    let (sum, count) = values
-        .filter(|&v| crate::metrics::is_computed(v))
-        .fold((0.0f64, 0usize), |(s, c), v| (s + v, c + 1));
-    mean_or_missing(sum, count)
+/// Sums with [`pairwise_sum`](crate::metrics::sum::pairwise_sum), numpy's order,
+/// so a caller that visits values in the order numpy flattens the reference's
+/// array gets the reference's mean to the last bit. The values are collected into
+/// `scratch` because pairwise order depends on how many survive the filter;
+/// callers that take many means pass one buffer for all of them.
+pub(super) fn mean_of_valid(values: impl Iterator<Item = f64>, scratch: &mut Vec<f64>) -> f64 {
+    scratch.clear();
+    scratch.extend(values.filter(|&v| crate::metrics::is_computed(v)));
+    mean_or_missing(crate::metrics::sum::pairwise_sum(scratch), scratch.len())
 }
 
 /// B minus A, treating a metric missing from either side as no evidence.
@@ -84,36 +86,35 @@ pub(super) fn accumulate_and_summarize(
     (acc, stats)
 }
 
-/// The AP samples for one `(t, k, a, m)` cell, `-1.0` sentinels already dropped.
+/// The AP samples over `t_indices × R × k_indices`, in the order numpy flattens
+/// `precision[t, :, k, a, m]` — `k` fastest — with `-1.0` sentinels included.
 ///
 /// Which integration applies is a property of the *mode*, not of the caller. COCO
 /// and LVIS average the precision envelope over the 101 recall thresholds, so a
-/// cell yields `r` samples; Open Images takes the exact area under that same
-/// envelope, so it yields one. Every AP path routes through here, so the two
+/// `(t, k)` cell yields `r` samples; Open Images takes the exact area under that
+/// same envelope, so it yields one. Every AP path routes through here, so the two
 /// integrations cannot split.
-///
-/// Returns an iterator rather than filling an out-param so callers keep the shape
-/// that suits them: `summarize_impl` extends a shared `Vec`, `per_cat_ap_static`
-/// folds into a running `(sum, count)` with no allocation at all.
-fn ap_samples(
-    eval: &AccumulatedEval,
+fn ap_samples<'a>(
+    eval: &'a AccumulatedEval,
     eval_mode: EvalMode,
-    t_idx: usize,
-    k_idx: usize,
+    t_indices: Range<usize>,
+    k_indices: &'a [usize],
     a_idx: usize,
     m_idx: usize,
-) -> impl Iterator<Item = f64> + '_ {
+) -> impl Iterator<Item = f64> + 'a {
     let all_points = eval_mode == EvalMode::OpenImages;
-    let n = if all_points { 1 } else { eval.shape.r };
-    (0..n)
-        .map(move |r_idx| {
-            if all_points {
-                eval.ap_all_points[eval.recall_idx(t_idx, k_idx, a_idx, m_idx)]
-            } else {
-                eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
-            }
+    let n_r = if all_points { 1 } else { eval.shape.r };
+    t_indices.flat_map(move |t_idx| {
+        (0..n_r).flat_map(move |r_idx| {
+            k_indices.iter().map(move |&k_idx| {
+                if all_points {
+                    eval.ap_all_points[eval.recall_idx(t_idx, k_idx, a_idx, m_idx)]
+                } else {
+                    eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
+                }
+            })
         })
-        .filter(|&v| crate::metrics::is_computed(v))
+    })
 }
 
 pub(super) fn per_cat_ap_static(
@@ -124,12 +125,12 @@ pub(super) fn per_cat_ap_static(
     let a_idx = params.all_area_idx();
     // `max_det_idx`, not `shape.m - 1` — see `Params::max_det_idx`.
     let m_idx = params.max_det_idx();
+    let mut scratch = Vec::new();
     (0..eval.shape.k)
         .map(|k_idx| {
-            mean_of_valid(
-                (0..eval.shape.t)
-                    .flat_map(|t_idx| ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx)),
-            )
+            let k_one = [k_idx];
+            let samples = ap_samples(eval, eval_mode, 0..eval.shape.t, &k_one, a_idx, m_idx);
+            mean_of_valid(samples, &mut scratch)
         })
         .collect()
 }
@@ -145,66 +146,57 @@ pub(super) fn summarize_impl(
     freq_groups: &FreqGroups,
     metrics: &[MetricDef],
 ) -> Vec<f64> {
-    let summarize_stat = |ap: bool, iou_thr: Option<f64>, area_lbl: &str, max_det: usize| -> f64 {
+    // One buffer for every mean below; see `mean_of_valid`. Sized for the
+    // largest, AP over every IoU threshold and category.
+    let mut scratch = Vec::with_capacity(eval.shape.t * eval.shape.r * eval.shape.k);
+    let all_k: Vec<usize> = (0..eval.shape.k).collect();
+    // `k_indices` is every category, or for an LVIS frequency-group AP, the
+    // categories in that bucket.
+    let summarize_stat = |m: &MetricDef, k_indices: &[usize], scratch: &mut Vec<f64>| {
         // A missing area label or max-det setting degrades to the `-1.0` "not
         // computed" sentinel, like the missing-IoU-threshold branch below.
         // Falling back to index 0 would report the "all" slice under a per-size
         // metric's name — a plausible wrong number with nothing to flag it.
-        let Some(a_idx) = params.area_range_idx(area_lbl) else {
+        let Some(a_idx) = params.area_range_idx(m.area_lbl) else {
             return -1.0;
         };
-        let Some(m_idx) = params.max_dets.iter().position(|&d| d == max_det) else {
+        let Some(m_idx) = params.max_dets.iter().position(|&d| d == m.max_det) else {
             return -1.0;
         };
 
-        let t_indices: Vec<usize> = if let Some(thr) = iou_thr {
+        let t_indices = match m.iou_thr {
             // `Params::iou_thr_idx` owns this lookup: a single-threshold metric
             // like AP50 means exactly one slice of the IoU axis, never the
             // average of every threshold within tolerance.
-            params.iou_thr_idx(thr).map(|i| vec![i]).unwrap_or_default()
-        } else {
-            (0..eval.shape.t).collect()
+            Some(thr) => params.iou_thr_idx(thr).map_or(0..0, |i| i..i + 1),
+            None => 0..eval.shape.t,
         };
 
-        // Folded rather than collected: materializing the samples costs up to
-        // T×K×R f64 (~646 KB on COCO) purely to take their mean, twice per
-        // bootstrap resample. The two branches are separate iterators because the
-        // AP branch yields R samples per (t, k) cell and the AR branch yields one;
-        // both visit (t, k) in the same order, so the summation sequence — and
-        // therefore the last bit of every AP — is fixed.
-        if ap {
-            mean_of_valid(t_indices.iter().flat_map(|&t_idx| {
-                (0..eval.shape.k)
-                    .flat_map(move |k_idx| ap_samples(eval, eval_mode, t_idx, k_idx, a_idx, m_idx))
-            }))
+        // Visit order is the reference's flattening order: `s[s > -1]` over the
+        // `[T, R, K]` precision slice or the `[T, K]` recall slice, `k` fastest,
+        // with lvis-api's frequency-group slice `[T, R, K in bucket]` the same
+        // way. With pairwise summation on top, every stat is `np.mean`'s to the
+        // last bit.
+        if m.ap {
+            let samples = ap_samples(eval, eval_mode, t_indices, k_indices, a_idx, m_idx);
+            mean_of_valid(samples, scratch)
         } else {
-            mean_of_valid(t_indices.iter().flat_map(|&t_idx| {
-                (0..eval.shape.k)
-                    .map(move |k_idx| eval.recall[eval.recall_idx(t_idx, k_idx, a_idx, m_idx)])
-            }))
+            let samples = t_indices.flat_map(|t_idx| {
+                k_indices
+                    .iter()
+                    .map(move |&k_idx| eval.recall[eval.recall_idx(t_idx, k_idx, a_idx, m_idx)])
+            });
+            mean_of_valid(samples, scratch)
         }
-    };
-
-    // LVIS only — it is the one mode with frequency-group metrics. Other modes
-    // leave this empty and the `freq_group` arm below never fires for them.
-    let per_cat_ap: Vec<f64> = if eval_mode == EvalMode::Lvis {
-        per_cat_ap_static(eval, params, eval_mode)
-    } else {
-        Vec::new()
     };
 
     metrics
         .iter()
-        .map(|m| match m.freq_group {
-            // Same `(sum, count)` fold as `summarize_stat`, over the categories
-            // in this frequency bucket.
-            Some(fg) => mean_of_valid(
-                freq_groups
-                    .get(fg)
-                    .iter()
-                    .filter_map(|&k| per_cat_ap.get(k).copied()),
-            ),
-            None => summarize_stat(m.ap, m.iou_thr, m.area_lbl, m.max_det),
+        .map(|m| {
+            let k_indices = m
+                .freq_group
+                .map_or(all_k.as_slice(), |fg| freq_groups.get(fg));
+            summarize_stat(m, k_indices, &mut scratch)
         })
         .collect()
 }

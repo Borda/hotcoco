@@ -9,7 +9,7 @@ ultrafast-pycocotools 0.1.11, vernier 0.5.4, hotcoco 1.1 (this tree).
 | Feature | pycocotools | faster-coco-eval | ultrafast-pycocotools | vernier | hotcoco |
 |---------|-------------|------------------|-----------------------|---------|---------|
 | **Installation** | Prebuilt wheels | Prebuilt wheels | Prebuilt wheels | Prebuilt wheels | Prebuilt wheels — `pip install` just works |
-| **Metric parity** | Reference | Exact | `precision`/`recall`/`scores` bit-identical on x86-64; segm differs on arm64 (see [Segmentation](#segmentation)) | Bit-identical in `parity_mode="strict"` on x86-64; segm differs on arm64 | `precision`/`recall`/`scores` bit-identical on x86-64 and arm64; summary metrics within 3.7e-14 |
+| **Metric parity** | Reference | Exact | `precision`/`recall`/`scores` bit-identical on x86-64; segm differs on arm64 (see [Segmentation](#segmentation)) | Bit-identical in `parity_mode="strict"` on x86-64; segm differs on arm64 | `precision`/`recall`/`scores` bit-identical on x86-64 and arm64; summary metrics bit-identical (measured on arm64) |
 | **LVIS evaluation** | No | Yes — via `lvis_style=True` flag | Yes — via `lvis_style=True` flag | Yes — federated AP | Yes — 13 metrics, `LVISeval` class, `init_as_lvis()` |
 | **Open Images, oriented boxes** | No | No | No | No | Yes — Challenge protocol with group-of; OBB IoU |
 | **Panoptic, semantic** | No | No | No | Yes — PQ, mIoU | Planned |
@@ -156,27 +156,27 @@ tests.
 
 **The `precision`, `recall`, and `scores` arrays are bit-identical to pycocotools'**
 on all three evaluation types — every cell, checked with an integer compare of the
-raw `f64` bits. The summary metrics below agree to within 3.7e-14: they are means over
-those identical arrays, and numpy's `mean` sums pairwise while hotcoco sums
-sequentially, so the last bit or two of the mean can differ. The diffs in the
-following tables are raw measured differences, not rounded.
+raw `f64` bits. The summary metrics below are bit-identical too: they are means over
+those identical arrays, and hotcoco sums them in the order numpy's `mean` does —
+pairwise, over the same flattened elements. The diffs in the following tables are
+raw measured differences, not rounded.
 
 ### Bounding box
 
 | Metric | pycocotools | hotcoco | Diff |
 |--------|-------------|---------|------|
-| AP     | 0.57793065 | 0.57793065 | 3.02e-14 |
-| AP50   | 0.86052720 | 0.86052720 | 8.88e-16 |
-| AP75   | 0.60003745 | 0.60003745 | 1.04e-14 |
-| APs    | 0.32723763 | 0.32723763 | 1.57e-14 |
-| APm    | 0.70684507 | 0.70684507 | 3.63e-14 |
-| APl    | 0.91751661 | 0.91751661 | 1.27e-14 |
-| AR1    | 0.42708926 | 0.42708926 | 3.33e-16 |
-| AR10   | 0.68690535 | 0.68690535 | 6.66e-16 |
-| AR100  | 0.70127765 | 0.70127765 | 2.22e-16 |
+| AP     | 0.57793065 | 0.57793065 | 0.00e+00 |
+| AP50   | 0.86052720 | 0.86052720 | 0.00e+00 |
+| AP75   | 0.60003745 | 0.60003745 | 0.00e+00 |
+| APs    | 0.32723763 | 0.32723763 | 0.00e+00 |
+| APm    | 0.70684507 | 0.70684507 | 0.00e+00 |
+| APl    | 0.91751661 | 0.91751661 | 0.00e+00 |
+| AR1    | 0.42708926 | 0.42708926 | 0.00e+00 |
+| AR10   | 0.68690535 | 0.68690535 | 0.00e+00 |
+| AR100  | 0.70127765 | 0.70127765 | 0.00e+00 |
 | ARs    | 0.43712612 | 0.43712612 | 0.00e+00 |
-| ARm    | 0.80637778 | 0.80637778 | 3.33e-16 |
-| ARl    | 0.95956720 | 0.95956720 | 5.55e-16 |
+| ARm    | 0.80637778 | 0.80637778 | 0.00e+00 |
+| ARl    | 0.95956720 | 0.95956720 | 0.00e+00 |
 
 The threshold grids are constructed to match `numpy.linspace` bit-for-bit, which
 removed the last systematic source of divergence here.
@@ -185,18 +185,18 @@ removed the last systematic source of divergence here.
 
 | Metric | pycocotools | hotcoco | Diff |
 |--------|-------------|---------|------|
-| AP     | 0.65763117 | 0.65763117 | 1.11e-14 |
-| AP50   | 0.92315461 | 0.92315461 | 8.77e-15 |
-| AP75   | 0.70141134 | 0.70141134 | 6.55e-15 |
-| APs    | 0.46056290 | 0.46056290 | 9.49e-15 |
-| APm    | 0.77182113 | 0.77182113 | 1.19e-14 |
-| APl    | 0.93431919 | 0.93431919 | 6.11e-15 |
-| AR1    | 0.45457448 | 0.45457448 | 4.44e-16 |
-| AR10   | 0.74556101 | 0.74556101 | 1.78e-15 |
-| AR100  | 0.76167772 | 0.76167772 | 1.89e-15 |
+| AP     | 0.65763117 | 0.65763117 | 0.00e+00 |
+| AP50   | 0.92315461 | 0.92315461 | 0.00e+00 |
+| AP75   | 0.70141134 | 0.70141134 | 0.00e+00 |
+| APs    | 0.46056290 | 0.46056290 | 0.00e+00 |
+| APm    | 0.77182113 | 0.77182113 | 0.00e+00 |
+| APl    | 0.93431919 | 0.93431919 | 0.00e+00 |
+| AR1    | 0.45457448 | 0.45457448 | 0.00e+00 |
+| AR10   | 0.74556101 | 0.74556101 | 0.00e+00 |
+| AR100  | 0.76167772 | 0.76167772 | 0.00e+00 |
 | ARs    | 0.54570783 | 0.54570783 | 0.00e+00 |
 | ARm    | 0.85891625 | 0.85891625 | 0.00e+00 |
-| ARl    | 0.98103170 | 0.98103170 | 4.44e-16 |
+| ARl    | 0.98103170 | 0.98103170 | 0.00e+00 |
 
 Exact. The residual segmentation once carried (AP ~1e-5) came from polygon
 rasterization, where the reference's C compiler contracts `s*t+ys` into a single
@@ -213,12 +213,12 @@ segm precision tensor on these detections, by up to 0.72 per cell and 1e-5 in AP
 
 | Metric | pycocotools | hotcoco | Diff |
 |--------|-------------|---------|------|
-| AP     | 0.41255451 | 0.41255451 | 1.67e-15 |
-| AP50   | 0.60631206 | 0.60631206 | 1.11e-16 |
-| AP75   | 0.42916428 | 0.42916428 | 1.11e-16 |
-| APm    | 0.40337197 | 0.40337197 | 1.39e-15 |
-| APl    | 0.88304294 | 0.88304294 | 1.44e-15 |
-| AR     | 0.76642003 | 0.76642003 | 1.11e-16 |
+| AP     | 0.41255451 | 0.41255451 | 0.00e+00 |
+| AP50   | 0.60631206 | 0.60631206 | 0.00e+00 |
+| AP75   | 0.42916428 | 0.42916428 | 0.00e+00 |
+| APm    | 0.40337197 | 0.40337197 | 0.00e+00 |
+| APl    | 0.88304294 | 0.88304294 | 0.00e+00 |
+| AR     | 0.76642003 | 0.76642003 | 0.00e+00 |
 | AR50   | 0.97481108 | 0.97481108 | 0.00e+00 |
 | AR75   | 0.80636020 | 0.80636020 | 0.00e+00 |
 | ARm    | 0.62190658 | 0.62190658 | 0.00e+00 |

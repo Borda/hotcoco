@@ -60,6 +60,7 @@ pub mod bootstrap;
 pub mod calibration;
 pub mod confusion;
 pub mod counts;
+pub(crate) mod sum;
 
 /// Whether a metric value was actually computed, as opposed to carrying the
 /// crate's `-1.0` "not computed for this configuration" sentinel.

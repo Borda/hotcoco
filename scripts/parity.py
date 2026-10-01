@@ -3,12 +3,17 @@
 Uses third-party published fake result files from ppwwyyxx/cocoapi.
 See docs/getting-started/installation.md for download instructions.
 
-Tolerances are 1e-12 across the board — tight enough that only floating-point
-noise passes. The threshold grids match `numpy.linspace` bit-for-bit and polygon
-rasterization reproduces the reference's per-architecture rounding (FMA on
-arm64, two roundings on x86-64), so the measured worst case across all 34
-metrics is 3.7e-14. A gate has to be sized to what the code actually does, or
-it stops being a gate.
+hotcoco must match pycocotools exactly: every stat is compared with a
+tolerance of 0.0. The threshold grids match `numpy.linspace` bit-for-bit,
+polygon rasterization reproduces the reference's per-architecture rounding (FMA
+on arm64, two roundings on x86-64), and the summary means visit cells in numpy's
+flattening order and sum them pairwise, as `np.mean` does. A gate has to be
+sized to what the code actually does, or it stops being a gate.
+
+The pinned baseline keeps 1e-12 of slack: it compares pycocotools against a
+recording of pycocotools, possibly made under a different numpy, and it exists
+to catch a metric that moved, not a last-bit change in the reference's own
+summation.
 
 Usage:
     uv run python scripts/parity.py
@@ -21,9 +26,11 @@ import sys
 from helpers import FIXTURES_DIR, VAL2017, compare_metrics, reference_stats, suppress_output
 from hotcoco import COCO, COCOeval
 
-# Files come from `helpers.VAL2017`; the tolerance is this script's own, and is
-# the same for every iou_type — see the module docstring for how it was sized.
-TOL = 1e-12
+# Files come from `helpers.VAL2017`; the tolerances are this script's own, and
+# are the same for every iou_type — see the module docstring for how they were
+# sized.
+TOL = 0.0
+BASELINE_TOL = 1e-12
 
 
 def run_hotcoco(gt_file, dt_file, iou_type):
@@ -63,7 +70,7 @@ all_pass = True
 
 for iou_type, files in VAL2017.items():
     print(f"\n{'=' * 68}")
-    print(f"  {iou_type}  (<= {TOL:.0e})")
+    print(f"  {iou_type}  (exact)")
     print(f"{'=' * 68}")
     print(f"  {'Metric':<8} {'pycocotools':>14} {'hotcoco':>14} {'diff':>12}  status")
     print(f"  {'-' * 58}")
@@ -86,7 +93,7 @@ for iou_type, files in VAL2017.items():
         print("    Regenerate with scripts/gen_val2017_baseline.py.")
         type_pass = False
     else:
-        drift = compare_metrics(expected, py, metric_names, tolerance=TOL)
+        drift = compare_metrics(expected, py, metric_names, tolerance=BASELINE_TOL)
         if drift:
             print(f"\n  BASELINE DRIFT — pinned values were produced by {BASELINE_REF}:")
             for m in drift:

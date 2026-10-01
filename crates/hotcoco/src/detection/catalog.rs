@@ -34,8 +34,8 @@ pub struct MetricDef {
     pub area_lbl: &'static str,
     /// Maximum detections per image for this metric.
     pub max_det: usize,
-    /// LVIS frequency-group AP. When `Some(_)`, all other fields are unused;
-    /// value is mean per-category AP for that frequency bucket.
+    /// LVIS frequency-group AP. When `Some(_)`, the AP is taken over only the
+    /// categories in that frequency bucket.
     pub freq_group: Option<FreqGroup>,
 }
 

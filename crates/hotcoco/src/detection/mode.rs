@@ -66,18 +66,21 @@ impl FreqGroups {
     /// Bucket `categories` by their LVIS `frequency` tag, as positions in
     /// `cat_ids` (the K axis). A category outside `cat_ids`, or without a tag,
     /// lands in no bucket — so the buckets are empty for any non-LVIS dataset.
+    ///
+    /// Each bucket lists its positions in ascending order, as lvis-api does: the
+    /// frequency-group AP is a mean over the bucket's cells in that order.
     pub fn from_categories(categories: &[crate::types::Category], cat_ids: &[u64]) -> Self {
-        let cat_id_to_k_idx: std::collections::HashMap<u64, usize> =
-            cat_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let frequency: std::collections::HashMap<u64, &str> = categories
+            .iter()
+            .filter_map(|cat| Some((cat.id, cat.frequency.as_deref()?)))
+            .collect();
         let mut groups = FreqGroups::default();
-        for cat in categories {
-            if let Some(&k_idx) = cat_id_to_k_idx.get(&cat.id) {
-                match cat.frequency.as_deref() {
-                    Some("r") => groups.rare.push(k_idx),
-                    Some("c") => groups.common.push(k_idx),
-                    Some("f") => groups.frequent.push(k_idx),
-                    _ => {}
-                }
+        for (k_idx, id) in cat_ids.iter().enumerate() {
+            match frequency.get(id) {
+                Some(&"r") => groups.rare.push(k_idx),
+                Some(&"c") => groups.common.push(k_idx),
+                Some(&"f") => groups.frequent.push(k_idx),
+                _ => {}
             }
         }
         groups

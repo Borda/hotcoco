@@ -104,8 +104,8 @@ pip install hotcoco
 ## Performance
 
 Bbox evaluation on COCO val2017 takes **0.07s**; pycocotools takes 5.31s. The
-precision, recall, and scores arrays are bit-identical to pycocotools', and every
-summary metric matches to the limit of double precision.
+precision, recall, and scores arrays and every summary metric are bit-identical to
+pycocotools'.
 
 <figure markdown>
 ![Grouped bar chart of evaluation wall clock for bbox, segm and keypoints across the five libraries](assets/benchmark-speed.png#only-light)

@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`summarize()` stats are bit-identical to pycocotools.** Each mean now
+  visits the selected precision or recall cells in the order numpy flattens
+  them — `[T, R, K]` with the category fastest, where hotcoco walked
+  `[T, K, R]` — and sums them with numpy's pairwise summation instead of
+  left to right. Before, 11 of 12 bbox stats on val2017 differed in the last
+  digit (up to 4e-14); now all 12 match, as do segm and keypoints. LVIS
+  APr, APc, and APf are now one mean over the bucket's precision cells, as
+  lvis-api takes them, rather than a mean of per-category APs; the value is
+  the same, and the last bit now follows lvis-api.
+
 - **`accumulate()` reuses one scratch per thread across (category, area)
   items.** Each item gathered its detections' scores, ranks, sort order, and
   matched and ignore rows into fresh buffers that grew by doubling, with the

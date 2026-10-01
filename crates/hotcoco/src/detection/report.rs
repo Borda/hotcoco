@@ -571,15 +571,17 @@ impl COCOeval {
         // The curve a chart draws must be the curve the headline AP was averaged
         // from, so it reads the same M slot — `max_det_idx`, not the last one.
         let m_idx = self.params.max_det_idx();
+        let mut scratch = Vec::with_capacity(eval.shape.k);
         for (t_idx, &thr) in self.params.iou_thrs.iter().enumerate() {
-            // The inner mean folds its iterator rather than collecting: this runs
-            // T×R times (10×101 on COCO), so a throwaway Vec per recall threshold
-            // would be ~1000 heap allocations per `report()` call.
+            // One scratch buffer for the inner means: this runs T×R times
+            // (10×101 on COCO), so a throwaway Vec per recall threshold would be
+            // ~1000 heap allocations per `report()` call.
             let curve: Vec<f64> = (0..eval.shape.r)
                 .map(|r_idx| {
-                    mean_of_valid((0..eval.shape.k).map(|k_idx| {
+                    let samples = (0..eval.shape.k).map(|k_idx| {
                         eval.precision[eval.precision_idx(t_idx, r_idx, k_idx, a_idx, m_idx)]
-                    }))
+                    });
+                    mean_of_valid(samples, &mut scratch)
                 })
                 .collect();
             report = report.with_curve(format!("pr@{thr:.2}"), curve);
