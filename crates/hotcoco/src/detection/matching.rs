@@ -203,43 +203,35 @@ fn words_for(n_thr: usize, n_areas: usize, nd: usize) -> usize {
     (2 * n_thr * n_areas * nd).div_ceil(64)
 }
 
-/// A pair with nothing to gather, in the layout pass of [`Cells::build`].
-const NO_PAIR: u32 = u32::MAX;
-
 impl Cells {
     /// The arena for `pairs`, sized exactly before anything is written: `nd`
     /// says how many scores a pair will push (`None` for one with nothing to
-    /// gather), then `fill` writes each run of `run_len` pairs through its
-    /// [`CellWriter`], in parallel, into that run's window of every arena.
-    /// `fill` must push exactly the pairs `nd` admitted, with those counts,
-    /// and `run_len` is at least one.
+    /// gather), then `fill` writes each run of pairs through its
+    /// [`CellWriter`] into that run's window of every arena. With
+    /// `Some(run_len)`, runs of `run_len` pairs (at least one) are counted and
+    /// written in parallel; with `None`, all of `pairs` is one run on the
+    /// calling thread. `fill` must push exactly the pairs `nd` admitted, with
+    /// those counts.
     pub(super) fn build(
         params: &Params,
         pairs: &[(u64, u64)],
-        run_len: usize,
+        run_len: Option<usize>,
         nd: impl Fn(u64, u64) -> Option<usize> + Sync,
         fill: impl Fn(&[(u64, u64)], &mut CellWriter<'_>) + Sync,
     ) -> Self {
         let (n_thr, n_areas) = (params.iou_thrs.len(), params.area_ranges.len());
-        let nds: Vec<u32> = pairs
-            .par_iter()
-            .map(|&(img_id, cat_id)| nd(img_id, cat_id).map_or(NO_PAIR, arena_index))
-            .collect();
         // Per run: pairs kept, scores, and bit words.
-        let runs: Vec<(usize, usize, usize)> = nds
-            .par_chunks(run_len)
-            .map(|run| {
-                run.iter()
-                    .filter(|&&nd| nd != NO_PAIR)
-                    .fold((0, 0, 0), |(p, s, w), &nd| {
-                        (
-                            p + 1,
-                            s + nd as usize,
-                            w + words_for(n_thr, n_areas, nd as usize),
-                        )
-                    })
-            })
-            .collect();
+        let count_run = |run: &[(u64, u64)]| {
+            run.iter()
+                .filter_map(|&(img_id, cat_id)| nd(img_id, cat_id))
+                .fold((0, 0, 0), |(p, s, w), nd| {
+                    (p + 1, s + nd, w + words_for(n_thr, n_areas, nd))
+                })
+        };
+        let runs: Vec<(usize, usize, usize)> = match run_len {
+            Some(run_len) => pairs.par_chunks(run_len).map(count_run).collect(),
+            None => vec![count_run(pairs)],
+        };
         let (n_pairs, n_scores, n_words) =
             runs.iter().fold((0, 0, 0), |(p, s, w), &(rp, rs, rw)| {
                 (p + rp, s + rs, w + rw)
@@ -290,13 +282,17 @@ impl Cells {
             scores_base += s;
             bits_base += w;
         }
-        writers
-            .par_iter_mut()
-            .zip(pairs.par_chunks(run_len))
-            .for_each(|(writer, run)| {
-                fill(run, writer);
-                debug_assert!(writer.is_full(), "a run wrote what its layout pass counted");
-            });
+        let write = |(writer, run): (&mut CellWriter<'_>, &[(u64, u64)])| {
+            fill(run, writer);
+            debug_assert!(writer.is_full(), "a run wrote what its layout pass counted");
+        };
+        match run_len {
+            Some(run_len) => writers
+                .par_iter_mut()
+                .zip(pairs.par_chunks(run_len))
+                .for_each(write),
+            None => write((&mut writers[0], pairs)),
+        }
         cells
     }
 

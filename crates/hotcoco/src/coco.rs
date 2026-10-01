@@ -11,6 +11,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use crate::ann_index::{AnnIndex, Duplicates, IdIndex};
 use crate::error::Error;
 use crate::mask;
+use crate::primitives::sim::worth_parallel;
 use crate::types::{Annotation, Category, Dataset, Image, Rle, Segmentation};
 
 /// The COCO dataset API for loading, querying, and indexing annotations.
@@ -526,8 +527,10 @@ impl COCO {
 
         if let Some(kind) = kind {
             // Per annotation and, for masks, an RLE decode each: the one
-            // expensive step of loading results, so it runs in parallel.
-            anns.par_iter_mut().for_each(|ann| {
+            // expensive step of loading results. A decode costs enough to fan
+            // out at any batch size; the other kinds derive a few numbers per
+            // annotation, so they fan out only past the shared threshold.
+            let derive = |ann: &mut Annotation| {
                 // Detection results are never crowd regions, whatever the input
                 // file claimed.
                 ann.iscrowd = false;
@@ -537,7 +540,12 @@ impl COCO {
                     ResultKind::Keypoints => Self::derive_from_keypoints(ann),
                     ResultKind::Obb => Self::derive_from_obb(ann),
                 }
-            });
+            };
+            if matches!(kind, ResultKind::Segm) || worth_parallel(anns.len()) {
+                anns.par_iter_mut().for_each(derive);
+            } else {
+                anns.iter_mut().for_each(derive);
+            }
         }
 
         let dataset = Dataset {

@@ -5,6 +5,7 @@ use rayon::prelude::*;
 
 use super::matching::{Cells, EvalImgContext, IouMatrix, lean_scores_len, push_pair_lean};
 use super::{COCOeval, EvalMode};
+use crate::primitives::sim::worth_parallel;
 
 impl COCOeval {
     /// Populate `params.img_ids` and `params.cat_ids` from the GT dataset if not already set.
@@ -187,25 +188,27 @@ impl COCOeval {
 
         // Compute IoUs only for pairs where both GT and DT are non-empty.
         // Pairs with only GT or only DT produce empty IoU matrices — skip storing them.
-        let iou_results: Vec<((u64, u64), IouMatrix)> = sparse_pairs
-            .par_iter()
-            .filter_map(|&(img_id, cat_id)| {
-                let iou_matrix = Self::compute_iou_static(
-                    &self.coco_gt,
-                    &self.coco_dt,
-                    &self.params,
-                    img_id,
-                    cat_id,
-                    self.eval_mode,
-                    self.segm_rles.as_ref(),
-                );
-                if iou_matrix.is_empty() {
-                    None
-                } else {
-                    Some(((img_id, cat_id), iou_matrix))
-                }
-            })
-            .collect();
+        let iou_of = |&(img_id, cat_id): &(u64, u64)| {
+            let iou_matrix = Self::compute_iou_static(
+                &self.coco_gt,
+                &self.coco_dt,
+                &self.params,
+                img_id,
+                cat_id,
+                self.eval_mode,
+                self.segm_rles.as_ref(),
+            );
+            if iou_matrix.is_empty() {
+                None
+            } else {
+                Some(((img_id, cat_id), iou_matrix))
+            }
+        };
+        let iou_results: Vec<((u64, u64), IouMatrix)> = if self.parallel_pairs() {
+            sparse_pairs.par_iter().filter_map(iou_of).collect()
+        } else {
+            sparse_pairs.iter().filter_map(iou_of).collect()
+        };
 
         // Replaces the cache wholesale, so `collect` sizes the map from the vec's
         // exact length rather than inheriting the previous run's capacity.
@@ -225,6 +228,16 @@ impl COCOeval {
         self.eval_imgs = std::sync::OnceLock::new();
         self.default_eval_imgs = std::sync::OnceLock::new();
         self.eval_inputs = Some(inputs);
+    }
+
+    /// Whether `evaluate()`'s per-pair passes fan out. A pair's IoU and
+    /// matching work scales with its annotations, so the threshold is measured
+    /// against both datasets' annotation counts. A small `StreamingEval` batch
+    /// stays on the calling thread.
+    fn parallel_pairs(&self) -> bool {
+        worth_parallel(
+            self.coco_gt.dataset.annotations.len() + self.coco_dt.dataset.annotations.len(),
+        )
     }
 
     /// Run `f` with the per-cell context for `params`, reading the IoU cache
@@ -282,7 +295,8 @@ impl COCOeval {
             Cells::build(
                 &inputs.params,
                 &inputs.sparse_pairs,
-                super::run_len(inputs.sparse_pairs.len()),
+                self.parallel_pairs()
+                    .then(|| super::run_len(inputs.sparse_pairs.len())),
                 |img_id, cat_id| lean_scores_len(ctx, img_id, cat_id, max_det),
                 |run, cells| {
                     for &(img_id, cat_id) in run {

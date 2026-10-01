@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`StreamingEval.update()` keeps small batches off the thread pool.** Each
+  batch runs `evaluate()`, and its passes — building the annotation index,
+  deriving result geometry, computing IoUs, matching — fanned out to rayon
+  however little work the batch held, so a one-image batch spent more on
+  thread handoff than on evaluation. Those passes now run on the calling
+  thread below the shared parallel-work threshold, the one the IoU kernels
+  already used. Per-image cost at batch size 1 drops about 3×, from 112 µs
+  to 36 µs on val2017 and from 160 µs to 61 µs on Objects365; batch 32 and
+  whole-dataset runs are unchanged. Values are unchanged.
+
 - **`evaluate()` keeps its per-pair records in flat arenas.** Each (image,
   category) pair `evaluate()` visited was one record with two heap vectors —
   its scores and one 32-byte entry per area range — built as one object per

@@ -68,11 +68,22 @@ use crate::geometry::{obb_intersection_area, obb_to_corners};
 use crate::mask::{area as rle_area, intersection_area};
 use crate::types::Rle;
 
-/// Minimum D×G product before a kernel switches from sequential to parallel
-/// (rayon). Below this threshold, thread dispatch overhead exceeds the
-/// parallelism benefit. One constant for every kernel — the per-row work is
+/// Minimum work before a fan-out switches from sequential to parallel (rayon):
+/// the D×G product for a similarity kernel, or the annotation count for a
+/// per-annotation pass. Below this threshold, thread dispatch overhead exceeds
+/// the parallelism benefit. One constant for every site — the per-item work is
 /// independent, so this only trades dispatch overhead, never results.
 const MIN_PARALLEL_WORK: usize = 1024;
+
+/// Whether `work` items are worth a rayon fan-out.
+///
+/// `pub(crate)` so every fan-out in the crate gates on the one
+/// [`MIN_PARALLEL_WORK`] instead of redeclaring it, which the guard in
+/// `tests/architecture.rs` rejects.
+#[inline]
+pub(crate) fn worth_parallel(work: usize) -> bool {
+    work >= MIN_PARALLEL_WORK
+}
 
 /// The shared IoU closing formula, identical across bbox/mask/OBB.
 ///
@@ -102,7 +113,7 @@ pub(crate) fn rows<F>(d: usize, g: usize, compute_row: F) -> Vec<Vec<f64>>
 where
     F: Fn(usize) -> Vec<f64> + Sync + Send,
 {
-    if d * g >= MIN_PARALLEL_WORK {
+    if worth_parallel(d * g) {
         (0..d).into_par_iter().map(compute_row).collect()
     } else {
         (0..d).map(compute_row).collect()

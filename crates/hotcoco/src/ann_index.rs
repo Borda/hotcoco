@@ -25,6 +25,7 @@ use std::ops::Range;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::primitives::sim::worth_parallel;
 use crate::types::Annotation;
 
 /// Annotation ids grouped by image and by (image, category).
@@ -88,8 +89,9 @@ impl AnnIndex {
             *at += 1;
         }
         let by_img: Vec<u64> = keyed.iter().map(|&(_, id)| id).collect();
-        // Per image, in parallel: stably sort its slice by category and
-        // run-length encode the categories that sort produces.
+        // Per image, in parallel past the shared threshold: stably sort its
+        // slice by category and run-length encode the categories that sort
+        // produces.
         let mut slices: Vec<&mut [(u64, u64)]> = Vec::with_capacity(img_ids.len());
         let mut rest = keyed.as_mut_slice();
         for w in img_offsets.windows(2) {
@@ -97,21 +99,26 @@ impl AnnIndex {
             slices.push(head);
             rest = tail;
         }
-        let per_img: Vec<Vec<(u64, u32, u32)>> = slices
-            .into_par_iter()
-            .zip(&img_offsets)
-            .map(|(slice, &start)| {
-                slice.sort_by_key(|&(cat, _)| cat);
-                let mut groups: Vec<(u64, u32, u32)> = Vec::new();
-                for (i, &(cat, _)) in slice.iter().enumerate() {
-                    match groups.last_mut() {
-                        Some((last, _, n)) if *last == cat => *n += 1,
-                        _ => groups.push((cat, start + i as u32, 1)),
-                    }
+        let group = |(slice, &start): (&mut [(u64, u64)], &u32)| {
+            slice.sort_by_key(|&(cat, _)| cat);
+            let mut groups: Vec<(u64, u32, u32)> = Vec::new();
+            for (i, &(cat, _)) in slice.iter().enumerate() {
+                match groups.last_mut() {
+                    Some((last, _, n)) if *last == cat => *n += 1,
+                    _ => groups.push((cat, start + i as u32, 1)),
                 }
-                groups
-            })
-            .collect();
+            }
+            groups
+        };
+        let per_img: Vec<Vec<(u64, u32, u32)>> = if worth_parallel(anns.len()) {
+            slices
+                .into_par_iter()
+                .zip(&img_offsets)
+                .map(group)
+                .collect()
+        } else {
+            slices.into_iter().zip(&img_offsets).map(group).collect()
+        };
         let by_pair = keyed.into_iter().map(|(_, id)| id).collect();
         let mut groups = Vec::with_capacity(per_img.iter().map(Vec::len).sum());
         let mut group_offsets = Vec::with_capacity(per_img.len() + 1);
