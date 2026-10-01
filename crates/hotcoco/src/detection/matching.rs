@@ -193,7 +193,7 @@ impl CellRef {
 }
 
 /// Arena positions are `u32`, like annotation index positions.
-fn arena_index(i: usize) -> u32 {
+pub(super) fn arena_index(i: usize) -> u32 {
     u32::try_from(i).expect("cell arena positions are u32")
 }
 

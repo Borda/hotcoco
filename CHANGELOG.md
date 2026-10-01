@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`accumulate()` reuses one scratch per thread across (category, area)
+  items.** Each item gathered its detections' scores, ranks, sort order, and
+  matched and ignore rows into fresh buffers that grew by doubling, with the
+  matched and ignore rows for every IoU threshold live at once. A thread now
+  keeps one set of buffers, sized exactly from the item's detection count,
+  and sweeps the thresholds one at a time. On ten times val2017's bbox
+  detections (437,000) the RSS growth across `accumulate()` drops from about
+  46 MB to 36 MB and its allocations from 132,000 to 62,000. The output
+  arrays are bit-identical.
+
 - **`StreamingEval.update()` keeps small batches off the thread pool.** Each
   batch runs `evaluate()`, and its passes — building the annotation index,
   deriving result geometry, computing IoUs, matching — fanned out to rayon
