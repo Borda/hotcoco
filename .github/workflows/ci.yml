@@ -81,8 +81,13 @@ jobs:
         with:
           tool: cargo-semver-checks
 
+      # Skipped when `release.yml` calls this workflow for a tag: at that point
+      # the newest published release is by construction the one before, so the
+      # check can only re-report the breaks the release carries on purpose (the
+      # CHANGELOG records those). v1.1.0's first run failed exactly this way and
+      # published nothing. Every push to main still runs it.
       - name: Public API check
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && github.ref_type != 'tag'
         run: cargo semver-checks check-release -p hotcoco
 
   python-lint:
