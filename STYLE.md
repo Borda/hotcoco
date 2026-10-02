@@ -17,13 +17,53 @@ planned.
 Rust `///` and `//!` doc comments, PyO3 `#[doc = "..."]` strings, Python docstrings,
 `.pyi` stubs, CLI `help=` text, and user-facing warning and error messages. They do not
 govern `//` and `#` implementation comments, which answer to the *why, not what* rule in
-`CLAUDE.md` instead.
+`CONTRIBUTING.md` (Code style) instead.
 
 ## Voice
 
-The `docs` skill owns the hotcoco voice — Python-first, singular and confident, lean,
-why-not-what, and plain rather than promotional. Nothing here overrides it. Google supplies the mechanical rules that voice
-guidance leaves open.
+Google supplies the mechanical rules; this section is the voice on top of them.
+
+- **Python-first, data-scientist audience.** Doc comments on public API read like the
+  Polars or numpy docs — plain English, example-driven, no Rust jargon in the prose.
+  Type signatures handle that.
+- **Plain, not promotional.** hotcoco is an open-source project, not a pitch. No
+  taglines, no paired slogans, no sales rhetoric. The test for every sentence: you could
+  say it to a colleague without wincing. State concrete facts in plain verbs — the
+  register of the ruff and uv READMEs. The perception-toolkit framing stays; the sales
+  voice does not.
+- **Singular, confident tone.** Direct imperative: "Run `evaluate()` before calling
+  this."
+- **Lean prose.** Every sentence earns its place. No "It should be noted", no "This
+  function".
+- **Why, not what.** The signature shows what. The doc comment explains intent,
+  tradeoffs, and non-obvious invariants.
+
+For a voice-only pass on a file: fix prose in place, do not touch logic or structure,
+and leave doc comments that are already good alone.
+
+## Canonical homes
+
+Every fact has exactly one page that owns it; every other surface links there instead of
+restating it. Before writing a paragraph, check whether its owner already exists.
+
+| Fact | Owner | Everyone else |
+|---|---|---|
+| Benchmark tables, timing numbers, parity figures | `docs/benchmarks.md` | README and index keep one headline number and a link |
+| Provenance and `"extension"` semantics | `docs/guide/results.md` | one line and a link |
+| camelCase alias table | `docs/getting-started/migration.md` | one note at the top of an API page, never per-method admonitions |
+| `init_as_pycocotools()` usage | `docs/guide/frameworks.md` | a code snippet is fine in README and quickstart; explanation links |
+| RLE `counts` bytes-to-str gotcha | `docs/guide/masks.md` | link |
+| LVIS metric key set | `docs/guide/lvis-open-images.md` | link |
+| Repo-checkout workflows (`just download-coco`, build from source, parity scripts) | `CONTRIBUTING.md` and the benchmarks "Reproducing" section | user-facing pages never include them |
+
+**Guide pages** hold worked examples and interpretation; **API pages** hold signatures,
+parameters, and return shapes. Never copy a return-shape table into a guide. The guide
+splits three ways: the core pipeline in `docs/guide/evaluation.md`, LVIS and Open Images
+protocols in `docs/guide/lvis-open-images.md`, and confusion, TIDE, calibration, and
+comparison in `docs/guide/diagnostics.md`.
+
+Admonitions flag genuine traps only. If the same admonition would appear twice on one
+page, replace all of them with one note at the top.
 
 ## Rules
 
