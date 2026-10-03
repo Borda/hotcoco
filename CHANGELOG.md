@@ -87,6 +87,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   becomes the default exactly, so the numbers are the default grid's and the
   warning goes away. Any other grid is stored as given and still warns. Based
   on [#23](https://github.com/derekallman/hotcoco/pull/23) by Jirka Borovec.
+- **Coding-agent instructions live in `AGENTS.md`,** which Codex and Claude
+  Code both read; `CLAUDE.md` is a one-line import of it. The core-crate
+  architecture rules moved to `crates/hotcoco/AGENTS.md`, and the docs owner
+  map and voice rules moved into `STYLE.md`. Two Claude Code skills are now
+  tracked under `.claude/skills/`: `ship` (the pre-commit checklist) and
+  `bench` (the benchmark-table procedure). Neither file ships in the crate.
 
 ### Fixed
 

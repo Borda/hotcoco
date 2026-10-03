@@ -61,6 +61,15 @@ Rust Core (all logic) ─┤
 
 ## Making changes
 
+### Coding agents
+
+`AGENTS.md` holds the rules a coding agent needs in this repo; Codex reads it
+directly and Claude Code reads it through the one-line `CLAUDE.md`. A second
+`AGENTS.md` under `crates/hotcoco/` covers the core crate's layering. Claude
+Code users also get two skills from `.claude/skills/`: `/ship`, the checklist
+that runs before every commit, and `/bench`, which refreshes the benchmark
+tables. Everything else under `.claude/` is local and ignored.
+
 ### Pre-commit hook
 
 A hook in `.github/hooks/pre-commit` runs formatting, lint, and tests automatically before every commit. Install it once:
