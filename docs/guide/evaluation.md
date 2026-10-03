@@ -267,7 +267,7 @@ ev.accumulate()
 ev.summarize()
 ```
 
-`predictions` is the batch's detections as one list of dicts in the shape `load_res()` accepts — `image_id`, `category_id`, `bbox`, and `score`. Each batch runs through the same code `evaluate()` runs, so the numbers are identical to a batch run over the same annotations, whatever order the images arrive in and however they are batched. Memory stays at about 20 bytes per detection instead of an epoch's worth of prediction dicts. The same recipe evaluates a stored results file in chunks when it is too large to load at once.
+`predictions` is the batch's detections as one list of dicts in the shape `load_res()` accepts — `image_id`, `category_id`, `bbox`, and `score` — or as the `(N, 7)` float64 array `load_res()` accepts, which skips building a dict per detection. Each batch runs through the same code `evaluate()` runs, so the numbers are identical to a batch run over the same annotations, whatever order the images arrive in and however they are batched. Memory stays at about 20 bytes per detection instead of an epoch's worth of prediction dicts. The same recipe evaluates a stored results file in chunks when it is too large to load at once.
 
 ### What `update()` costs
 
@@ -279,7 +279,9 @@ Streaming shortens the wait at the end of the epoch; it does not reduce total CP
 | Building the batch's datasets and loading detections | about 0.04 s | released |
 | Matching | about 0.05 s | released |
 
-So the conversion of dicts, not the matching, is about 70% of `update()`, and it holds the GIL: a thread that needs the interpreter, such as the training loop while a worker thread calls `update()`, waits through it. Only the remaining quarter or so — loading detections and matching — runs without the GIL. A batch run that loads detections from an array pays no per-dict conversion, which is why it can cost less in total.
+So the conversion of dicts, not the matching, is about 70% of `update()`, and it holds the GIL: a thread that needs the interpreter, such as the training loop while a worker thread calls `update()`, waits through it. Only the remaining quarter or so — loading detections and matching — runs without the GIL.
+
+Passing `dt_anns` as the `(N, 7)` float64 array instead skips the per-detection dicts: on the same run `update()` takes about a third as long, and nearly all of what remains runs without the GIL. For `segm`, pass the masks as `segmentation=`, one entry per row.
 
 Each call also has a fixed cost of about 0.3 ms, so pass the detector's whole batch rather than one image at a time: the same run in batches of 4 spends about three times as long in the matching and loading parts. Batches of 32 or more leave that cost under a tenth of `update()`.
 

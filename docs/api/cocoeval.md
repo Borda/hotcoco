@@ -892,7 +892,13 @@ built for, see
 ### `update`
 
 ```python
-se.update(images: list[dict], gt_anns: list[dict], dt_anns: list[dict]) -> None
+se.update(
+    images: list[dict],
+    gt_anns: list[dict],
+    dt_anns: list[dict] | ndarray,
+    *,
+    segmentation: list[dict | list[list[float]]] | None = None,
+) -> None
 ```
 
 Match a batch of images' ground truth against their detections now. `images`
@@ -907,6 +913,14 @@ assigned, `area` derived, `iscrowd` cleared. Within an image, detections with
 tied scores rank in the order given, as they do in a results file, so keep a
 batch's predictions in the order the detector emitted them. An image seen
 again in a later call replaces its earlier result.
+
+`dt_anns` can also be the float64 array `load_res()` accepts, shape `(N, 7)`
+with columns `[image_id, x, y, w, h, score, category_id]`, which skips
+building a dict per detection. An `(N, 6)` array has no category column and
+puts every row in category 1, as `load_res()` does. An id that is NaN or
+negative raises `ValueError`. For `segm`, `segmentation` is a list of `N` RLE
+or polygon entries, one per row; it goes only with an array, since a dict
+carries its own.
 
 Loading and matching run without the GIL; converting the dicts does not.
 The guide has [what `update()` costs](../guide/evaluation.md#what-update-costs).

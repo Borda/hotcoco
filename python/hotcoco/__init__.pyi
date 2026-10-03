@@ -79,9 +79,20 @@ class COCO:
 
     # --- Utilities ---
     def create_index(self) -> None: ...
-    def update_anns(self, anns: list[dict[str, Any]], *, create: bool = False) -> None:
+    def update_anns(
+        self,
+        anns: list[dict[str, Any]] | None = None,
+        *,
+        create: bool = False,
+        ids: npt.ArrayLike | None = None,
+        area: npt.ArrayLike | None = None,
+    ) -> None:
         """Merge each dict into the annotation with its ``id``; an unknown id, or a
-        misspelled field, raises ``KeyError`` unless ``create=True``."""
+        misspelled field, raises ``KeyError`` unless ``create=True``.
+
+        The column form, ``update_anns(ids=ids, area=area)``, writes ``area[i]`` to
+        annotation ``ids[i]`` with no dict per annotation. Pass either the list or
+        ``ids=``, not both."""
         ...
     def stats(self) -> dict[str, Any]: ...
     def healthcheck(self, dt: COCO | None = None) -> dict[str, Any]: ...
@@ -105,6 +116,21 @@ class COCO:
     def to_dota(self, output_dir: str) -> dict[str, int]: ...
     def to_oid(self, output_csv: str) -> dict[str, int]: ...
     def load_res_oid(self, csv_path: str, class_descriptions: str | None = None) -> COCO: ...
+    @staticmethod
+    def from_arrays(
+        images: list[dict[str, Any]],
+        categories: list[dict[str, Any]],
+        image_ids: npt.ArrayLike,
+        category_ids: npt.ArrayLike,
+        boxes: npt.ArrayLike,
+        *,
+        ids: npt.ArrayLike | None = None,
+        area: npt.ArrayLike | None = None,
+        iscrowd: npt.ArrayLike | None = None,
+        rles: list[dict[str, Any] | list[list[float]]] | None = None,
+    ) -> COCO:
+        """A dataset from columns, equal to ``COCO(dict)`` over the same annotations."""
+        ...
     @classmethod
     def merge(cls, datasets: list[COCO]) -> COCO: ...
     @classmethod
@@ -246,6 +272,8 @@ class COCOeval:
 class StreamingEval:
     """Incremental evaluation — feed detector batches as they come, get a ``COCOeval`` back.
 
+    ``dt_anns`` is a list of dicts or the ``(N, 7)`` float64 array ``load_res`` accepts.
+
     ``update()`` raises ``KeyError`` naming every category id in the batch that
     ``categories`` does not list, and leaves the evaluator as it was.
     """
@@ -258,7 +286,12 @@ class StreamingEval:
         params: Params | None = None,
     ) -> None: ...
     def update(
-        self, images: list[dict[str, Any]], gt_anns: list[dict[str, Any]], dt_anns: list[dict[str, Any]]
+        self,
+        images: list[dict[str, Any]],
+        gt_anns: list[dict[str, Any]],
+        dt_anns: list[dict[str, Any]] | npt.NDArray[np.float64],
+        *,
+        segmentation: list[dict[str, Any] | list[list[float]]] | None = None,
     ) -> None: ...
     def finalize(self) -> COCOeval: ...
 

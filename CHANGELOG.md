@@ -17,9 +17,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a set of annotations that the evaluator was not built with, the same check
   `update()` makes, and `Params::set_iou_thrs` / `Params::set_rec_thrs` store a
   threshold grid with the snapping rule described under Changed.
+- **Column-form inputs, with no Python dict per annotation.** Building dicts
+  had become the dominant cost on the caller's side: about 70% of
+  `StreamingEval.update()`. Three additions, all additive:
+  - `StreamingEval.update(images, gt_anns, dt_anns, *, segmentation=None)`
+    takes the `(N, 7)` float64 array `load_res()` accepts as `dt_anns`, with an
+    optional list of `N` RLE or polygon entries for `segm`. On 3,000 images of
+    300 detections, `update()` takes about a third as long with arrays as with
+    dicts. `load_res()` and `update()` read the array through one parser, so an
+    `(N, 6)` array means category 1 in both.
+  - `COCO.from_arrays(images, categories, image_ids, category_ids, boxes, *,
+    ids, area, iscrowd, rles)` builds a dataset equal to `COCO(dict)` over the
+    same annotations. On 300,000 annotations it takes 0.015 s where building
+    the dicts and calling `COCO(dict)` takes 0.294 s. `categories` is a
+    required argument and `area` defaults to each box's `w * h`; `rles` needs
+    an explicit `area`.
+  - `COCO.update_anns(ids=..., area=...)` writes a column of areas by id. On
+    300,000 annotations it takes 0.009 s where the dict form takes 0.091 s
+    with the dicts built. The `anns` argument of `update_anns` is now
+    optional; positional calls are unchanged.
+
+  Based on [#26](https://github.com/derekallman/hotcoco/pull/26) by Jirka
+  Borovec.
 
 ### Changed
 
+- **`load_res()` raises `ValueError` for an array row whose `image_id` or
+  `category_id` is NaN or negative.** The float was cast to an integer that
+  saturated at 0, so such a row became image or category 0, which is a real id
+  in some datasets. pycocotools' `int()` raises on NaN as well.
 - **`StreamingEval.update()` raises `KeyError` for a category it was not built
   with.** A ground truth or detection whose `category_id` is not in
   `categories` used to drop out of every metric without a trace, so an
