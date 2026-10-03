@@ -889,6 +889,12 @@ built for, see
     the same check `update()` makes, for validating data before streaming it.
     It is empty when `params.use_cats` is false.
 
+    `StreamingEval::merge(&mut self, other)`, `to_bytes(&self)`, and
+    `from_bytes(&[u8])` match the Python methods in the following sections,
+    with errors as `Error::Other`. The Rust `merge` takes `other` by value and
+    moves its cells over; `StreamingEval` is `Clone` for a caller that needs
+    to keep it.
+
 ### `update`
 
 ```python
@@ -938,6 +944,49 @@ annotation pools into one.
 
 A NaN score raises the same `RuntimeError` as `load_res()`; so does calling
 this after `finalize()`.
+
+### `merge`
+
+```python
+se.merge(other: StreamingEval) -> None
+```
+
+Fold another `StreamingEval`'s images into this one, as if its `update()`
+calls had been made here. This is how a run split across processes comes back
+together: each rank streams its shard of the images, one rank merges the
+rest, and `finalize()` gives exactly what one stream over every image gives.
+No matching is redone. An image on both sides keeps `other`'s result, the rule
+`update()` applies to an image seen again. `other` is left unchanged and
+usable, so its stored cells are copied into this evaluator, not moved.
+
+Both evaluators must be built the same way: the same `categories`,
+`iou_type`, `lvis_style`, and `params`, `img_ids` included — leave `img_ids`
+empty on every rank rather than setting it to each rank's shard. Categories
+are compared by `id`, `name`, and LVIS `frequency`, in any order. Otherwise
+`merge` raises `ValueError` naming the first field that differs, and this
+evaluator is as it was. A finalized evaluator on either side raises
+`RuntimeError`.
+
+### `to_bytes` and `from_bytes`
+
+```python
+se.to_bytes() -> bytes
+StreamingEval.from_bytes(data: bytes) -> StreamingEval
+```
+
+Save the state and restore it, in this process or another: for example,
+`all_gather` each rank's `to_bytes()`, then `from_bytes()` and `merge()` them on
+one rank. Only what `finalize()` reads is saved, so an image replaced by a
+later `update()` costs nothing, and the size follows the images seen. The
+restored evaluator finalizes to the same numbers, keeps accepting `update()`,
+and merges like any other.
+
+`pickle`, `copy.copy`, and `copy.deepcopy` use the same state, so a metric object that holds
+a `StreamingEval` can be checkpointed or copied. The bytes carry a format
+version, and `from_bytes` raises `ValueError` for bytes that are truncated,
+damaged, or from a version it does not read. Treat them as hotcoco's own
+format, not an interchange format: a release that changes it says so in the
+[changelog](https://github.com/derekallman/hotcoco/blob/main/CHANGELOG.md).
 
 ### `finalize`
 

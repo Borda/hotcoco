@@ -285,6 +285,24 @@ Passing `dt_anns` as the `(N, 7)` float64 array instead skips the per-detection 
 
 Each call also has a fixed cost of about 0.3 ms, so pass the detector's whole batch rather than one image at a time: the same run in batches of 4 spends about three times as long in the matching and loading parts. Batches of 32 or more leave that cost under a tenth of `update()`.
 
+### Across processes
+
+When validation is split across ranks, each rank streams its own images into a `StreamingEval` built from the same categories and params. Gather the states on one rank and merge them; `finalize()` then gives exactly what one stream over every image gives:
+
+```python
+import torch.distributed as dist
+
+states = [None] * dist.get_world_size()
+dist.all_gather_object(states, se.to_bytes())
+if dist.get_rank() == 0:
+    merged = StreamingEval.from_bytes(states[0])
+    for state in states[1:]:
+        merged.merge(StreamingEval.from_bytes(state))
+    ev = merged.finalize()
+```
+
+A `StreamingEval` also pickles, so a metric object that holds one can be checkpointed or sent to another process as it is. The [API reference](../api/cocoeval.md#merge) has the merge rules.
+
 Analyses that need per-image records — TIDE, the confusion matrix, calibration, per-image diagnostics — need a batch `COCOeval`; the [API reference](../api/cocoeval.md#streamingeval) has what the finalized evaluator supports and the restrictions.
 
 ## Where to next

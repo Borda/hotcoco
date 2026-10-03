@@ -39,6 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
   Based on [#26](https://github.com/derekallman/hotcoco/pull/26) by Jirka
   Borovec.
+- **`StreamingEval.merge()`, `to_bytes()` / `from_bytes()`, and pickling.**
+  A run split across processes can now stream each shard on its own rank,
+  `all_gather` the bytes, and merge them on one rank; `finalize()` gives
+  exactly what one stream over every image gives. `merge` takes the other
+  evaluator's cells without matching anything again, lets `other` win an image
+  present in both, and raises `ValueError` naming the first mismatched field
+  when the categories, mode, or params differ. `pickle`, `copy.copy`, and
+  `copy.deepcopy` use the same state, which was a `TypeError` before. The
+  state is versioned, only what `finalize()` reads is saved, and damaged bytes
+  raise `ValueError`. `StreamingEval.__module__` is now `hotcoco`, which pickle
+  needs to find the class again.
+  *Rust API:* `StreamingEval::merge`, `to_bytes`, and `from_bytes`;
+  `StreamingEval` is now `Clone`.
+
+  Based on [#24](https://github.com/derekallman/hotcoco/pull/24) by Jirka
+  Borovec.
 
 ### Changed
 
