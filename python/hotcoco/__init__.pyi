@@ -272,7 +272,7 @@ class COCOeval:
 class StreamingEval:
     """Incremental evaluation — feed detector batches as they come, get a ``COCOeval`` back.
 
-    ``dt_anns`` is a list of dicts or the ``(N, 7)`` float64 array ``load_res`` accepts.
+    ``dt_anns`` is a list of dicts or the ``(N, 7)`` float array ``load_res`` accepts.
 
     ``update()`` raises ``KeyError`` naming every category id in the batch that
     ``categories`` does not list, and leaves the evaluator as it was.
@@ -293,7 +293,7 @@ class StreamingEval:
         self,
         images: list[dict[str, Any]],
         gt_anns: list[dict[str, Any]],
-        dt_anns: list[dict[str, Any]] | npt.NDArray[np.float64],
+        dt_anns: list[dict[str, Any]] | npt.NDArray[np.floating],
         *,
         segmentation: list[dict[str, Any] | list[list[float]]] | None = None,
     ) -> None: ...

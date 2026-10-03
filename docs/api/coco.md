@@ -362,7 +362,9 @@ type:
     ```
 
     **NumPy array** — shape `(N, 7)` with columns `[image_id, x, y, w, h, score, category_id]`,
-    or `(N, 6)` with `category_id` defaulting to `1`. Array must be `float64`.
+    or `(N, 6)` with `category_id` defaulting to `1`, as `float64` or `float32`
+    (a `float32` id is exact only up to 2^24, a property of the array, not of the
+    parser).
     An `image_id` or `category_id` that is NaN or negative raises `ValueError`.
     Matches pycocotools `loadNumpyAnnotations` convention:
     ```python

@@ -233,7 +233,14 @@ class TestArrayDetections:
         with pytest.raises(TypeError, match="list of dicts or a numpy"):
             se.update(images()[:1], [], "detections")
         with pytest.raises(TypeError, match="list of dicts or a numpy"):
-            se.update(images()[:1], [], np.zeros((1, 7), dtype=np.float32))
+            se.update(images()[:1], [], np.zeros((1, 7), dtype=np.int64))
+
+    def test_float32_array_equals_float64(self):
+        """Detectors emit float32; widening it is exact, so nothing has to convert first."""
+        dts = dt_annotations()
+        by_f64 = stats_after(lambda ids: as_array([d for d in dts if d["image_id"] in ids]))
+        by_f32 = stats_after(lambda ids: as_array([d for d in dts if d["image_id"] in ids]).astype(np.float32))
+        assert by_f32 == by_f64
 
     def test_segmentation_with_a_dict_list_raises(self):
         se = StreamingEval(categories())

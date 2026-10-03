@@ -12,16 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`hotcoco.__version__`** names the compiled extension that is loaded. It was
   missing, so `hasattr(hotcoco, "__version__")` was `False` and the install
   check in CONTRIBUTING.md raised `AttributeError`. It equals
-  `importlib.metadata.version("hotcoco")` for an installed wheel.
+  `importlib.metadata.version("hotcoco")` for an installed wheel. Based on
+  [#23](https://github.com/derekallman/hotcoco/pull/23) by Jirka Borovec.
 - *Rust API:* `StreamingEval::unknown_category_ids` returns the category ids in
   a set of annotations that the evaluator was not built with, the same check
   `update()` makes, and `Params::set_iou_thrs` / `Params::set_rec_thrs` store a
   threshold grid with the snapping rule described under Changed.
 - **Column-form inputs, with no Python dict per annotation.** Building dicts
-  had become the dominant cost on the caller's side: about 70% of
+  had become the dominant cost on the caller's side: about two thirds of
   `StreamingEval.update()`. Three additions, all additive:
   - `StreamingEval.update(images, gt_anns, dt_anns, *, segmentation=None)`
-    takes the `(N, 7)` float64 array `load_res()` accepts as `dt_anns`, with an
+    takes the `(N, 7)` float array `load_res()` accepts as `dt_anns`, with an
     optional list of `N` RLE or polygon entries for `segm`. On 3,000 images of
     300 detections, `update()` takes about a third as long with arrays as with
     dicts. `load_res()` and `update()` read the array through one parser, so an
@@ -58,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`load_res()` takes a `float32` array as well as `float64`,** widened once on
+  the way in; so does `StreamingEval.update()`. Detectors emit `float32`, and
+  every caller had to convert first.
 - **`load_res()` raises `ValueError` for an array row whose `image_id` or
   `category_id` is NaN or negative.** The float was cast to an integer that
   saturated at 0, so such a row became image or category 0, which is a real id
@@ -70,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   whole, and leaves the evaluator as it was. A batch `COCOeval` still drops
   such an annotation silently. A category that is listed but excluded by
   `params.cat_ids` is not an error, and with `use_cats` false nothing is
-  checked.
+  checked. Based on [#23](https://github.com/derekallman/hotcoco/pull/23) by
+  Jirka Borovec.
 - **Assigning a `float32` threshold grid to `Params.iou_thrs` or
   `Params.rec_thrs` stores the default grid.** A grid built with
   `torch.linspace` and read back as `float64` sits up to 4e-8 from the
@@ -80,7 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   lands exactly on a grid point that is one ulp too high to include it. A
   grid of the same length with every point within 1e-6 of the default now
   becomes the default exactly, so the numbers are the default grid's and the
-  warning goes away. Any other grid is stored as given and still warns.
+  warning goes away. Any other grid is stored as given and still warns. Based
+  on [#23](https://github.com/derekallman/hotcoco/pull/23) by Jirka Borovec.
 
 ### Fixed
 

@@ -5,6 +5,8 @@
 needed.
 """
 
+import inspect
+
 import hotcoco
 import numpy as np
 import pytest
@@ -125,6 +127,17 @@ class TestFromArrays:
         assert gt.dataset["annotations"] == []
 
     def test_unknown_keyword_raises_type_error(self):
+        assert list(inspect.signature(COCO.from_arrays).parameters) == [
+            "images",
+            "categories",
+            "image_ids",
+            "category_ids",
+            "boxes",
+            "ids",
+            "area",
+            "iscrowd",
+            "rles",
+        ]
         with pytest.raises(TypeError, match="unexpected keyword argument 'crowd'"):
             COCO.from_arrays(IMAGES, CATEGORIES, IMAGE_IDS, CATEGORY_IDS, BOXES, crowd=[0, 0, 0, 0])
 

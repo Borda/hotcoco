@@ -51,7 +51,7 @@ ev.run()
 ### Evaluate
 
 - **COCO, LVIS, and Open Images evaluation** — bbox, segmentation, keypoints, and oriented bounding box (OBB); all standard metrics plus LVIS federated eval (APr/APc/APf) and Open Images hierarchy-aware eval (group-of matching, GT expansion). OBB evaluation uses rotated IoU via polygon clipping for aerial imagery, document analysis, and scene text. See the [evaluation guide](https://derekallman.github.io/hotcoco/guide/evaluation/) and [LVIS and Open Images](https://derekallman.github.io/hotcoco/guide/lvis-open-images/).
-- **Streaming evaluation** — `StreamingEval` matches each image as its detections arrive, so a validation epoch ends with only `accumulate()` and `summarize()` left to run; the numbers are identical to a batch run. See [streaming evaluation](https://derekallman.github.io/hotcoco/guide/evaluation/#streaming-evaluation).
+- **Streaming evaluation** — `StreamingEval` matches each image as its detections arrive, so a validation epoch ends with only `accumulate()` and `summarize()` left to run; the numbers are identical to a batch run. It takes the detector's prediction array directly, and shards streamed on separate ranks merge into one result. See [streaming evaluation](https://derekallman.github.io/hotcoco/guide/evaluation/#streaming-evaluation).
 - **Evaluation reports** — `ev.report()` returns metrics, per-class and per-group breakdowns, plottable PR curves, and a `provenance` field that says whether each number is comparable to a published leaderboard or is a hotcoco extension. See [the evaluation report](https://derekallman.github.io/hotcoco/guide/results/#the-evaluation-report).
 
 ### Diagnose

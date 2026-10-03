@@ -283,7 +283,7 @@ impl PyCOCO {
     ///
     /// - **str** — path to a JSON file containing a list of detection dicts.
     /// - **list[dict]** — detection dicts already in memory.
-    /// - **numpy.ndarray** — float64 array of shape ``(N, 6)`` or ``(N, 7)``,
+    /// - **numpy.ndarray** — float64 or float32 array of shape ``(N, 6)`` or ``(N, 7)``,
     ///   with columns ``[image_id, x, y, w, h, score]`` or
     ///   ``[image_id, x, y, w, h, score, category_id]``.
     ///   Matches pycocotools ``loadNumpyAnnotations`` convention.
@@ -313,9 +313,8 @@ impl PyCOCO {
                 .map_err(to_pyerr);
         }
 
-        // Case 3: numpy float64 array, shape (N, 6) or (N, 7)
-        if let Ok(arr) = res.cast::<PyArray2<f64>>() {
-            let anns = anns_from_array(arr, "load_res", None)?;
+        // Case 3: numpy float array, shape (N, 6) or (N, 7)
+        if let Some(anns) = anns_from_array(res, "load_res", None)? {
             return self
                 .inner
                 .load_res_anns(anns)
@@ -325,7 +324,7 @@ impl PyCOCO {
 
         Err(pyo3::exceptions::PyTypeError::new_err(
             "load_res expects a file path (str), list of annotation dicts, \
-             or numpy float64 array of shape (N, 6) or (N, 7)",
+             or numpy float array of shape (N, 6) or (N, 7)",
         ))
     }
 
@@ -348,9 +347,14 @@ impl PyCOCO {
     /// ``(N, 4)``, or a negative id, and ``TypeError`` for a column that is not
     /// an array or sequence of the right kind.
     #[staticmethod]
-    // The keyword-only columns arrive through `**kwargs` and are named in the
-    // stub: nine parameters would trip clippy's argument limit.
-    #[pyo3(signature = (images, categories, image_ids, category_ids, boxes, **kwargs))]
+    // The keyword-only columns arrive through `**kwargs`: nine parameters would
+    // trip clippy's argument limit. `text_signature` keeps their names visible
+    // to `help()` and `inspect.signature`.
+    #[pyo3(
+        signature = (images, categories, image_ids, category_ids, boxes, **kwargs),
+        text_signature = "(images, categories, image_ids, category_ids, boxes, *, ids=None, \
+                          area=None, iscrowd=None, rles=None)"
+    )]
     fn from_arrays(
         images: &Bound<'_, PyList>,
         categories: &Bound<'_, PyList>,
@@ -1487,20 +1491,37 @@ impl PyCOCO {
     }
 }
 
-/// Detections from the array `load_res` accepts: float64, shape `(N, 6)` or
-/// `(N, 7)`, columns `[image_id, x, y, w, h, score[, category_id]]` — the
-/// pycocotools `loadNumpyAnnotations` convention. A six-column array has no
-/// category column, so every row gets category 1, as in pycocotools.
-/// `segmentation`, when given, holds one entry per row and is set on it.
+/// Detections from the array `load_res` accepts: `float64`, or `float32` as
+/// detectors emit it, shape `(N, 6)` or `(N, 7)`, columns
+/// `[image_id, x, y, w, h, score[, category_id]]` — the pycocotools
+/// `loadNumpyAnnotations` convention. A six-column array has no category
+/// column, so every row gets category 1, as in pycocotools. `segmentation`,
+/// when given, holds one entry per row and is set on it. `None` when `obj`
+/// is not such an array, so the caller names what it accepts instead.
 /// The one owner of the array form: `load_res` and `StreamingEval.update`
 /// both read it here.
 fn anns_from_array(
-    arr: &Bound<'_, PyArray2<f64>>,
+    obj: &Bound<'_, PyAny>,
+    what: &str,
+    segmentation: Option<&Bound<'_, PyList>>,
+) -> PyResult<Option<Vec<Annotation>>> {
+    // `float64` is read in place; `float32` is widened once, which is exact.
+    if let Ok(arr) = obj.cast::<PyArray2<f64>>() {
+        let arr = arr.readonly();
+        return anns_from_rows(arr.as_array(), what, segmentation).map(Some);
+    }
+    if let Ok(arr) = obj.cast::<PyArray2<f32>>() {
+        let wide = arr.readonly().as_array().mapv(f64::from);
+        return anns_from_rows(wide.view(), what, segmentation).map(Some);
+    }
+    Ok(None)
+}
+
+fn anns_from_rows(
+    arr: numpy::ndarray::ArrayView2<'_, f64>,
     what: &str,
     segmentation: Option<&Bound<'_, PyList>>,
 ) -> PyResult<Vec<Annotation>> {
-    let arr = arr.readonly();
-    let arr = arr.as_array();
     let ncols = arr.ncols();
     if ncols != 6 && ncols != 7 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -3027,7 +3048,7 @@ impl PyStreamingEval {
 ``images``: the batch's image dicts, each with at least ``id``.
 ``gt_anns``: their annotations, in the shape ``COCO(dict)`` accepts.
 ``dt_anns``: their raw predictions, in the shape ``load_res()`` accepts and
-loaded the same way: a list of dicts, or a float64 array of shape ``(N, 7)``
+loaded the same way: a list of dicts, or a float array of shape ``(N, 7)``
 with columns ``[image_id, x, y, w, h, score, category_id]`` (an ``(N, 6)``
 array has no category column and puts every row in category 1, as
 ``load_res()`` does). The array skips building a dict per detection.
@@ -3058,11 +3079,11 @@ after ``finalize()``."]
                 ));
             }
             dict_list(list, "dt_anns", py_to_annotation)?
-        } else if let Ok(arr) = dt_anns.cast::<PyArray2<f64>>() {
-            anns_from_array(arr, "update", segmentation)?
+        } else if let Some(anns) = anns_from_array(dt_anns, "update", segmentation)? {
+            anns
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
-                "update expects dt_anns as a list of dicts or a numpy float64 array \
+                "update expects dt_anns as a list of dicts or a numpy float array \
                  of shape (N, 6) or (N, 7)",
             ));
         };

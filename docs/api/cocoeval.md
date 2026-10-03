@@ -920,7 +920,7 @@ tied scores rank in the order given, as they do in a results file, so keep a
 batch's predictions in the order the detector emitted them. An image seen
 again in a later call replaces its earlier result.
 
-`dt_anns` can also be the float64 array `load_res()` accepts, shape `(N, 7)`
+`dt_anns` can also be the `float64` or `float32` array `load_res()` accepts, shape `(N, 7)`
 with columns `[image_id, x, y, w, h, score, category_id]`, which skips
 building a dict per detection. An `(N, 6)` array has no category column and
 puts every row in category 1, as `load_res()` does. An id that is NaN or
@@ -981,8 +981,9 @@ later `update()` costs nothing, and the size follows the images seen. The
 restored evaluator finalizes to the same numbers, keeps accepting `update()`,
 and merges like any other.
 
-`pickle`, `copy.copy`, and `copy.deepcopy` use the same state, so a metric object that holds
-a `StreamingEval` can be checkpointed or copied. The bytes carry a format
+`pickle`, `copy.copy`, and `copy.deepcopy` use the same state, so a metric
+object that holds a `StreamingEval` can be checkpointed or copied. The bytes
+carry a format
 version, and `from_bytes` raises `ValueError` for bytes that are truncated,
 damaged, or from a version it does not read. Treat them as hotcoco's own
 format, not an interchange format: a release that changes it says so in the
