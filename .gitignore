@@ -123,8 +123,13 @@ Thumbs.db
 # Docs build output
 site/
 
-# Claude Code memory
-.claude/
+# Claude Code state. Everything is local except the two shared workflow skills;
+# a skill stays ignored until it has been test-driven.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/ship/
+!.claude/skills/bench/
 
 # Benchmark / annotation data (large files, not in repo)
 /data/
