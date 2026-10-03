@@ -901,6 +901,9 @@ tied scores rank in the order given, as they do in a results file, so keep a
 batch's predictions in the order the detector emitted them. An image seen
 again in a later call replaces its earlier result.
 
+Loading and matching run without the GIL; converting the dicts does not.
+The guide has [what `update()` costs](../guide/evaluation.md#what-update-costs).
+
 A NaN score raises the same `RuntimeError` as `load_res()`; so does calling
 this after `finalize()`.
 
